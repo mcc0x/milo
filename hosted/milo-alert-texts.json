@@ -1,5 +1,8 @@
 [
   "Milo test: Rex alert mirroring can reach this destination. This is not a Rex alert, and nothing else was sent.",
+  "Milo: Rex alert forwarding was enabled.",
+  "Milo: Rex alert forwarding was paused.",
+  "Milo: Rex alert forwarding recovered after an interruption.",
   "Rex: <code>a.b+c_d-e</code> is waiting for permission",
   "Rex: a program is waiting for permission\n<code>&lt;b&gt;@\u200beveryone&lt;/b&gt; &amp; \"quoted\" \\ reversed /start https://t.me/x</code>\n(1 earlier alert was not sent.)",
   "Rex: <code>a.b+c_d-e</code> is waiting for an answer",

@@ -30,7 +30,8 @@ impl fmt::Display for ConsentToken {
     }
 }
 
-const STALE: &str = "Alert destinations or what gets sent changed. Review them again before turning on forwarding.";
+const STALE: &str =
+    "Alert destinations or what gets sent changed. Review them again before enabling forwarding or notices.";
 
 #[derive(Clone, Copy)]
 pub(crate) enum ConsentFor {
@@ -46,25 +47,39 @@ impl ConsentFor {
         }
     }
 
-    fn token(self, settings: &Settings, credentials: [Option<&str>; 2]) -> Option<ConsentToken> {
+    fn token(self, settings: &Settings, credentials: [Option<&str>; 2], notices: [bool; 2]) -> Option<ConsentToken> {
         let targets = self.targets(settings);
         if !targets.contains(&true) {
             return None;
         }
         let [telegram, discord] = targets;
         let [telegram_secret, discord_secret] = credentials;
-        let telegram = if telegram { Some((settings.telegram_chat.as_str(), telegram_secret?)) } else { None };
-        let discord = if discord { Some(discord_secret?) } else { None };
+        let [telegram_notices, discord_notices] = notices;
+        let [telegram_revision, discord_revision] = settings.connection_revision;
+        let telegram = if telegram {
+            Some((settings.telegram_chat.as_str(), telegram_secret?, telegram_notices, telegram_revision))
+        } else {
+            None
+        };
+        let discord = if discord { Some((discord_secret?, discord_notices, discord_revision)) } else { None };
         let scope = match self {
             Self::All => "all",
             Self::Destination(destination) => destination.name(),
         };
-        let reviewed = (scope, telegram, discord, settings.kinds, settings.content.name(), settings.origin);
+        let reviewed = (
+            scope,
+            telegram,
+            discord,
+            settings.kinds,
+            settings.content.name(),
+            settings.origin,
+            settings.disclosure_revision,
+        );
         Some(ConsentToken([0u8, 1].map(|domain| KEY.hash_one((domain, reviewed)))))
     }
 
     fn check(self, settings: &Settings, credentials: [Option<&str>; 2], expected: ConsentToken) -> Result<(), String> {
-        if self.token(settings, credentials) == Some(expected) {
+        if self.token(settings, credentials, settings.bound_notices(credentials)) == Some(expected) {
             Ok(())
         } else {
             Err(STALE.into())
@@ -81,9 +96,9 @@ pub(crate) struct Consent {
 impl Consent {
     pub(super) fn at(settings: &Settings, credentials: [Option<&str>; 2]) -> Self {
         Self {
-            all: ConsentFor::All.token(settings, credentials),
+            all: ConsentFor::All.token(settings, credentials, settings.notices),
             destinations: Destination::ALL
-                .map(|destination| ConsentFor::Destination(destination).token(settings, credentials)),
+                .map(|destination| ConsentFor::Destination(destination).token(settings, credentials, settings.notices)),
         }
     }
 
@@ -112,6 +127,22 @@ impl Alerts {
                     edit.set_forwarding_with(settings, destination, true, Some(credentials))
                 }
             }
+        })
+    }
+
+    /// A confirmation for a previous or less private connection cannot opt in a newer one.
+    pub(crate) fn set_notices_reviewed(
+        &self,
+        destination: Destination,
+        expected: ConsentToken,
+    ) -> Result<String, String> {
+        self.locked(|edit| {
+            let settings = edit.settings().map_err(|_| STALE.to_owned())?;
+            let secret = edit.saved_secret(destination).ok().flatten();
+            let mut credentials = [None; 2];
+            credentials[destination as usize] = secret.as_deref();
+            ConsentFor::Destination(destination).check(&settings, credentials, expected)?;
+            edit.set_notices_with(settings, destination, true, Some(credentials))
         })
     }
 
@@ -144,6 +175,15 @@ impl Settings {
             review.push_str(kind.name());
         }
         review.push('.');
+        let mut notices =
+            Destination::ALL.into_iter().filter(|&target| targets[target as usize] && self.notices[target as usize]);
+        if let Some(first) = notices.next() {
+            let _ = write!(review, "\nLifecycle notices (forwarding status only): {}", first.title());
+            for destination in notices {
+                let _ = write!(review, ", {}", destination.title());
+            }
+            review.push('.');
+        }
         Some(review)
     }
 }

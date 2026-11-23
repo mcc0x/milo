@@ -1,10 +1,11 @@
 //! `milo alerts`: see, choose, test and turn off the mirroring of Rex alerts.
 
 use std::ffi::{OsStr, OsString};
+use std::fmt::Write as _;
 use std::io::{self, BufRead as _, IsTerminal as _, Read as _, Write as _};
 use std::os::fd::AsRawFd as _;
 
-use super::{Alerts, Content, Destination, Kind, Summary, describe, forward, message, parse_kinds};
+use super::{Alerts, Content, Destination, Kind, Summary, describe, forward, lifecycle, message, parse_kinds};
 
 pub(crate) const HELP: &str = "\
 Usage: milo alerts
@@ -16,6 +17,7 @@ Usage: milo alerts
        milo alerts origin on | off
        milo alerts test [telegram | discord]
        milo alerts on|off [telegram | discord]
+       milo alerts notices on|off telegram | discord
        milo alerts forget telegram | discord
        milo alerts forget telegram --local-only
 
@@ -41,6 +43,9 @@ test sends one message written by Milo to the named or selected destination.
 on and off with a provider affect only that provider. Without a provider, off
 pauses all forwarding and on resumes it (or starts with the selected destination
 if none are chosen). forget removes a saved destination and its secret.
+notices opts one saved destination into plain forwarding status: enabled,
+explicitly paused, or recovered. Notices are off by default, carry no Rex
+alert data, and a final pause notice is best effort.
 forget telegram --local-only is only for a Telegram chat connected with Milo
 whose connection service is gone for good, so that forget can never revoke
 the connection. It removes the connection from this machine and revokes
@@ -78,10 +83,26 @@ pub(crate) fn command(action: Option<&OsStr>, rest: &[OsString]) -> Result<(), S
         [Some("on"), Some(name)] => alerts.set_forwarding(destination(name)?, true)?,
         [Some("off")] => alerts.disable()?,
         [Some("off"), Some(name)] => alerts.set_forwarding(destination(name)?, false)?,
+        [Some("notices"), Some("on"), Some(name)] => {
+            alerts.locked(|edit| edit.set_notices(destination(name)?, true))?
+        }
+        [Some("notices"), Some("off"), Some(name)] => {
+            alerts.locked(|edit| edit.set_notices(destination(name)?, false))?
+        }
         [Some("forget"), Some(name)] => alerts.forget(destination(name)?)?,
         [Some("forget"), Some("telegram"), Some("--local-only")] => alerts.forget_telegram_locally()?,
-        [Some("run")] => {
-            return forward::run(&alerts).map_err(|error| format!("could not mirror Rex alerts: {error}"));
+        [Some("send-notice"), Some(name), Some(id)] => {
+            lifecycle::dispatch(&alerts, destination(name)?, u64::from_str_radix(id, 16).map_err(|_| USAGE)?);
+            return Ok(());
+        }
+        [Some("supervise")] => {
+            return forward::supervise(&alerts).map_err(|error| format!("could not supervise Rex alerts: {error}"));
+        }
+        [Some("run"), Some(parent), Some(recovery)] => {
+            let parent = parent.parse().map_err(|_| USAGE)?;
+            let recovery = forward::Recovery::parse(recovery).ok_or(USAGE)?;
+            return forward::run(&alerts, parent, recovery)
+                .map_err(|error| format!("could not mirror Rex alerts: {error}"));
         }
         _ => return Err(USAGE.into()),
     };
@@ -95,16 +116,17 @@ fn destination(name: &str) -> Result<Destination, String> {
 
 fn status(summary: &Summary, place: &str) -> String {
     let settings = &summary.settings;
-    let state = match (settings.has_active(), summary.running) {
-        (true, true) => "on",
-        (true, false) => "on, but not running; run milo alerts on to start it",
-        (false, _) => "off",
-    };
-    let mut report = format!("Rex alert mirroring: {state}\nDestination: {}\n", describe(settings));
+    let health = summary.health.label();
+    let mut report = format!("Rex alert mirroring: {health}\nDestination: {}\n", describe(settings));
     for destination in Destination::ALL {
         let saved = if summary.saved(destination) { "saved" } else { "not saved" };
         let forwarding = if settings.active(destination) { "on" } else { "off" };
-        report.push_str(&format!("  {}: {saved}; forwarding {forwarding}\n", destination.title()));
+        let notices = if settings.notices[destination as usize] { "on" } else { "off" };
+        let _ = writeln!(
+            report,
+            "  {}: {saved}; forwarding {forwarding}; lifecycle notices {notices}",
+            destination.title()
+        );
     }
     report.push_str(&format!("Secrets are kept in {place}.\n{}", message::disclosure(settings)));
     let unchosen: Vec<_> = Kind::ALL.into_iter().filter(|&kind| !settings.mirrors(kind)).map(Kind::name).collect();

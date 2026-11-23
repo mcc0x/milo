@@ -5,6 +5,7 @@
 //! Elsewhere it goes in a file only the user can read, beside Milo's settings.
 //! A secret is never put on a command line, where other programs could see it.
 
+use std::borrow::Cow;
 use std::fs;
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
@@ -23,6 +24,14 @@ const SECRET_LIMIT: u64 = 512;
 /// alone. A release build does not read it.
 const TEST_KEYCHAIN: &str = "MILO_ALERTS_KEYCHAIN";
 
+pub(super) fn test_keychain() -> Option<PathBuf> {
+    cfg!(debug_assertions)
+        .then(|| std::env::var_os(TEST_KEYCHAIN))
+        .flatten()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
 /// A hosted Telegram entry holds the capability and its verified recipient.
 /// Old entries held only the capability; they can be revoked but cannot send.
 pub(super) fn telegram_binding(entry: &str) -> Option<(&str, Option<&str>)> {
@@ -31,18 +40,21 @@ pub(super) fn telegram_binding(entry: &str) -> Option<(&str, Option<&str>)> {
 }
 
 pub(crate) enum Store {
-    /// The user's default keychain, or the keychain file named.
-    Keychain(Option<PathBuf>),
+    /// Each config profile has its own service in the selected Keychain.
+    Keychain {
+        path: Option<PathBuf>,
+        service: Cow<'static, str>,
+    },
     File(PathBuf),
 }
 
 impl Store {
     /// On macOS the Keychain. Elsewhere a file in `state`, which, unlike the
     /// settings folder, is not meant to be copied to another machine.
-    pub(crate) fn real(state: &Path) -> Self {
+    pub(super) fn real(state: &Path, keychain: Option<PathBuf>, scope: Option<&str>) -> Self {
         if cfg!(target_os = "macos") {
-            let named = cfg!(debug_assertions).then(|| std::env::var_os(TEST_KEYCHAIN)).flatten();
-            Self::Keychain(named.map(PathBuf::from).filter(|path| path.is_absolute()))
+            let service = scope.map_or(Cow::Borrowed(SERVICE), |scope| Cow::Owned(format!("{SERVICE}.{scope}")));
+            Self::Keychain { path: keychain, service }
         } else {
             Self::File(state.join("alerts-secrets"))
         }
@@ -51,17 +63,17 @@ impl Store {
     /// Where secrets are kept, to tell the user.
     pub(crate) fn place(&self) -> &'static str {
         match self {
-            Self::Keychain(_) => "your macOS Keychain",
+            Self::Keychain { .. } => "your macOS Keychain",
             Self::File(_) => "a file only you can read (alerts-secrets, in Milo's state folder)",
         }
     }
 
     pub(crate) fn get(&self, destination: Destination) -> io::Result<Option<String>> {
         match self {
-            Self::Keychain(keychain) => {
+            Self::Keychain { path, service } => {
                 let mut find = Command::new(SECURITY);
-                find.args(["find-generic-password", "-s", SERVICE, "-a", destination.name(), "-w"]);
-                let output = find.args(keychain).stdin(Stdio::null()).stderr(Stdio::null()).output()?;
+                find.args(["find-generic-password", "-s", service.as_ref(), "-a", destination.name(), "-w"]);
+                let output = find.args(path).stdin(Stdio::null()).stderr(Stdio::null()).output()?;
                 match output.status.code() {
                     Some(0) => String::from_utf8(output.stdout)
                         .map(|secret| Some(secret.trim_end().to_owned()))
@@ -82,14 +94,14 @@ impl Store {
             return Err(ErrorKind::InvalidInput.into());
         }
         match self {
-            Self::Keychain(keychain) => {
-                let keychain = match keychain {
+            Self::Keychain { path, service } => {
+                let keychain = match path {
                     Some(path) => format!(" \"{}\"", quotable(path)?),
                     None => String::new(),
                 };
                 // Commands read from standard input keep the secret off the command line.
                 let add = format!(
-                    "add-generic-password -U -s {SERVICE} -a {} -l \"Milo alert mirroring\" -w {secret}{keychain}\n",
+                    "add-generic-password -U -s {service} -a {} -l \"Milo alert mirroring\" -w {secret}{keychain}\n",
                     destination.name()
                 );
                 let mut security = Command::new(SECURITY)
@@ -119,11 +131,11 @@ impl Store {
 
     pub(crate) fn remove(&self, destination: Destination) -> io::Result<()> {
         match self {
-            Self::Keychain(keychain) => {
+            Self::Keychain { path, service } => {
                 let mut delete = Command::new(SECURITY);
-                delete.args(["delete-generic-password", "-s", SERVICE, "-a", destination.name()]);
+                delete.args(["delete-generic-password", "-s", service.as_ref(), "-a", destination.name()]);
                 let status =
-                    delete.args(keychain).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status()?;
+                    delete.args(path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status()?;
                 match status.code() {
                     Some(0 | NOT_FOUND) => Ok(()),
                     _ => Err(io::Error::other("the Keychain did not answer")),

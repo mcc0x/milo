@@ -709,7 +709,7 @@ async function checkHostedConnections(page, destination) {
     saved.push(body);
     const alerts = {...state.alerts};
     alerts.destination ??= provider;
-    alerts[provider] = {saved: true, active: false, consent: alertConsents[provider],
+    alerts[provider] = {saved: true, active: false, notices: false, consent: alertConsents[provider],
       ...(provider === 'telegram' ? {chat, needs_local_forget: false} : {})};
     state = {...state, version: state.version + 1, alerts, message: null};
     await route.fulfill({json: state});
@@ -731,6 +731,13 @@ async function checkHostedConnections(page, destination) {
       assert(alerts[destination].saved, 'only a saved provider can be toggled');
       alerts[destination] = {...alerts[destination], active: enabled};
       alerts.running = alerts.enabled = alerts.telegram.active || alerts.discord.active;
+      alerts.health = alerts.running ? 'Listening' : 'Paused';
+    } else if (field === 'notices') {
+      const {destination, enabled, consent} = value;
+      assert.equal(consent, enabled ? alertConsents[destination] : undefined);
+      assert(alerts[destination].saved, 'only a saved provider can receive notices');
+      scoped.push({field, value});
+      alerts[destination] = {...alerts[destination], notices: enabled};
     } else if (field === 'test') {
       scoped.push({field, value});
       const provider = providers.find(({provider}) => provider === value);
@@ -740,7 +747,7 @@ async function checkHostedConnections(page, destination) {
       assert.equal(value, 'telegram', 'local forget is scoped to Telegram');
       assert(alerts.telegram.needs_local_forget);
       scoped.push({field, value});
-      alerts.telegram = {saved: false, active: false, chat: '', consent: null, needs_local_forget: false};
+      alerts.telegram = {saved: false, active: false, notices: false, chat: '', consent: null, needs_local_forget: false};
       alerts.destination = 'discord';
       message = {text: 'Removed the locally saved Telegram connection.', error: false};
     } else {
@@ -944,10 +951,30 @@ async function checkHostedConnections(page, destination) {
     await status(manager, 'Discord accepted the test message.').waitFor();
     await button(manager, 'Send test to Telegram').click();
     await status(manager, 'Telegram accepted the test message.').waitFor();
+    const noticeSwitch = (name, checked) => manager.getByRole('switch', {name: `Lifecycle notices for ${name}`, checked});
+    const noticeConfirm = dialog(page, 'Turn on lifecycle notices?');
+    const beforeNotices = scoped.length;
+    await noticeSwitch('Discord', false).press('Space');
+    await noticeConfirm.getByText(/Destination: Discord channel/).waitFor();
+    await noticeConfirm.getByText(/Notices don’t include Rex alerts or program text/).waitFor();
+    await noticeConfirm.getByText(/never include Rex origin labels/).waitFor();
+    assert.equal(await noticeConfirm.getByText(/up to 300 characters|Origin label: on\./).count(), 0);
+    await button(noticeConfirm, 'Keep editing').click();
+    assert.equal(scoped.length, beforeNotices, 'cancel did not apply the notice choice');
+    assert(await noticeSwitch('Discord', false).evaluate(control => document.activeElement === control));
+    await noticeSwitch('Discord', false).press('Space');
+    await button(noticeConfirm, 'Turn on').click();
+    await noticeSwitch('Discord', true).waitFor();
+    await noticeSwitch('Telegram', false).waitFor();
+    await manager.getByRole('switch', {name: 'Forward to Discord', checked: false}).waitFor();
     const confirmation = dialog(page, 'Turn on alert forwarding?');
     for (const [name, target] of [['Telegram', 'Telegram chat 1234'], ['Discord', 'Discord channel']]) {
       await manager.getByRole('switch', {name: `Forward to ${name}`, checked: false}).click();
       await confirmation.getByText(`Destination: ${target}.`, {exact: false}).waitFor();
+      await confirmation.getByText(/up to 300 characters/).waitFor();
+      await confirmation.getByText(/Origin label: on\./).waitFor();
+      await confirmation.getByText(/Rex’s own notifications are unchanged/).waitFor();
+      assert.equal(await confirmation.getByText(/Notices don’t include Rex alerts or program text/).count(), name === 'Discord' ? 1 : 0);
       await button(confirmation, 'Turn on').click();
       await manager.getByRole('switch', {name: `Forward to ${name}`, checked: true}).waitFor();
     }
@@ -958,10 +985,32 @@ async function checkHostedConnections(page, destination) {
     assert.deepEqual(scoped, [
       {field: 'test', value: 'discord'},
       {field: 'test', value: 'telegram'},
+      {field: 'notices', value: {destination: 'discord', enabled: true, consent: alertConsents.discord}},
       {field: 'forwarding', value: {destination: 'telegram', enabled: true, consent: alertConsents.telegram}},
       {field: 'forwarding', value: {destination: 'discord', enabled: true, consent: alertConsents.discord}},
       {field: 'forwarding', value: {destination: 'telegram', enabled: false}},
     ]);
+
+    await button(manager, 'Discord').getByText('Listening', {exact: true}).waitFor();
+    await noticeSwitch('Discord', true).click();
+    await noticeSwitch('Discord', false).waitFor();
+    assert.deepEqual(scoped.at(-1), {field: 'notices', value: {destination: 'discord', enabled: false}});
+    assert(await manager.getByRole('switch', {name: 'Forward to Discord'}).isChecked(),
+      'turning off notices keeps Discord forwarding');
+
+    await button(manager, 'Close destinations').click();
+    const summary = destination.locator('#group-alerts-status');
+    assert.equal(await summary.textContent(), 'Listening');
+    const beforeRefresh = scoped.length;
+    state = {...state, alerts: {...state.alerts, running: false, health: 'Waiting for Rex'}};
+    const refresh = button(destination, 'Refresh status');
+    await refresh.press('Enter');
+    await status(destination, 'Waiting for Rex').waitFor();
+    assert.equal(scoped.length, beforeRefresh, 'refresh did not edit forwarding preferences');
+    assert(await refresh.evaluate(control => document.activeElement === control), 'refresh retained keyboard focus');
+    await button(destination, 'Manage destinations').click();
+    await manager.getByRole('switch', {name: 'Forward to Discord', checked: true}).waitFor();
+    await noticeSwitch('Discord', false).waitFor();
 
     // Another local editor restored an old credential just before the user tried to reconnect.
     await button(manager, 'Telegram').click();
@@ -1024,7 +1073,6 @@ async function checkTelegramWizard(page, destination) {
   const initial = await page.request.get(new URL('/api/state', url).href, {headers: {authorization}});
   assert(initial.ok(), 'the real editor supplied the initial fixture state');
   let state = await initial.json();
-  const initialVersion = state.version;
   const fakeToken = 'smoke-test-token-not-a-credential';
   const chatId = '-1001234567890';
   const providerError = 'provider diagnostic must not appear in the dashboard';
@@ -1053,8 +1101,9 @@ async function checkTelegramWizard(page, destination) {
     await route.fulfill(reply);
   };
   const saveTelegram = async route => {
-    const action = route.request().postDataJSON();
+    const {version, ...action} = route.request().postDataJSON();
     if (action.action !== 'alerts') return route.fallback();
+    assert.equal(version, state.version, 'each alert action uses the current fixture revision, including after refresh');
     if (action.field === 'refresh') {
       state = {...state, version: state.version + 1};
       return route.fulfill({json: state});
@@ -1063,7 +1112,7 @@ async function checkTelegramWizard(page, destination) {
     received.push(action);
     if (action.value.chat === rejectedChat) return route.fulfill({status: 400, json: {error: saveError}});
     state = {...state, version: state.version + 1, alerts: {...state.alerts,
-      destination: 'telegram', telegram: {saved: true, active: false, chat: action.value.chat,
+      destination: 'telegram', telegram: {saved: true, active: false, notices: false, chat: action.value.chat,
         consent: null, needs_local_forget: false}}};
     await route.fulfill({json: state});
   };
@@ -1138,8 +1187,8 @@ async function checkTelegramWizard(page, destination) {
       }
     }
     assert.equal(lookups, replies.length);
-    assert.deepEqual(received, [chatId, rejectedChat, '@public_channel'].map((chat, index) => ({
-      action: 'alerts', field: 'telegram', value: {token: fakeToken, chat}, version: initialVersion + index,
+    assert.deepEqual(received, [chatId, rejectedChat, '@public_channel'].map(chat => ({
+      action: 'alerts', field: 'telegram', value: {token: fakeToken, chat},
     })), 'discovered and manual chat IDs use the same Telegram save action');
     await button(wizard, 'Close destinations').click();
   } finally {
@@ -1153,15 +1202,33 @@ async function checkAlerts(page) {
   await section(page, 'Integrations').click();
   await button(page, 'Alert forwarding').click();
   const destination = page.getByRole('region', {name: 'Destinations', exact: true});
+  await status(destination, /^Off$/).waitFor();
   await button(destination, 'Set up destination').click();
   const manager = dialog(page, 'Destinations');
   assert.equal(await manager.getByRole('switch').count(), 0, 'unconfigured providers cannot forward');
   assert.equal(await manager.getByRole('button', {name: /^Send test to /}).count(), 0, 'unconfigured providers cannot send tests');
   await button(manager, 'Close destinations').click();
+  const content = page.getByRole('group', {name: 'Content', exact: true});
+  const origin = page.getByRole('switch', {name: 'Include Rex origin label', exact: true});
+  assert.equal(await origin.isChecked(), false, 'old and new settings do not share labels');
+  await content.getByRole('radio', {name: 'Also program text'}).click();
+  await page.getByText(/up to 300 characters/i).first().waitFor();
+  assert.equal(await origin.isChecked(), false, 'selecting text does not share origin labels');
+  await origin.click();
+  await page.getByText(/Origin label: on\./).first().waitFor();
+
   await checkHostedConnections(page, destination);
   await page.reload(); // Drop the hosted route fixture before checking manual setup.
   await section(page, 'Integrations').click();
-  await button(page, 'Alert forwarding').click();
+  // Take the manual wizard's fixture snapshot only after the real entry refresh
+  // commits; otherwise the browser is already one revision ahead of the fixture.
+  await Promise.all([
+    page.waitForResponse(response => response.url().endsWith('/api/action')
+      && response.request().postDataJSON()?.field === 'refresh' && response.ok()),
+    button(page, 'Alert forwarding').click(),
+  ]);
+  assert(await content.getByRole('radio', {name: 'Also program text'}).isChecked(), 'the alert disclosure follows the persisted choice');
+  assert(await origin.isChecked(), 'the separate origin choice persists');
   await checkTelegramWizard(page, destination);
   await page.reload(); // Drop the route fixture's Telegram destination before testing real settings.
   await section(page, 'Integrations').click();
@@ -1181,19 +1248,6 @@ async function checkAlerts(page) {
   await button(page, 'Use your own webhook').click();
   assert.equal(await webhook.inputValue(), '', 'closing destination setup forgets unsaved credentials');
   await button(page, 'Close destinations').click();
-  const content = page.getByRole('group', {name: 'Content', exact: true});
-  const origin = page.getByRole('switch', {name: 'Include Rex origin label', exact: true});
-  assert.equal(await origin.isChecked(), false, 'old and new settings do not share labels');
-  await content.getByRole('radio', {name: 'Also program text'}).click();
-  await page.getByText(/up to 300 characters/i).first().waitFor();
-  assert.equal(await origin.isChecked(), false, 'selecting text does not share origin labels');
-  await origin.click();
-  await page.getByText(/Origin label: on\./).first().waitFor();
-  await page.reload();
-  await section(page, 'Integrations').click();
-  await button(page, 'Alert forwarding').click();
-  assert(await content.getByRole('radio', {name: 'Also program text'}).isChecked(), 'the alert disclosure follows the persisted choice');
-  assert(await origin.isChecked(), 'the separate origin choice persists');
   await content.getByRole('radio', {name: 'Kind and program name'}).click();
   await page.getByText(/no text from the program/i).first().waitFor();
   assert(await origin.isChecked(), 'metadata-only does not discard the origin choice');

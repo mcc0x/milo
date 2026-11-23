@@ -30,10 +30,11 @@ export interface PresenceState {
 export interface AlertsState {
   enabled: boolean;
   running: boolean;
+  health: string;
   destination: AlertDestination | null;
   consent: string | null;
-  telegram: {saved: boolean; active: boolean; chat: string; consent: string | null; needs_local_forget: boolean};
-  discord: {saved: boolean; active: boolean; consent: string | null};
+  telegram: {saved: boolean; active: boolean; notices: boolean; chat: string; consent: string | null; needs_local_forget: boolean};
+  discord: {saved: boolean; active: boolean; notices: boolean; consent: string | null};
   events: Record<AlertKind, boolean>;
   content: 'metadata' | 'text';
   origin: boolean;

@@ -620,11 +620,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
 
     /// The browser can remember geometry without setting up Rex. Keep draft
     /// interpretation, conflict detection and trial finalization shared.
-    fn persist_layout(
-        &mut self,
-        scope: Scope,
-        integrate_rex: bool,
-    ) -> Result<SaveNotice, &'static str> {
+    fn persist_layout(&mut self, scope: Scope, integrate_rex: bool) -> Result<SaveNotice, &'static str> {
         let auto_changed = self.auto_arrange_dirty();
         let draft_auto = self.layout.new_tabs;
         let before = self.saved.as_ref().ok_or("Reopen Settings before saving the layout.")?;
@@ -1509,6 +1505,10 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Key::Char('u') if self.inside && !modal => Some(Row::Undo),
             Key::Char('r') if self.panel == Panel::Diagnostics => {
                 self.refresh_health();
+                return After::Stay;
+            }
+            Key::Char('r') if self.panel == Panel::Alerts => {
+                self.refresh_alerts();
                 return After::Stay;
             }
             Key::Char('r') if self.inside && matches!(self.panel, Panel::Layout | Panel::Tune) => {

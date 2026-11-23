@@ -187,9 +187,11 @@ Mirroring stays off until the user turns it on. The setup screen and the browser
 
 A secret goes from standard input or the browser editor to `secret.rs` and from there to curl's standard input. Never put one in an argument, a settings file, a status note, a log, or anything sent back to a settings page. Destinations are fixed hosts; do not add one the user can type.
 
+Lifecycle notice consent is bound to the exact provider credential and, for Telegram, the chat. The versioned local tag is salted separately for each approval; it is not a credential and cannot be used to send a message. Do not accept a missing, unknown, or mismatched tag. If Rust changes the hash algorithm used by the tag, notices require explicit reapproval; regular forwarding and saved connections are unchanged.
+
 `cargo test alerts` runs the unit tests and `cargo test --test alerts` runs the real `milo alerts` against stand-ins: a `rex` that prints the events a test writes, and a server on the loopback address for both destinations. `MILO_ALERTS_TEST_ENDPOINT` names that server, and is refused unless it is `http://127.0.0.1:PORT`. On macOS `MILO_ALERTS_KEYCHAIN` names a keychain file of the test's own, so that tests never touch yours. Only a development build reads either variable: a release build has no setting that changes where a secret is kept or sent, so with `--release` these tests do nothing. No test may use a real token, webhook or chat, or post to Telegram or Discord.
 
-To try it against Rex itself, use a disposable server as `tests/rex_lab.rs` does and a development build, with those two variables set and a local server in place of the destinations. A program in a lab terminal raises a synthetic alert with `printf '\033]7501;state=blocked:kind=permission:app=synthetic\033\\'`.
+`cargo test --test alerts real_rex -- --ignored` exercises the real event subscription against an installed Rex, still with a loopback destination and a throwaway home, settings, state, keychain and socket. Set `MILO_TEST_REX` if the executable isn't on `PATH`. The test stops and restarts only its own server, then checks that a fresh program-status alert arrives exactly once without re-enabling forwarding. The non-ignored tests use the controllable stream to exercise flapping, worker exits and a pause during backoff.
 
 ### Changing support for several Rex hosts
 
@@ -488,7 +490,8 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/width.rs` | Measures and shortens text in terminal columns. |
 | `src/width/data.rs` | Lists the Unicode 17.0.0 ranges of nonspacing marks and wide characters. |
 | `src/workflow.rs` | Retargets a pane to the worktree of the shell it was opened beside, when the user chose to follow it. |
-| `tests/alerts.rs` | Runs `milo alerts` with stand-ins for Rex, Telegram and Discord: opt-in, repeats, failures, rate limits and turning off. |
+| `tests/alerts.rs` | Starts real workers with disposable Rex and destination stand-ins; checks flaps, crashes, pause during retries, isolated providers, cancellations and notice counts. |
+| `tests/alerts/real_rex.rs` | Repeats the disconnect/reconnect scenario with a disposable Rex server, private Unix socket and a loopback destination. With Rex installed, run `cargo test --test alerts real_rex -- --ignored`. |
 | `tests/backend_reader.py` | Profiles reader tabs, large handed patches, memory and input during a held Git read in a disposable terminal. |
 | `tests/backend_refresh.py` | Counts real Git processes through project discovery, warm refresh and watcher bursts in synthetic worktrees. |
 | `tests/bench/report.rs` | Chooses the builds a timing test runs and writes its report beside a base build's. |

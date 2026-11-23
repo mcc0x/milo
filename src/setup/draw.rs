@@ -172,12 +172,12 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             self.draw_diagnostics(s, y, end);
             return;
         }
+        let width = s.w.saturating_sub(2);
         if self.panel == Panel::Confirm(Confirm::MirrorAlerts) {
-            self.draw_alert_review(s, y, end);
+            self.draw_alert_review(s, y, end, width);
             return;
         }
 
-        let width = s.w.saturating_sub(2);
         let selected = rows.get(self.selected).map(|&row| (row, self.cell(row)));
         let detail_width = s.w - 1;
         let summary = selected
@@ -277,8 +277,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         }
     }
 
-    fn draw_alert_review(&mut self, s: &mut Screen, mut y: usize, end: usize) {
-        let width = s.w - 2;
+    fn draw_alert_review(&mut self, s: &mut Screen, mut y: usize, end: usize, width: usize) {
         let spare = end.saturating_sub(y + self.rows().len());
         if let Some((summary, token)) = self
             .alert_summary
@@ -297,10 +296,21 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                      if available. That text can name files or quote a prompt."
                 }
             };
-            let lines = wrap(&destinations, width).chain(wrap(payload, width)).chain(wrap(origin, width));
-            if lines.clone().take(spare + 1).count() <= spare {
+            let lines = wrap(&destinations, width)
+                .chain(wrap(payload, width))
+                .chain(wrap(origin, width))
+                .chain(wrap("Rex's own notifications are unchanged.", width));
+            // Approve only the exact review shown. The narrow label "On + labels" needs 14 columns with gutters.
+            if s.w >= 14 && lines.clone().take(spare + 1).count() <= spare {
                 self.visible.alert_review = Some(token);
                 for line in lines {
+                    s.put(1, y, width, line, FAINT);
+                    y += 1;
+                }
+            } else {
+                for line in
+                    wrap("Use milo web or make this pane bigger to review and turn on forwarding.", width).take(spare)
+                {
                     s.put(1, y, width, line, FAINT);
                     y += 1;
                 }
@@ -373,9 +383,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             },
             Panel::Alerts => match &self.alert_summary {
                 None => "Alert settings unreadable",
-                Some(summary) if !summary.settings.enabled => "Off",
-                Some(summary) if summary.running => "On",
-                Some(_) => "On, but not running",
+                Some(summary) => summary.health.label(),
             },
             Panel::Health if !self.inside => "Outside Rex",
             Panel::Health if self.saved.is_none() => "Rex settings unreadable",
@@ -414,9 +422,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Health => "Inspect settings without changing them. Repair or remove only Milo's integration.",
             Panel::Diagnostics => return None,
             Panel::Exit => "Save before leaving?",
-            Panel::Save(SaveKind::Layout) if self.only_auto_arrange_dirty() => {
-                "Auto-arrange needs a global save."
-            }
+            Panel::Save(SaveKind::Layout) if self.only_auto_arrange_dirty() => "Auto-arrange needs a global save.",
             Panel::Save(SaveKind::Layout) => {
                 "On save: install or update Milo's Rex actions. Auto-arrange changes only with a global save."
             }
@@ -489,6 +495,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Diagnostics if full => ("r refresh", &["↑ up", "↓ down", "? help"]),
             Panel::Diagnostics if compact => ("r refresh", &["↑", "↓", "?"]),
             Panel::Diagnostics => ("r", &["↑", "↓", "?"]),
+            Panel::Alerts => (if compact { "r refresh" } else { "r" }, if full { &["? help"] } else { &["?"] }),
             _ if full && self.panel.tab().is_some() => ("Tab sections", &["? help"]),
             _ => ("", if compact { &["? help"] } else { &["?"] }),
         };
@@ -852,7 +859,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     Some(destination) => destination.title(),
                     None => "None saved",
                 },
-                "Choose a saved destination for tests. To enable Telegram and Discord independently, open Alert forwarding in milo web.",
+                "Choose a saved destination for tests. Use Alert forwarding in milo web for per-destination forwarding and lifecycle notices.",
             ),
             Row::AlertKind(kind) => {
                 let (label, short, detail) = match kind {
@@ -1030,11 +1037,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                         .as_ref()
                         .is_some_and(|summary| summary.consent.token(alerts::ConsentFor::All).is_some())
                     {
-                        Cell::action(
-                            "Enlarge pane to review",
-                            "Enlarge pane",
-                            "Enlarge the pane to see what would be sent.",
-                        )
+                        Cell::action("Use milo web", "milo web", "")
                     } else {
                         Cell::action("No saved destination to review", "No destination", "Nothing will be turned on.")
                     }
@@ -1086,7 +1089,7 @@ impl Panel {
             Self::Presence => "Discord presence",
             Self::Appearance => "Appearance",
             Self::Workflow => "Workflow",
-            Self::Alerts => "Mirror Rex alerts",
+            Self::Alerts => "Alerts",
             Self::Health => "Health",
             Self::Diagnostics => "Diagnostics",
             Self::Save(SaveKind::Layout) => "Save layout for…",

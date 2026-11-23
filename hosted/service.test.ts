@@ -750,6 +750,15 @@ test("an origin is a bounded literal name, never markup or a command", () => {
   }
 });
 
+test("production lifecycle notices cannot carry an origin label or event text", () => {
+  for (const status of ["was enabled", "was paused", "recovered after an interruption"]) {
+    const notice = `Milo: Rex alert forwarding ${status}.`;
+    for (const suffix of [" · <code>release-review</code>", "\n<code>private task</code>"]) {
+      expect(validTelegramText(notice + suffix, true)).toBe(false);
+    }
+  }
+});
+
 test("production Telegram pauses sends until its poll catches up and applies verified stops", async () => {
   using ledger = testLedger();
   const credential = `milorelay_prod_${ledger.store.issuer}${"x".repeat(27)}`;
