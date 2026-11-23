@@ -257,7 +257,7 @@ fn report_with_worktree(
             }
             write_rex_installation(&mut out, &mut health, store, &executable, rex::layout_available())?;
         }
-        Ok(_) => out.push_str("Rex: not installed; open milo setup in Rex to add the integration.\n"),
+        Ok(_) => out.push_str("Rex integration: not installed (optional). Run milo setup inside Rex to arrange panes.\n"),
         Err(LayoutError::Rex(LOADER_CONFLICT)) => writeln!(
             out,
             "Rex loader conflict ({:?}): {LOADER_CONFLICT} Restore a single copy of the original two lines at the top, after any interpreter line.",

@@ -306,12 +306,10 @@ pub fn open(root: &Path, file: &Path, commit: Option<&str>, previous: Option<&st
 
 /// Opens a floating review of the patch in `patch` in the caller's tab.
 /// `from` is shown as the name of whoever handed the patch over.
-pub fn open_review(root: &Path, patch: &Path, from: Option<&str>) -> Result<(), &'static str> {
-    const FAILED: &str = "Rex did not open the review.";
-    let target = Target::current()
-        .ok_or("--float needs a Rex pane; elsewhere, run milo review PATCH in a terminal")?;
+pub fn open_review(target: &Target, root: &Path, patch: &Path, from: Option<&str>) -> Result<(), &'static str> {
+    const FAILED: &str = "Rex did not open the review. Run milo review PATCH without --float in a terminal.";
     let exe = std::env::current_exe().map_err(|_| FAILED)?;
-    float(&target, root, "Patch review", &review_command(&exe, patch, from), None).map(drop).ok_or(FAILED)
+    float(target, root, "Patch review", &review_command(&exe, patch, from), None).map(drop).ok_or(FAILED)
 }
 
 /// Runs `command`, a JSON list of words, in a new floating pane over the

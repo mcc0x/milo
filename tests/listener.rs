@@ -183,7 +183,7 @@ fn doctor_and_repair_report_a_loader_conflict_without_stopping_the_listener() {
 
     let uninstalled = milo(&["doctor"]);
     assert!(uninstalled.status.success(), "{uninstalled:?}");
-    assert!(String::from_utf8(uninstalled.stdout).unwrap().contains("Rex: not installed"));
+    assert!(String::from_utf8(uninstalled.stdout).unwrap().contains("Rex integration: not installed"));
     let no_repair = milo(&["setup", "--repair"]);
     assert!(!no_repair.status.success());
     assert!(String::from_utf8(no_repair.stderr).unwrap().contains("No managed Rex integration to repair"));
@@ -210,7 +210,7 @@ fn doctor_and_repair_report_a_loader_conflict_without_stopping_the_listener() {
         let report = String::from_utf8(output.stdout).unwrap();
         assert!(report.contains(&format!("Rex loader conflict ({init:?})")), "{report}");
         assert!(report.contains("Layout listener: running; expected state unknown"), "{report}");
-        assert!(!report.contains("Rex: not installed") && !report.contains("listen --stop"), "{report}");
+        assert!(!report.contains("Rex integration: not installed") && !report.contains("listen --stop"), "{report}");
         assert!(!report.contains("setup --repair"), "{report}");
     }
     let error = String::from_utf8(repair.stderr).unwrap();

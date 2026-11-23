@@ -105,6 +105,8 @@ impl Pane for Review {
 /// what it will show. That is the only answer a program with no terminal gets,
 /// so it names each file whose edits could not be shown.
 pub fn float(dir: &Path, file: &Path, from: Option<&str>) -> Result<String, String> {
+    let target = rex::Target::current()
+        .ok_or("--float needs a Rex pane; run milo review PATCH without --float in a terminal")?;
     let repo = project(dir)?;
     let text = patch_text(file)?;
     let patch = Patch::parse(&text)?;
@@ -121,7 +123,7 @@ pub fn float(dir: &Path, file: &Path, from: Option<&str>) -> Result<String, Stri
         }
     }
     let file = std::path::absolute(file).map_err(|_| "the current directory cannot be read".to_string())?;
-    rex::open_review(&repo.root, &file, from)?;
+    rex::open_review(&target, &repo.root, &file, from)?;
     let files = if paths.len() == 1 { "file" } else { "files" };
     let total = paths.len();
     Ok(format!(
