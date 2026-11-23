@@ -313,6 +313,8 @@ fn preview_confirmation_uses_rex_pty() {
             "CoreGraphics",
             "-framework",
             "WebKit",
+            "-framework",
+            "Security",
             "-o",
         ])
         .arg(lab.root.join("preview-rex-tick"))
@@ -371,17 +373,56 @@ fn preview_confirmation_uses_rex_pty() {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/rex-lab-page", listener.local_addr().unwrap());
-    let page = thread::spawn(move || serve_fixture(listener, true));
-    let launch = |root: &Path, main: &str, tab: &str, url: &str| {
+    let owner_pid = pid.to_string();
+    let competing_pid = lab.server.as_ref().unwrap().id().to_string();
+    let launch = |root: &Path, main: &str, tab: &str, url: &str, scenario: &str| -> Result<String, String> {
+        let preflight = lab
+            .command(root.join("preview-rex-tick"))
+            .args(["--preflight", &owner_pid, &competing_pid, scenario])
+            .output()
+            .unwrap();
+        if !preflight.status.success() {
+            let reason = String::from_utf8_lossy(&preflight.stderr);
+            assert_eq!(preflight.status.code(), Some(1), "{scenario}: preflight failed: {reason}");
+            assert!(preflight.stdout.is_empty() && !reason.trim().is_empty(), "{scenario}: {reason}");
+            return Err(reason.into_owned());
+        }
+        let pin = std::str::from_utf8(&preflight.stdout).unwrap().trim();
+        assert!(pin.parse::<std::num::NonZeroU32>().is_ok(), "{scenario}: invalid native pin {pin:?}");
         let started = lab.rex(&[
             "split", "-s", &session, "-b", main, "--split=right", "--ratio", "40", "--focus=false", "--shell=none",
             "--label", "milo:preview:confirm", "--keep-open", "--json", "--", "/bin/bash",
             concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_lab/preview_tick.sh"), root.to_str().unwrap(),
-            concat!(env!("CARGO_MANIFEST_DIR"), "/src/rex/preview.lua"), client, &pid.to_string(), main, tab, url,
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/rex/preview.lua"), client, &owner_pid, main, tab, url, pin,
         ]);
-        id(&started, "block_ids")
+        Ok(id(&started, "block_ids"))
     };
-    let block = launch(&lab.root, &main, &tab, &url);
+    // A refused startup must not add either a tab or a pane to the real Rex
+    // session. Read only the IDs so incidental live terminal state is irrelevant.
+    let inventory = || {
+        lab.rex(&[
+            "do", "-s", &session, "-e",
+            "local ids={}; for _,w in ipairs(assert(rex.session.view{}).windows) do \
+             table.insert(ids,w.window_id); for _,l in ipairs(w.layers) do \
+             for _,b in ipairs(l.blocks) do table.insert(ids,b.block_id) end end end; \
+             table.sort(ids); print(table.concat(ids,' '))",
+        ])
+    };
+    let before = inventory();
+    for (scenario, refusal) in [
+        ("second-rex", "additional normal Rex window"),
+        ("body-overlay", "overlaps the drawable workspace"),
+        ("competing-preview", "Milo Preview helper window"),
+        ("helper-status", "Milo Preview helper window"),
+        ("menu-lookalike", "not a verified display-top system menu strip"),
+        ("fullscreen", "occupies the entire display"),
+    ] {
+        let reason = launch(&lab.root, &main, &tab, &url, scenario).expect_err("unexpected successful pin");
+        assert!(reason.contains(refusal), "{scenario}: {reason}");
+        assert_eq!(inventory(), before, "{scenario} changed Rex tabs or panes before the split");
+    }
+    let page = thread::spawn(move || serve_fixture(listener, true));
+    let block = launch(&lab.root, &main, &tab, &url, "menu").expect("menu strip prevented the initial right split");
     let tile = Tile {
         lab: &lab, root: &lab.root, session: &session, block: &block, window: &tab, pointer_serial: Cell::new(0),
     };
@@ -749,7 +790,7 @@ fn preview_confirmation_uses_rex_pty() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/rex-lab-page", listener.local_addr().unwrap());
     let page = thread::spawn(move || serve_fixture(listener, false));
-    let block = launch(&client_root, &main, &tab, &url);
+    let block = launch(&client_root, &main, &tab, &url, "menu").expect("menu strip prevented the client-loss split");
     let tile = Tile {
         lab: &lab, root: &client_root, session: &session, block: &block, window: &tab, pointer_serial: Cell::new(0),
     };

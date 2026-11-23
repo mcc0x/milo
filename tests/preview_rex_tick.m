@@ -6,6 +6,7 @@
 #import <WebKit/WebKit.h>
 #import "../macos/Preview/Chrome.h"
 #import "../macos/Preview/Browser.h"
+#import "../macos/Preview/MenuStrip.h"
 
 @interface FixtureWorkspace : NSObject
 + (instancetype)sharedWorkspace;
@@ -26,10 +27,14 @@ static CFArrayRef FixtureWindows(CGWindowListOption, CGWindowID);
 static CFArrayRef FixturePin(CFArrayRef);
 static BOOL FixturePane(CGRect, CGRect, CGRect *);
 static NSView *SlowStartContent(NSURL *url, BOOL (^input)(void), void (^focus)(void));
+static BOOL FixtureSystemMenuOwner(pid_t pid);
+static BOOL FixturePreviewProcess(pid_t pid);
 #define MiloPreviewContent SlowStartContent
 #define CGWindowListCopyWindowInfo FixtureWindows
 #define CGWindowListCreateDescriptionFromArray FixturePin
 #define MiloApproximatePane FixturePane
+#define MiloSystemMenuOwner FixtureSystemMenuOwner
+#define MiloPreviewProcess FixturePreviewProcess
 #define NSWorkspace FixtureWorkspace
 #define mouseLocation fixtureMouseLocation
 #define pressedMouseButtons fixturePressedMouseButtons
@@ -40,14 +45,18 @@ static NSView *SlowStartContent(NSURL *url, BOOL (^input)(void), void (^focus)(v
 #undef pressedMouseButtons
 #undef mouseLocation
 #undef NSWorkspace
+#undef MiloPreviewProcess
+#undef MiloSystemMenuOwner
 #undef MiloApproximatePane
 #undef CGWindowListCreateDescriptionFromArray
 #undef CGWindowListCopyWindowInfo
 
-static const CGWindowID Target = UINT32_MAX;
+static const CGWindowID Target = UINT32_MAX - 1; // Stable modeled inventory ID; the launcher must obtain it from the pin.
 static const NSInteger RelativeWindow = 42; // Never passed to any actual order API.
 static const CGWindowID Panel = 43;
 static pid_t ownerPID;
+static pid_t menuPID, competingPID;
+static NSArray *preflightWindows;
 static CGRect targetFrame;
 static CGFloat quartzHeight;
 static NSPoint pointer;
@@ -66,8 +75,8 @@ static BOOL staged;
 static BOOL exercisedFirstOrder, omitFirstPanel;
 static CGRect stagedFrame;
 
-// Only the sample consumed by FrontmostRex is replaced, not an app's identity.
-// The PID is the independent, non-GUI peer that owns the disposable Rex blocks.
+// The PID is the real, independent non-GUI peer that owns the disposable
+// Rex blocks. Only its Mac app representation and foreground state are modeled.
 @interface FixtureOwner : NSObject
 @property (nonatomic) pid_t processIdentifier;
 @end
@@ -93,6 +102,9 @@ static FixtureOwner *owner;
 }
 @end
 
+static BOOL FixtureSystemMenuOwner(pid_t pid) { return pid == menuPID; }
+static BOOL FixturePreviewProcess(pid_t pid) { return pid == competingPID; }
+
 static void Trace(const char *event) {
     assert(WriteAll(trace, event, strlen(event)));
 }
@@ -105,19 +117,24 @@ static NSView *SlowStartContent(NSURL *url, BOOL (^input)(void), void (^focus)(v
     return MiloPreviewContent(url, input, focus);
 }
 
-static NSDictionary *Metadata(pid_t pid, CGWindowID window, CGRect frame) {
+static NSDictionary *WindowMetadata(pid_t pid, CGWindowID window, CGRect frame, int level) {
     return @{
         (__bridge NSString *)kCGWindowOwnerPID: @(pid),
         (__bridge NSString *)kCGWindowNumber: @(window),
-        (__bridge NSString *)kCGWindowLayer: @(CGWindowLevelForKey(kCGNormalWindowLevelKey)),
+        (__bridge NSString *)kCGWindowLayer: @(level),
         (__bridge NSString *)kCGWindowAlpha: @1,
         (__bridge NSString *)kCGWindowBounds: CFBridgingRelease(CGRectCreateDictionaryRepresentation(frame)),
     };
 }
 
+static NSDictionary *Metadata(pid_t pid, CGWindowID window, CGRect frame) {
+    return WindowMetadata(pid, window, frame, CGWindowLevelForKey(kCGNormalWindowLevelKey));
+}
+
 static CFArrayRef FixtureWindows(CGWindowListOption options, CGWindowID relative) {
     assert(options == (kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements));
     assert(relative == kCGNullWindowID);
+    if (preflightWindows) return CFBridgingRetain(preflightWindows);
     os_unfair_lock_lock(&sampleLock);
     BOOL hasPanel = staged;
     CGRect frame = stagedFrame;
@@ -131,8 +148,7 @@ static CFArrayRef FixtureWindows(CGWindowListOption options, CGWindowID relative
     NSDictionary *target = Metadata(ownerPID, Target, targetFrame);
     NSArray *windows = @[target];
     if ([NSFileManager.defaultManager fileExistsAtPath:rexOverlay]) {
-        NSMutableDictionary *chrome = [Metadata(ownerPID, 55, targetFrame) mutableCopy];
-        chrome[(__bridge NSString *)kCGWindowLayer] = @(CGWindowLevelForKey(kCGFloatingWindowLevelKey));
+        NSDictionary *chrome = WindowMetadata(ownerPID, 55, targetFrame, CGWindowLevelForKey(kCGFloatingWindowLevelKey));
         windows = @[chrome, target];
     }
     if (hasPanel && (omit || [NSFileManager.defaultManager fileExistsAtPath:absentPanel])) {
@@ -415,17 +431,89 @@ static IMP Replace(Class cls, SEL selector, IMP replacement) {
     return original;
 }
 
+static CGRect QuartzFrame(NSRect frame) {
+    return CGRectMake(NSMinX(frame), quartzHeight - NSMaxY(frame), NSWidth(frame), NSHeight(frame));
+}
+
+static int Preflight(const char *scenario, CGRect display) {
+    CGRect workspace;
+    assert(FixturePane(targetFrame, CGRectMake(0, 0, 1, 1), &workspace));
+    // Coordinates and scale come from AppKit/Quartz, not from a hardcoded
+    // resolution. Model the observed 29-point menu strip, not the user's
+    // windows or the current menu bar's appearance.
+    CGRect strip = CGRectMake(CGRectGetMinX(display), CGRectGetMinY(display), CGRectGetWidth(display), 29);
+    assert(!CGRectIsEmpty(CGRectIntersection(strip, targetFrame)));
+    assert(CGRectIsEmpty(CGRectIntersection(strip, workspace)));
+    int menuLevel = CGWindowLevelForKey(kCGMainMenuWindowLevelKey);
+    NSDictionary *menu = WindowMetadata(menuPID, 51, strip, menuLevel);
+    NSDictionary *target = Metadata(ownerPID, Target, targetFrame);
+    BOOL clearMenu = !strcmp(scenario, "menu");
+    if (clearMenu) {
+        preflightWindows = @[menu, target];
+    } else if (!strcmp(scenario, "menu-lookalike")) {
+        // Same layer and bounds as the real strip, but not WindowServer.
+        preflightWindows = @[WindowMetadata(1, 51, strip, menuLevel), target];
+    } else if (!strcmp(scenario, "helper-status")) {
+        preflightWindows = @[WindowMetadata(competingPID, 51, strip, CGWindowLevelForKey(kCGStatusWindowLevelKey)), target];
+    } else if (!strcmp(scenario, "second-rex")) {
+        preflightWindows = @[menu, target, Metadata(ownerPID, 52, targetFrame)];
+    } else if (!strcmp(scenario, "body-overlay")) {
+        // Even an otherwise menu-like row must not be ignored over the workspace.
+        CGRect overlay = CGRectOffset(strip, 0, CGRectGetMinY(workspace) - CGRectGetMinY(strip) + 1);
+        assert(!CGRectIsEmpty(CGRectIntersection(overlay, workspace)));
+        preflightWindows = @[WindowMetadata(menuPID, 51, overlay, menuLevel), target];
+    } else if (!strcmp(scenario, "competing-preview")) {
+        CGRect panel = CGRectInset(workspace, CGRectGetWidth(workspace) / 4, CGRectGetHeight(workspace) / 4);
+        preflightWindows = @[menu, Metadata(competingPID, Panel, panel), target];
+    } else {
+        assert(!strcmp(scenario, "fullscreen"));
+        preflightWindows = @[Metadata(ownerPID, Target, display)];
+    }
+    const char *reason = NULL;
+    CGWindowID pinned = PinForegroundWindow((NSRunningApplication *)owner, ownerPID, &reason);
+    if (clearMenu) {
+        if (pinned != Target) {
+            fprintf(stderr, "expected the unique fixture pin, got %u: %s\n", pinned, reason ?: "(no reason)");
+            return 2;
+        }
+        printf("%u\n", pinned);
+        return 0;
+    }
+    assert(pinned == kCGNullWindowID && reason && *reason);
+    fprintf(stderr, "%s\n", reason);
+    return 1;
+}
+
 int main(int argc, const char **argv) {
     @autoreleasepool {
-        assert(argc == 4);
-        ownerPID = (pid_t)strtol(argv[1], NULL, 10);
+        assert(argc == 5);
+        BOOL preflight = !strcmp(argv[1], "--preflight");
+        ownerPID = (pid_t)strtol(argv[preflight ? 2 : 1], NULL, 10);
         assert(ownerPID > 1 && ownerPID != getpid());
-        assert([NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyAccessory]);
+        owner = [FixtureOwner new];
+        owner.processIdentifier = ownerPID;
+        if (!preflight) assert([NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyAccessory]);
         NSScreen *screen = NSScreen.screens.firstObject;
-        assert(screen && NSWidth(screen.visibleFrame) > 400 && NSHeight(screen.visibleFrame) > 300);
+        CGDirectDisplayID primary = CGMainDisplayID();
+        assert(screen && [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] == primary);
+        assert(NSWidth(screen.visibleFrame) > 400 && NSHeight(screen.visibleFrame) > 300);
+        quartzHeight = CGRectGetHeight(CGDisplayBounds(primary));
+        CGRect display = QuartzFrame(screen.frame);
         NSRect frame = NSIntegralRect(NSInsetRect(screen.visibleFrame, 25, 25));
-        quartzHeight = CGRectGetHeight(CGDisplayBounds(CGMainDisplayID()));
-        targetFrame = CGRectMake(NSMinX(frame), quartzHeight - NSMaxY(frame), NSWidth(frame), NSHeight(frame));
+        frame.size.height = NSMaxY(screen.frame) - NSMinY(frame) - 1;
+        targetFrame = QuartzFrame(frame);
+        if (preflight) {
+            // The launcher/test runner and server are distinct disposable
+            // processes; no real window owner is sampled in either mode.
+            menuPID = getppid();
+            competingPID = (pid_t)strtol(argv[3], NULL, 10);
+            assert(menuPID > 1 && menuPID != ownerPID && menuPID != getpid());
+            assert(competingPID > 1 && competingPID != menuPID && competingPID != ownerPID && competingPID != getpid());
+            return Preflight(argv[4], display);
+        }
+        const char *pin = argv[4], *end = pin + strlen(pin);
+        uint32_t pinned;
+        assert(ReadDecimal(&pin, end, UINT32_MAX, &pinned) && pin == end && pinned == Target);
         pointer = NSMakePoint(NSMinX(frame) + NSWidth(frame) * 0.85, NSMidY(frame));
         NSString *root = [NSString stringWithUTF8String:argv[3]];
         denyPlacement = [root stringByAppendingPathComponent:@"deny-placement"];
@@ -443,8 +531,6 @@ int main(int argc, const char **argv) {
         trace = open([root stringByAppendingPathComponent:@"native.log"].fileSystemRepresentation,
             O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
         assert(trace >= 0);
-        owner = [FixtureOwner new];
-        owner.processIdentifier = ownerPID;
         ActualVisible = (BOOL (*)(id, SEL))Replace(MiloPreviewPanel.class, @selector(isVisible), (IMP)FixtureVisible);
         Replace(MiloPreviewPanel.class, @selector(isOnActiveSpace), (IMP)FixtureActiveSpace);
         Replace(MiloPreviewPanel.class, @selector(orderWindow:relativeTo:), (IMP)FixtureOrder);
@@ -460,7 +546,7 @@ int main(int argc, const char **argv) {
         NSURL *url = [NSURL URLWithString:[NSString stringWithUTF8String:argv[2]]];
         assert(url);
         MiloPreviewAnchor *anchor = [[DismissalFixtureAnchor alloc] initWithURL:url rex:(NSRunningApplication *)owner
-            pinned:Target stateFD:STDIN_FILENO focusFD:focus[0] parent:getppid() tty:tty confirm:YES];
+            pinned:pinned stateFD:STDIN_FILENO focusFD:focus[0] parent:getppid() tty:tty confirm:YES];
         int result = [anchor run];
         struct termios after;
         assert(tcgetattr(tty, &after) == 0 && after.c_iflag == before.c_iflag &&
