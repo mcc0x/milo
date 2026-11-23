@@ -10,8 +10,8 @@ use super::sqlite::{self, Outcome, Poll};
 use super::time::{self, Timestamp};
 use super::{CLOCK_SKEW, Limits, ModelWeek, Reading, Window};
 
-/// Project only usage fields. Rank eligible observations, and keep history
-/// from the same account as the cached report (or one account if uncached).
+/// Project only usage fields. Find each limit's latest timestamp before
+/// fetching its payload; only tied timestamps need a row ID to settle them.
 pub(super) fn sql(now: i64) -> String {
     let latest = now.saturating_add(CLOCK_SKEW).saturating_mul(1000).saturating_add(999);
     format!(
@@ -30,25 +30,32 @@ WITH cache_json AS (
     SELECT *, row_number() OVER (PARTITION BY provider ORDER BY observed_ms DESC,key) AS rank
     FROM reports WHERE provider IN ('anthropic','openai-codex') AND typeof(observed_ms)='integer'
       AND observed_ms BETWEEN 0 AND {latest}
-), ranked_history AS (
-    SELECT h.id, h.provider, h.recorded_at, h.limit_id, h.used_fraction, h.resets_at, h.window_label, h.account_key,
-           row_number() OVER (
-               PARTITION BY h.provider,h.account_key,h.limit_id ORDER BY h.recorded_at DESC,h.id DESC
-           ) AS rank
+), latest_times AS MATERIALIZED (
+    SELECT h.provider, h.account_key, h.limit_id, max(h.recorded_at) AS recorded_at,
+           min(h.id) AS first_id, max(h.id) AS last_id
     FROM usage_history h LEFT JOIN picked r ON r.provider=h.provider AND r.rank=1
     WHERE h.provider IN ('anthropic','openai-codex') AND typeof(h.recorded_at)='integer'
       AND h.recorded_at BETWEEN 0 AND {latest}
       AND (r.observed_ms IS NULL OR (
           h.recorded_at>r.observed_ms AND substr(r.key,-length(h.account_key)-1)=':'||h.account_key
       ))
+    GROUP BY h.provider,h.account_key,h.limit_id
 ), history_heads AS (
-    -- The newest row per provider is also the newest row in its own account and limit.
-    SELECT provider, recorded_at, limit_id, used_fraction, resets_at, window_label, account_key,
+    -- Scan the IDs spanned by the eligible rows, usually only recent
+    -- appends with a fresh cache. IDs need not follow timestamp order.
+    SELECT t.provider, t.account_key, max(h.id) AS id, t.recorded_at
+    FROM usage_history h CROSS JOIN latest_times t USING (provider,account_key,recorded_at)
+    WHERE h.limit_id IS t.limit_id AND typeof(h.recorded_at)='integer'
+      AND h.id BETWEEN (SELECT min(first_id) FROM latest_times) AND (SELECT max(last_id) FROM latest_times)
+    GROUP BY t.provider,t.account_key,t.limit_id
+), history_accounts AS (
+    -- The newest eligible row per provider is also the newest for its limit.
+    SELECT id, account_key,
            first_value(account_key) OVER (PARTITION BY provider ORDER BY recorded_at DESC,id DESC) AS newest
-    FROM ranked_history WHERE rank=1
-), history AS (
-    SELECT provider, recorded_at, limit_id, used_fraction, resets_at, window_label
-    FROM history_heads WHERE account_key=newest
+    FROM history_heads
+), history AS MATERIALIZED (
+    SELECT h.provider, h.recorded_at, h.limit_id, h.used_fraction, h.resets_at, h.window_label
+    FROM history_accounts n CROSS JOIN usage_history h ON h.id=n.id WHERE n.account_key=n.newest
 )
 SELECT r.provider, r.observed_ms, json_extract(l.value,'$.id') AS limit_id,
        json_extract(l.value,'$.amount.usedFraction') AS used_fraction,
