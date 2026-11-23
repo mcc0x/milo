@@ -328,7 +328,7 @@ enum Command<'a> {
     History(Option<&'a OsStr>),
     ShellOutline(&'a OsStr),
     ShellHistory(&'a OsStr),
-    PeekOutline(&'a OsStr),
+    PeekOutline { origin: &'a OsStr, shell: Option<&'a OsStr> },
     View { file: &'a OsStr, commit: Option<CommitId<'a>> },
     Review { patch: &'a OsStr, from: Option<&'a str>, float: bool },
     Edit(&'a OsStr),
@@ -365,16 +365,22 @@ fn command<'a>(
         (name, option),
         (Some("outline" | "history"), Some("--shell")) | (Some("outline"), Some("--peek-origin"))
     ) {
-        let [block] = rest else { return Err("expected a Rex block ID".into()) };
-        let valid = block
-            .to_str()
-            .and_then(|id| id.strip_prefix("block:"))
-            .is_some_and(|id| !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'));
-        if !valid {
+        let (block, shell) = match rest {
+            [block] => (block, None),
+            [origin, flag, shell] if option == Some("--peek-origin") && flag == "--shell" => (origin, Some(shell)),
+            _ => return Err("expected a Rex block ID".into()),
+        };
+        let valid = |block: &OsString| {
+            block
+                .to_str()
+                .and_then(|id| id.strip_prefix("block:"))
+                .is_some_and(|id| !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'))
+        };
+        if !valid(block) || shell.is_some_and(|id| !valid(id)) {
             return Err("expected a Rex block ID".into());
         }
         return Ok(if option == Some("--peek-origin") {
-            Command::PeekOutline(block)
+            Command::PeekOutline { origin: block, shell: shell.map(OsString::as_os_str) }
         } else if name == Some("history") {
             Command::ShellHistory(block)
         } else {
@@ -562,8 +568,10 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         Command::ShellHistory(shell) => {
             run(Start::Reading(Path::new(".")), &|| Ok(workflow::project(open_repo(None)?, Some(shell), history)))
         }
-        Command::PeekOutline(origin) => {
-            rex::preview_anchor(origin);
+        Command::PeekOutline { origin, shell } => {
+            if let Some(shell) = shell {
+                rex::preview_anchor(shell);
+            }
             let result = run(Start::Reading(Path::new(".")), &|| {
                 Ok(workflow::project(open_repo(None)?, None, |repo, prefs| {
                     Box::new(Outline::with_preferences(repo, rex::inside(), prefs).into_peek().refreshing_away())

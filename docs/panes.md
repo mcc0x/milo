@@ -63,6 +63,8 @@ In the Outline tree, in Find, or while reading a working file, press **Ctrl-A** 
 
 **Preview with tkmp** is an explicit alternative for a working Markdown file. In Rex, it opens a split beside the shell; preview another file in the same tab to replace Milo's preview, not your shell or Reader. Milo does not send a commit, a diff or an editor draft to tkmp. Outside Rex, keep reading in Milo. `milo doctor` reports whether it can find the optional executable without running it. Nothing to enable, install or configure in Milo.
 
+In Peek Outline, the preview goes beside the shell even when another pane opened Peek. Dismissing Peek still returns focus to the pane that opened it. If an older saved Rex layout does not identify the shell, save the layout again in Milo setup before previewing from Peek.
+
 Milo looks for `tkmp` in absolute `PATH` directories outside the checkout and current directory. Use a personal directory such as `~/.local/bin` on `PATH` if your shared tool directory is writable by other users. The selected `.md` or `.markdown` file must be regular UTF-8 text, at most 512 KiB when launched, without terminal controls. Links and paths through linked directories are refused.
 
 Use tkmp only with a previewer, document and project you trust. Milo checks the working file before passing its absolute path as one argument. [tkmp](https://github.com/tfcace/tkmp) runs as your user: it watches and reopens the path on save, emits terminal output and renders diagrams through its embedded JavaScript engine. Those later reads and renders are not sandboxed or bounded by Milo. Milo does not load tkmp's Rex plugin or read the clipboard.
