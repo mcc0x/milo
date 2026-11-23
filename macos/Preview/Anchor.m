@@ -220,12 +220,12 @@ static BOOL FrontmostRex(NSRunningApplication *rex) {
         NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == rex.processIdentifier;
 }
 
-static BOOL ReadDecimal(const char **cursor, const char *end, uint32_t limit, uint32_t *out) {
+static BOOL ReadDecimal(const char **cursor, const char *end, uint64_t limit, uint64_t *out) {
     const char *p = *cursor;
     if (p == end || *p < '0' || *p > '9') return NO;
-    uint32_t value = 0;
+    uint64_t value = 0;
     while (p != end && *p >= '0' && *p <= '9') {
-        uint32_t digit = (uint32_t)(*p++ - '0');
+        uint64_t digit = (uint64_t)(*p++ - '0');
         if (value > (limit - digit) / 10) return NO;
         value = value * 10 + digit;
     }
@@ -239,7 +239,7 @@ static BOOL ReadTile(const char *line, size_t length, pid_t *pid, CGRect *normal
     if (length < 5 || memcmp(line, "show ", 5)) return NO;
     line += 5;
     const char *p = line;
-    uint32_t process, parts[4];
+    uint64_t process, parts[4];
     if (!ReadDecimal(&p, end, INT_MAX, &process) || process < 2 ||
         end - p < 6 || memcmp(p, " tile ", 6)) return NO;
     p += 6;
@@ -258,11 +258,16 @@ static BOOL ReadTile(const char *line, size_t length, pid_t *pid, CGRect *normal
 typedef struct {
     CGRect tile;
     NSTimeInterval checked;
+    uint64_t announcedAt; // Geometry retained independently of visibility; zero after hide.
 } VisibilityLease;
 
 static NSTimeInterval LeaseNow(void) {
     // Unlike uptime, this clock also counts time spent asleep.
     return (NSTimeInterval)clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / NSEC_PER_SEC;
+}
+
+static NSTimeInterval RealtimeNow(void) {
+    return (NSTimeInterval)clock_gettime_nsec_np(CLOCK_REALTIME) / NSEC_PER_SEC;
 }
 
 typedef NS_ENUM(NSUInteger, FocusReply) { FocusWaiting, FocusApproved, FocusRefused, FocusEnded, FocusFailed };
@@ -286,26 +291,48 @@ typedef enum {
     VisibilityUnchanged, VisibilityChanged, VisibilityInvalid, VisibilityWrongOwner, VisibilityUnclaimed,
 } VisibilityUpdate;
 
-static VisibilityUpdate UpdateVisibility(VisibilityLease *lease, NSTimeInterval now, pid_t expected,
-    const char *line, size_t length) {
+static VisibilityUpdate UpdateVisibility(VisibilityLease *lease, NSTimeInterval now, NSTimeInterval wall,
+    pid_t expected, const char *line, size_t length) {
     if (length == 4 && !memcmp(line, "hide", 4)) {
-        lease->checked = 0;
+        *lease = (VisibilityLease){0};
         return VisibilityChanged;
     }
     if (length == 9 && !memcmp(line, "unclaimed", 9)) return VisibilityUnclaimed;
+
+    const char *stamp = memchr(line, '@', length), *end = line + length;
+    if (!stamp || stamp - line < 2 || stamp[-1] != ' ') return VisibilityInvalid;
+    size_t recordLength = (size_t)(stamp - 1 - line);
+    ++stamp;
+    uint64_t epoch;
+    if (stamp == end || *stamp == '0' || !ReadDecimal(&stamp, end, UINT64_MAX, &epoch) || stamp != end)
+        return VisibilityInvalid;
+
+    BOOL renew = recordLength == 5 && !memcmp(line, "renew", 5);
     CGRect tile;
-    if (length == 5 && !memcmp(line, "renew", 5)) {
-        // A renewal may recover expired eligibility, but cannot undo a hide.
-        if (!lease->checked) return VisibilityUnchanged;
-        BOOL fresh = LeaseFresh(lease, now);
-        lease->checked = now;
-        return fresh ? VisibilityUnchanged : VisibilityChanged;
+    if (renew) {
+        // A renewal may recover expired evidence but may not undo a hide.
+        if (!lease->announcedAt) return VisibilityUnchanged;
+        tile = lease->tile;
+    } else {
+        pid_t pid;
+        if (!ReadTile(line, recordLength, &pid, &tile)) return VisibilityInvalid;
+        if (pid != expected) return VisibilityWrongOwner;
     }
-    pid_t pid;
-    if (!ReadTile(line, length, &pid, &tile)) return VisibilityInvalid;
-    if (pid != expected) return VisibilityWrongOwner;
-    BOOL unchanged = LeaseFresh(lease, now) && CGRectEqualToRect(tile, lease->tile);
-    *lease = (VisibilityLease){tile, now};
+
+    // The stamp is truncated to seconds at the start of the observer's
+    // refresh. Conservatively charge that fraction and all pipe delay.
+    // Store the check on a continuous clock, not the adjustable wall clock.
+    NSTimeInterval age = wall - (NSTimeInterval)epoch;
+    BOOL plausible = age >= 0 && epoch >= lease->announcedAt;
+    NSTimeInterval checked = plausible && age < LeaseLifetime && now > age ? now - age : 0;
+    BOOL unchanged = checked && LeaseFresh(lease, now) && CGRectEqualToRect(tile, lease->tile);
+    if (renew) {
+        lease->checked = checked;
+    } else if (plausible) {
+        *lease = (VisibilityLease){tile, checked, epoch};
+    } else {
+        *lease = (VisibilityLease){0};
+    }
     return unchanged ? VisibilityUnchanged : VisibilityChanged;
 }
 
@@ -458,7 +485,7 @@ static int PrepareFocusInput(int stateFD) {
     const char *encoded = getenv("MILO_PREVIEW_FOCUS_FD");
     if (!encoded) return -1;
     const char *cursor = encoded, *end = encoded + strlen(encoded);
-    uint32_t number;
+    uint64_t number;
     if (!ReadDecimal(&cursor, end, INT_MAX, &number) || cursor != end || number <= STDERR_FILENO ||
         (int)number == stateFD) return -1;
     int fd = (int)number;
@@ -494,7 +521,7 @@ static int PrepareFocusInput(int stateFD) {
     NSUInteger _generation;
     const char *_lastPhase, *_lastReason;
     BOOL _firstOrderedSample, _samplePending, _finished, _sessionInactive, _screensAsleep;
-    char _line[64];
+    char _line[96];
     size_t _lineLength;
     int _status;
 }
@@ -572,7 +599,8 @@ static int PrepareFocusInput(int stateFD) {
 }
 
 - (void)handleLine:(size_t)length {
-    switch (UpdateVisibility(&_lease, LeaseNow(), _rex.processIdentifier, _line, length)) {
+    NSTimeInterval now = LeaseNow();
+    switch (UpdateVisibility(&_lease, now, RealtimeNow(), _rex.processIdentifier, _line, length)) {
         case VisibilityUnchanged: break;
         case VisibilityChanged: [self invalidatePlacement]; break;
         case VisibilityInvalid: [self finish:"invalid Rex visibility message"]; break;

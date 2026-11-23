@@ -204,7 +204,7 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
     // Arguments go through stdin. The URL is never in Rex CLI argv or an error.
     connection.call("open", &extra)?;
     eprintln!(
-        "Preview tile opened. Close it before switching sessions or hosts in this Mac window; Rex may not report that switch."
+        "Preview tile opened. Close it before switching sessions or hosts: the page can stay over another session in this Mac window."
     );
     Ok(())
 }

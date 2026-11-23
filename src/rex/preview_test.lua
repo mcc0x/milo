@@ -13,7 +13,9 @@ local term = "com.superlogical.terminal"
 local exe, url = "/with spaces/milo", "http://localhost:3400/hello?who=$HOME&next=%2Fhere#section"
 local uid, helper, cli, gui = 501, 20, 30, 40
 local native_window = 4294967295
-local show = "show 40 tile 625000 0 375000 1000000"
+local epoch = 1790000000
+local function stamp(record, when) return record .. " @" .. tostring(when or epoch) end
+local show = stamp("show 40 tile 625000 0 375000 1000000")
 local shown = "hide\n" .. show .. "\n"
 local server = "unix:///tmp/rex%20preview.sock"
 local function peer(pid) return { kind = "peer", transport = "unix", uid = uid, pid = pid } end
@@ -35,6 +37,7 @@ local function call(f)
     rex = f.rex,
     print = function(s) writes[#writes + 1] = s .. "\n" end,
     io = { stdout = { write = function(_, s, n) writes[#writes + 1] = s .. n end, flush = function() end } },
+    os = { time = function() return f.now or epoch end },
   }, { __index = _G })
   f.rex.on = function(event, run)
     assert(not callbacks[event], event)
@@ -160,6 +163,14 @@ local function fixture(mode, block)
         return {}
       end,
       new_split = new_split,
+      focus_block = function(a)
+        scope(a)
+        assert(not f.focused and a.block_id == main)
+        f.focused = a.block_id
+        if f.refuse_focus then return end
+        f.window.focused_block_id = a.block_id
+        return {}
+      end,
     },
   }
   return f
@@ -318,11 +329,65 @@ denied("open", sidebar, function(f)
   f.proc[other] = f.proc[main]
 end, "shell")
 
+-- The panel can be key without taking Rex's logical focus from the shell.
+local already_focused = fixture("focus", preview)
+already_focused.gui.session_ids = four_sessions
+assert(call(already_focused)() == "ok\n" and not already_focused.focused)
+for _, focused in ipairs{ preview, sidebar } do
+  local returning = fixture("focus", preview)
+  returning.window.focused_block_id = focused
+  returning.window.layers[2] = { kind = "floating", state = "minimized", blocks = {} }
+  assert(call(returning)() == "ok\n" and returning.focused == main and returning.window.focused_block_id == main)
+end
+local refused = fixture("focus", preview)
+refused.window.focused_block_id, refused.refuse_focus = preview, true
+assert(call(refused)() == "focus\n" and refused.focused == main and refused.window.focused_block_id == preview)
+
+for _, change in ipairs{
+  function(f) f.view.active_window_id = inactive end,
+  function(f) f.rex.args.window = inactive end,
+  function(f) f.rex.args.main = other end,
+  function(f) f.rex.args.main = preview end,
+  function(f) f.window.zoomed_block_id = main end,
+  function(f) f.tiled.state = "minimized" end,
+  function(f) f.window.layers[2] = { kind = "floating", blocks = {} } end,
+  float_anchor,
+  function(f)
+    f.tiled.blocks = { f.rail, f.anchor }
+    f.window.layers[2] = { kind = "floating", blocks = { f.main } }
+  end,
+  function(f) f.branch.after = nil end,
+  function(f) f.leaf.rect = { 0, 0, 0, 1 } end,
+  function(f) f.anchor.label = "milo:preview:starting" end,
+  function(f) f.anchor.host_id = "remote" end,
+  function(f) f.main.host_id = "remote" end,
+  function(f) f.main.owner = other_app end,
+  function(f) f.anchor.owner = other_app end,
+  function(f) f.gui.principal = peer(gui + 1) end,
+  function(f) f.gui.session_ids = { another_session } end,
+  function(f) f.parents[cli][1] = helper + 1 end,
+  function(f) f.proc[preview].child.pid = helper + 1 end,
+  function(f) f.view.revision = nil end,
+  function(f)
+    local reads = 0
+    f.rex.session.view = function()
+      reads = reads + 1
+      if reads == 1 then return f.view end
+      return setmetatable({ revision = f.view.revision + 1 }, { __index = f.view })
+    end
+  end,
+} do
+  local stale = fixture("focus", preview)
+  -- A denial must not acknowledge even if the working shell already has focus.
+  change(stale)
+  assert(call(stale)() == "focus\n" and not stale.focused)
+end
+
 local moved = fixture("watch", preview)
 local watch_moved = call(moved)
 assert(watch_moved() == shown)
 move_preview_beside_rail(moved)
-assert(watch_moved("session_view_changed") == shown .. "show 40 tile 125000 0 125000 1000000\n")
+assert(watch_moved("session_view_changed") == shown .. stamp("show 40 tile 125000 0 125000 1000000") .. "\n")
 assert(not moved.stopped)
 
 local f = fixture("watch", preview)
@@ -335,7 +400,7 @@ local function view_change(state)
 end
 view_change() -- repeated snapshots do not repeatedly emit a state
 f.main_leaf.rect[3], f.leaf.rect = 0.45, { 0.7, 0, 0.3, 1 }
-view_change("show 40 tile 700000 0 300000 1000000")
+view_change(stamp("show 40 tile 700000 0 300000 1000000"))
 view_change()
 -- The visible block list alone is not geometry. The exact tiled leaf must exist.
 f.branch.after = nil
@@ -348,7 +413,7 @@ for _, invalid in ipairs{ false, {}, { "0.7", 0, 0.3, 1 }, { 0.7, 0, 0.31, 1 },
   assert(not f.stopped)
 end
 f.leaf.rect = { 0.0078125, 0.125, 0.9921875, 0.875 }
-view_change("show 40 tile 7813 125000 992187 875000")
+view_change(stamp("show 40 tile 7813 125000 992187 875000"))
 f.main_leaf.rect[3], f.leaf.rect = 0.375, { 0.625, 0, 0.375, 1 }
 view_change(show)
 f.view.active_window_id = inactive
@@ -468,7 +533,7 @@ for tick = 1, 35 do
     multi.gui.session_ids = four_sessions
     multi.second_viewer = second_viewer(gui, { another_session })
   end
-  persistent = persistent .. "renew\n"
+  persistent = persistent .. stamp("renew") .. "\n"
   assert(poll("heartbeat") == persistent)
 end
 assert(poll("deadline") == persistent and poll("claim_deadline") == persistent and not multi.stopped)
@@ -516,13 +581,27 @@ local watch_delayed = call(delayed)
 assert(watch_delayed() == shown)
 delayed.view.revision = 4
 delayed.leaf.rect = { 0.7, 0, 0.3, 1 }
-local resized = shown .. "show 40 tile 700000 0 300000 1000000\n"
+local resized_show = stamp("show 40 tile 700000 0 300000 1000000") .. "\n"
+local resized = shown .. resized_show
 assert(watch_delayed("heartbeat") == resized)
 assert(watch_delayed("session_view_changed", { revision = 4 }) == resized)
 delayed.view.active_window_id = inactive
 assert(watch_delayed("heartbeat") == resized .. "hide\n")
 delayed.view.active_window_id = window
-assert(watch_delayed("heartbeat") == resized .. "hide\nshow 40 tile 700000 0 300000 1000000\n")
+assert(watch_delayed("heartbeat") == resized .. "hide\n" .. resized_show)
+
+-- Both positive records carry the time before any RPC, not the time
+-- after the server responds. Simulate an RPC delayed through the lease.
+local waiting = fixture("watch", preview)
+local rpc = waiting.rex.call
+waiting.now = epoch
+waiting.rex.call = function(method, args)
+  if method == "client.list" then waiting.now = waiting.now + 9 end
+  return rpc(method, args)
+end
+local watch_waiting = call(waiting)
+assert(waiting.now == epoch + 9 and watch_waiting() == shown)
+assert(watch_waiting("heartbeat") == shown .. stamp("renew", epoch + 9) .. "\n" and waiting.now == epoch + 18)
 
 for _, side in ipairs{ "main", "anchor" } do
   local remote_pane = fixture("watch", preview)

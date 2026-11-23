@@ -249,43 +249,51 @@ static void WatcherProtocol(void) {
 
 static VisibilityUpdate PipeRecord(const int pipeFD[2], VisibilityLease *lease, NSTimeInterval now, const char *record) {
     size_t length = strlen(record);
-    char line[64];
+    char line[96];
     assert(length && length <= sizeof(line) && record[length - 1] == '\n');
     assert(WriteAll(pipeFD[1], record, length));
     assert(read(pipeFD[0], line, sizeof(line)) == (ssize_t)length);
-    return UpdateVisibility(lease, now, 123, line, length - 1);
+    return UpdateVisibility(lease, now, 1700000000 + now, 123, line, length - 1);
 }
 
 static void WatcherLease(void) {
     int pipeFD[2];
     assert(pipe(pipeFD) == 0 && fcntl(pipeFD[0], F_SETFL, O_NONBLOCK) == 0);
     VisibilityLease lease = {0};
-    const char show[] = "show 123 tile 500000 250000 500000 750000\n";
-    assert(PipeRecord(pipeFD, &lease, 9, "renew\n") == VisibilityUnchanged && !LeaseFresh(&lease, 9));
-    assert(PipeRecord(pipeFD, &lease, 10, show) == VisibilityChanged && LeaseFresh(&lease, 10));
-    assert(PipeRecord(pipeFD, &lease, 11, "renew\n") == VisibilityUnchanged);
+    const char show[] = "show 123 tile 500000 250000 500000 750000 @1700000010\n";
+    assert(PipeRecord(pipeFD, &lease, 9, "renew @1700000009\n") == VisibilityUnchanged && !LeaseFresh(&lease, 9));
+    assert(PipeRecord(pipeFD, &lease, 10.75, show) == VisibilityChanged && LeaseFresh(&lease, 10.75));
+    assert(lease.checked == 10); // Pay for the fractional observation and pipe delay.
+    assert(PipeRecord(pipeFD, &lease, 11.5, "renew @1700000011\n") == VisibilityUnchanged && lease.checked == 11);
     assert(LeaseFresh(&lease, 13.99) && !LeaseFresh(&lease, 10));
 
     // No EOF or hide arrives, and a successful current Quartz sample cannot extend the lease.
     char byte;
     assert(read(pipeFD[0], &byte, 1) < 0 && errno == EAGAIN);
     assert(SampleFresh(14, 13.875) && !LeaseFresh(&lease, 14));
-    assert(PipeRecord(pipeFD, &lease, 15, "renew\n") == VisibilityChanged && LeaseFresh(&lease, 15));
+    assert(PipeRecord(pipeFD, &lease, 15, "renew @1700000014\n") == VisibilityChanged && LeaseFresh(&lease, 15));
     assert(CGRectEqualToRect(lease.tile, CGRectMake(0.5, 0.25, 0.5, 0.75)));
-    assert(PipeRecord(pipeFD, &lease, 15.1, show) == VisibilityUnchanged);
-    const char resized[] = "show 123 tile 400000 0 600000 1000000\n";
+    assert(PipeRecord(pipeFD, &lease, 15.1, "show 123 tile 500000 250000 500000 750000 @1700000015\n") == VisibilityUnchanged);
+    const char resized[] = "show 123 tile 400000 0 600000 1000000 @1700000015\n";
     assert(PipeRecord(pipeFD, &lease, 15.2, resized) == VisibilityChanged && LeaseFresh(&lease, 15.2));
     assert(CGRectEqualToRect(lease.tile, CGRectMake(0.4, 0, 0.6, 1)));
-    assert(PipeRecord(pipeFD, &lease, 15.5, "renew\n") == VisibilityUnchanged);
+    assert(PipeRecord(pipeFD, &lease, 15.5, "renew @1700000015\n") == VisibilityUnchanged);
     assert(CGRectEqualToRect(lease.tile, CGRectMake(0.4, 0, 0.6, 1)));
     assert(PipeRecord(pipeFD, &lease, 16, "hide\n") == VisibilityChanged);
-    assert(PipeRecord(pipeFD, &lease, 17, "renew\n") == VisibilityUnchanged && !LeaseFresh(&lease, 17));
-    assert(PipeRecord(pipeFD, &lease, 18, "show 124 tile 0 0 1 1\n") == VisibilityWrongOwner && !LeaseFresh(&lease, 18));
-    assert(PipeRecord(pipeFD, &lease, 19, show) == VisibilityChanged && LeaseFresh(&lease, 19));
-    assert(PipeRecord(pipeFD, &lease, 20, "renew 123\n") == VisibilityInvalid);
-    assert(PipeRecord(pipeFD, &lease, 20.1, "guard-hide\n") == VisibilityInvalid);
-    assert(PipeRecord(pipeFD, &lease, 20.2, "resize-gap\n") == VisibilityInvalid);
-    assert(PipeRecord(pipeFD, &lease, 20.3, "shared-input\n") == VisibilityInvalid);
+    assert(PipeRecord(pipeFD, &lease, 17, "renew @1700000017\n") == VisibilityUnchanged && !LeaseFresh(&lease, 17));
+    assert(PipeRecord(pipeFD, &lease, 18, "show 124 tile 0 0 1 1 @1700000018\n") == VisibilityWrongOwner && !LeaseFresh(&lease, 18));
+    assert(PipeRecord(pipeFD, &lease, 19, "show 123 tile 0 0 1000000 1000000 @1700000019\n") == VisibilityChanged);
+    const char *invalid[] = {
+        "renew\n", "show 123 tile 0 0 1 1\n", "renew 123\n", "renew@1700000020\n",
+        "renew @+1700000020\n", "renew @01700000020\n", "renew @1700000020.2\n", "renew @\n",
+        "renew  @1700000020\n", "renew @1700000020 \n", "renew @18446744073709551616\n",
+        "guard-hide\n", "resize-gap\n", "shared-input\n",
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
+        assert(PipeRecord(pipeFD, &lease, 20, invalid[i]) == VisibilityInvalid);
+    assert(PipeRecord(pipeFD, &lease, 20.25, "renew @1700000021\n") == VisibilityChanged && !LeaseFresh(&lease, 20.25));
+    assert(PipeRecord(pipeFD, &lease, 20.5, "show 123 tile 0 0 1 1 @18446744073709551615\n") == VisibilityChanged);
+    assert(!lease.announcedAt && !LeaseFresh(&lease, 20.5));
     assert(PipeRecord(pipeFD, &lease, 21, "unclaimed\n") == VisibilityUnclaimed);
     close(pipeFD[1]);
     close(pipeFD[0]);
@@ -295,11 +303,11 @@ static void FocusAcknowledgment(void) {
     int pipeFD[2];
     assert(pipe(pipeFD) == 0 && fcntl(pipeFD[0], F_SETFL, O_NONBLOCK) == 0);
     VisibilityLease lease = {0};
-    assert(PipeRecord(pipeFD, &lease, 10, "show 123 tile 0 0 1000000 1000000\n") == VisibilityChanged);
+    assert(PipeRecord(pipeFD, &lease, 10, "show 123 tile 0 0 1000000 1000000 @1700000010\n") == VisibilityChanged);
 
     NSTimeInterval deadline = 10 + FocusReplyLifetime;
     assert(ReadFocusReply(pipeFD[0], 11, &deadline) == FocusWaiting);
-    assert(PipeRecord(pipeFD, &lease, 23, "renew\n") == VisibilityChanged);
+    assert(PipeRecord(pipeFD, &lease, 23, "renew @1700000023\n") == VisibilityChanged);
     assert(LeaseFresh(&lease, 23) && deadline > 23);
     assert(ReadFocusReply(pipeFD[0], 23, &deadline) == FocusWaiting);
 
@@ -331,6 +339,7 @@ static void FocusAcknowledgment(void) {
 
 @implementation WatcherFixtureOwner
 - (pid_t)processIdentifier { return 123; }
+- (BOOL)isTerminated { return NO; }
 @end
 
 @interface WatcherFixtureAnchor : MiloPreviewAnchor
@@ -338,28 +347,53 @@ static void FocusAcknowledgment(void) {
 @end
 
 @implementation WatcherFixtureAnchor
-- (void)exerciseDrain:(int)writer {
-    static const char show[] = "show 123 tile 500000 0 500000 1000000\n";
-    assert(WriteAll(writer, show, sizeof(show) - 1));
-    [self readState];
-    assert(LeaseFresh(&_lease, LeaseNow()));
+- (BOOL)canSample {
+    return LeaseFresh(&_lease, LeaseNow());
+}
 
+static void WriteStamped(int writer, const char *record, time_t stamp) {
+    char line[96];
+    int length = snprintf(line, sizeof(line), "%s @%lld\n", record, (long long)stamp);
+    assert(length > 0 && (size_t)length < sizeof(line) && WriteAll(writer, line, (size_t)length));
+}
+
+- (void)exerciseDrain:(int)writer {
+    static const char show[] = "show 123 tile 500000 0 500000 1000000";
+    time_t stamp = time(NULL);
+    WriteStamped(writer, show, stamp - 30);
+    WriteStamped(writer, "renew", stamp - 29);
+    NSTimeInterval started = NSProcessInfo.processInfo.systemUptime;
+    [self readState];
+    assert(_lease.announcedAt == (uint64_t)(stamp - 30) && !LeaseFresh(&_lease, LeaseNow()));
+    assert(![self proofCurrent:_generation started:started]);
+
+    // A later genuine observation can revalidate the known tile, but the
+    // generation of a proof taken before draining cannot be reused.
     NSUInteger generation = _generation;
+    WriteStamped(writer, "renew", time(NULL));
+    assert(![self proofCurrent:generation started:started]);
+    assert(LeaseFresh(&_lease, LeaseNow()) && !_candidate.windowID);
+    assert(![self proofCurrent:_generation started:started - SampleLifetime]);
+    assert([self proofCurrent:_generation started:NSProcessInfo.processInfo.systemUptime]);
+
+    generation = _generation;
     Geometry stale = {.windowID = _pinned};
     // Even an incomplete record can become a revocation. It must invalidate
     // proof immediately, before the rest of the pipe record arrives.
     assert(WriteAll(writer, "hi", 2));
     [self readState];
     assert(_lineLength == 2 && _generation != generation);
-    assert(WriteAll(writer, "de\nrenew\n", 9));
+    assert(WriteAll(writer, "de\n", 3));
+    WriteStamped(writer, "renew", time(NULL));
     [self applySample:stale checkedPanel:NO lostPin:NO generation:generation
         started:NSProcessInfo.processInfo.systemUptime];
+    assert(!_lease.announcedAt);
     assert(!_lineLength && !LeaseFresh(&_lease, LeaseNow()) && !_candidate.windowID);
 
     // A full show can re-establish the lease, but its new geometry cannot
     // reuse an in-flight result from the previous generation.
-    static const char resized[] = "show 123 tile 600000 0 400000 1000000\nrenew\n";
-    assert(WriteAll(writer, resized, sizeof(resized) - 1));
+    WriteStamped(writer, "show 123 tile 600000 0 400000 1000000", time(NULL));
+    WriteStamped(writer, "renew", time(NULL));
     [self applySample:stale checkedPanel:NO lostPin:NO generation:generation
         started:NSProcessInfo.processInfo.systemUptime];
     assert(LeaseFresh(&_lease, LeaseNow()) && !_candidate.windowID);

@@ -19,5 +19,9 @@ while :; do
         printf '%s\n' "$?" > "$request.watch.exit"
         watcher=
     fi
+    if [ -f "$request" ]; then
+        . "$ROOT/preview-request" "$request"
+        rm "$request"
+    fi
     /bin/sleep 0.03
 done

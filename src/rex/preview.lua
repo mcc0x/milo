@@ -394,7 +394,7 @@ local function leaf_rect(node)
   if split == nil and node.block_id == a.block then return node.rect end
 end
 
-local function tile_state(rect)
+local function tile_rect(rect)
   if type(rect) ~= "table" or rect[5] ~= nil then return end
   local x, y, w, h = rect[1], rect[2], rect[3], rect[4]
   if type(x) ~= "number" or type(y) ~= "number" or type(w) ~= "number" or type(h) ~= "number" then return end
@@ -404,28 +404,54 @@ local function tile_state(rect)
   local left, top = math.floor(x * 1000000 + 0.5), math.floor(y * 1000000 + 0.5)
   local width = math.floor((x + w) * 1000000 + 0.5) - left
   local height = math.floor((y + h) * 1000000 + 0.5) - top
-  if width > 0 and height > 0 then
-    return string.format("show %d tile %d %d %d %d", a.owner_pid, left, top, width, height)
-  end
+  if width > 0 and height > 0 then return left, top, width, height end
 end
 
-if a.mode ~= "watch" then
-  if a.mode ~= "identify" and a.mode ~= "open" then return end
+local function valid_anchor_request(host, cli_pid)
+  return host and exact(a.owner, "client:") and valid_pid(a.owner_pid)
+    and exact(a.window, "window:") and exact(a.main, "block:") and exact(a.block, "block:") and a.main ~= a.block
+    and request_from_milo(cli_pid)
+end
+
+local function return_focus(host, cli_pid)
+  if not valid_anchor_request(host, cli_pid) then return "focus" end
+  local view = current_view()
+  if not view or view.active_window_id ~= a.window or type(view.revision) ~= "number" then return "focus" end
+  local anchor, window, layer, index = locate(view, a.block)
+  local main, place, tiled = locate(view, a.main)
+  if not working_pair(host, main, place, tiled) or not local_terminal(anchor, host)
+    or window ~= place or layer ~= tiled or anchor.label ~= preview_label or anchor.owner ~= a.owner
+    or not visible(view, window, layer, index) or not tile_rect(leaf_rect(layer.layout)) then return "focus" end
+  if not own_anchor(anchor) or local_owner(a.owner) ~= a.owner_pid or not unchanged(view) then return "focus" end
+  -- The native panel can have keyboard focus while Rex already targets the shell.
+  if window.focused_block_id == a.main then return "ok" end
+  -- Rex offers no conditional focus RPC. Do not repair or retry with another
+  -- mutation if the active tab changes between the final snapshot and focus.
+  return rex.session.focus_block{ session_id = a.session, block_id = a.main } and "ok" or "focus"
+end
+
+if a.mode == "focus" then
+  print(return_focus(local_host()))
+  return
+elseif a.mode == "identify" or a.mode == "open" then
   print(one_shot(local_host()))
+  return
+elseif a.mode ~= "watch" then
   return
 end
 
 local host, cli_pid = local_host()
 local last, verified, published, claimed, last_revision, tab_departed
-local function write(record)
+local function write(record, observed_at)
+  if observed_at then record = string.format("%s @%.0f", record, observed_at) end
   io.stdout:write(record, "\n")
   io.stdout:flush()
 end
-local function emit(state)
+local function emit(state, observed_at)
   state = state or "hide"
   if last ~= state then
     last = state
-    write(state)
+    write(state, observed_at)
     return true
   end
 end
@@ -435,9 +461,7 @@ local function stop(code)
   rex.stop(code or 0)
 end
 
-if not host or not exact(a.owner, "client:") or not valid_pid(a.owner_pid)
-  or not exact(a.window, "window:") or not exact(a.main, "block:") or a.main == a.block
-  or not request_from_milo(cli_pid) then
+if not valid_anchor_request(host, cli_pid) then
   stop(1)
   return
 end
@@ -454,7 +478,10 @@ local function track_anchor(block)
   return true
 end
 
-local function refresh()
+local function refresh(heartbeat)
+  -- Timestamp the start of the observation, not a potentially late RPC
+  -- response or a write that may sit unread in the helper's pipe.
+  local observed_at = os.time()
   local owner_allowed = local_owner(a.owner) == a.owner_pid
   local view = current_view()
   if not view then return stop(1) end
@@ -493,14 +520,16 @@ local function refresh()
     or not visible(view, window, layer, index) or block.owner ~= a.owner or main.owner ~= a.owner then
     return emit()
   end
-  return emit(tile_state(leaf_rect(layer.layout)))
+  local x, y, w, h = tile_rect(leaf_rect(layer.layout))
+  if not x then return emit() end
+  local changed = emit(string.format("show %d tile %d %d %d %d", a.owner_pid, x, y, w, h), observed_at)
+  if heartbeat and not changed then write("renew", observed_at) end
 end
 
 local function poll_owner()
   -- Never renew a cached observation after a stalled tick or missed event.
   -- A fresh view and owner check are required for each heartbeat.
-  local changed = refresh()
-  if last ~= "hide" and not changed then write("renew") end
+  refresh(true)
   rex.after(1, poll_owner)
 end
 

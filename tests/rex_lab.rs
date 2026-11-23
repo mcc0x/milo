@@ -924,8 +924,44 @@ fn discord_presence_shows_nothing_without_a_rex_app_and_its_helper_ends_with_the
 fn preview_layout_and_observer() {
     use std::io::{BufRead as _, BufReader};
 
-    fn watch_records(log: &str) -> impl Iterator<Item = &str> {
-        log.split_inclusive('\n').map_while(|line| line.strip_suffix('\n'))
+    fn unix_seconds() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    // Compare geometry and sequencing independently from absolute time, but
+    // only after validating the positive record's original wire shape.
+    fn watch_records(log: &str, started_at: u64) -> impl Iterator<Item = &str> {
+        fn decimal(field: &str) -> bool {
+            let mut bytes = field.bytes();
+            match bytes.next() {
+                Some(b'0') => bytes.next().is_none(),
+                Some(b'1'..=b'9') => bytes.all(|byte| byte.is_ascii_digit()),
+                _ => false,
+            }
+        }
+
+        let now = unix_seconds();
+        log.split_inclusive('\n').map_while(|line| line.strip_suffix('\n')).map(move |record| {
+            if matches!(record, "hide" | "unclaimed") {
+                return record;
+            }
+            let (state, stamp) = record.rsplit_once(" @").unwrap_or_else(|| panic!("missing timestamp: {record}"));
+            assert!(decimal(stamp), "invalid observation time: {record}");
+            let observed_at = stamp.parse::<u64>().unwrap();
+            assert!((started_at..=now).contains(&observed_at), "observation outside watcher lifetime: {record}");
+            if state != "renew" {
+                let (pid, rect) = state
+                    .strip_prefix("show ")
+                    .and_then(|show| show.split_once(" tile "))
+                    .unwrap_or_else(|| panic!("invalid positive record: {record}"));
+                let mut fields = rect.split(' ');
+                assert!(
+                    decimal(pid) && (0..4).all(|_| fields.next().is_some_and(decimal)) && fields.next().is_none(),
+                    "invalid tiled geometry: {record}"
+                );
+            }
+            state
+        })
     }
 
     struct PausedWatcher(u32);
@@ -1207,9 +1243,10 @@ fn preview_layout_and_observer() {
     assert_eq!(launch(&rail, "floating").trim(), "placement");
     assert!(!lab.view().tab(&tab).labels().iter().any(|label| label.starts_with("milo:preview")));
 
+    let anchor_scope = format!(r#","main":"{main}"{owner}"#);
+    let focus_main = |block: &str| request("focus", block, block, &anchor_scope);
     let start_watch = |block: &str, child: u32| {
-        let extra = format!(r#","main":"{main}"{owner}"#);
-        let payload = args("watch", block, &child.to_string(), &extra);
+        let payload = args("watch", block, &child.to_string(), &anchor_scope);
         let file = request_file(&lab, block);
         let cmd = file.with_extension("watch.json");
         let staged = file.with_extension("watch.tmp");
@@ -1266,12 +1303,14 @@ fn preview_layout_and_observer() {
         };
 
         if placement == "left" {
-            let extra = format!(r#","main":"{main}"{owner}"#);
-            let payload = args("watch", block, &child.to_string(), &extra);
+            let payload = args("watch", block, &child.to_string(), &anchor_scope);
             let output = lab.rex_output(&["do", "-s", &session, "-b", block, script, "--args", &payload]).unwrap();
             assert_eq!(output.status.code(), Some(1));
             assert_eq!(output.stdout, b"hide\n");
+            let payload = args("focus", block, &child.to_string(), &anchor_scope);
+            assert_eq!(lab.rex(&["do", "-s", &session, "-b", block, script, "--args", &payload]).trim(), "focus");
         }
+        let started_at = unix_seconds();
         let watch = start_watch(block, child);
         let records = || fs::read_to_string(watch.with_extension("watch.log")).unwrap_or_default();
         let cursor = std::cell::Cell::new(0);
@@ -1280,7 +1319,7 @@ fn preview_layout_and_observer() {
             let index = cursor.get();
             loop {
                 let log = records();
-                if let Some(line) = watch_records(&log).nth(index) {
+                if let Some(line) = watch_records(&log, started_at).nth(index) {
                     cursor.set(index + 1);
                     break line.to_owned();
                 }
@@ -1341,16 +1380,20 @@ fn preview_layout_and_observer() {
         let show = resized;
         lab.rex(&["zoom", "-s", &session, &main, "--on"]);
         expect("hide");
+        if placement == "right" {
+            assert_eq!(focus_main(block).trim(), "focus");
+        }
         lab.rex(&["zoom", "-s", &session, &main, "--off"]);
         expect(&show);
         if placement == "right" {
             lab.rex(&["focus", "-s", &session, block]);
-            lab.rex(&["focus", "-s", &session, &main]);
+            assert_eq!(focus_main(block).trim(), "ok");
             check_focus(&main);
+            assert_eq!(focus_main(block).trim(), "ok", "Rex already targets the working shell");
             // Observe regular renewals with unchanged geometry beyond the CLI timeout.
             let deadline = Instant::now() + PATIENCE;
             let log = records();
-            for line in watch_records(&log).skip(cursor.get()) {
+            for line in watch_records(&log, started_at).skip(cursor.get()) {
                 assert_eq!(line, "renew");
                 cursor.set(cursor.get() + 1);
             }
@@ -1369,7 +1412,7 @@ fn preview_layout_and_observer() {
                 String::from_utf8_lossy(&output.stdout).trim_start().starts_with('T')
             }));
             let silent = records();
-            for line in watch_records(&silent).skip(cursor.get()) {
+            for line in watch_records(&silent, started_at).skip(cursor.get()) {
                 assert_eq!(line, "renew");
                 cursor.set(cursor.get() + 1);
             }
@@ -1396,6 +1439,7 @@ fn preview_layout_and_observer() {
             ));
             let cover = cover.trim();
             expect("hide");
+            assert_eq!(focus_main(block).trim(), "focus");
             scope(&format!("assert(rex.session.set_layer_state{{layer_id='{cover}', state='minimized'}})"));
             expect(&show);
             scope(&format!("assert(rex.session.set_layer_state{{layer_id='{cover}', state='normal', focus=false}})"));
@@ -1405,6 +1449,10 @@ fn preview_layout_and_observer() {
         }
         lab.rex(&["focus", "-s", &session, &second_tab]);
         expect("hide");
+        if placement == "right" {
+            assert_eq!(focus_main(block).trim(), "focus");
+            assert_eq!(scope("print(assert(rex.session.view{}).active_window_id)").trim(), second_tab);
+        }
         lab.rex(&["focus", "-s", &session, &tab]);
         expect(&show);
         if placement == "right" {
@@ -1438,7 +1486,7 @@ fn preview_layout_and_observer() {
             // delivers its final hide. EOF is sufficient for the native pane.
             assert!(soon(|| !alive(watcher)));
             let log = records();
-            let mut tail = watch_records(&log).skip(cursor.get()).skip_while(|line| *line == "renew");
+            let mut tail = watch_records(&log, started_at).skip(cursor.get()).skip_while(|line| *line == "renew");
             if let Some(final_state) = tail.next() {
                 assert_eq!(final_state, "hide");
                 assert!(tail.next().is_none(), "{placement}: records after close: {log}");
@@ -1526,11 +1574,12 @@ fn preview_layout_and_observer() {
     let anchor_pid = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
     let anchor_block = lab.view().tab(&tab).pane("milo:preview").block.clone();
     viewer_session("session.own_block", &session);
+    let started_at = unix_seconds();
     let owned_watch = start_watch(&anchor_block, anchor_pid);
     let records = || fs::read_to_string(owned_watch.with_extension("watch.log")).unwrap_or_default();
     let expect_states = |expected: &[&str]| {
         assert!(
-            soon(|| watch_records(&records()).filter(|line| *line != "renew").eq(expected.iter().copied())),
+            soon(|| watch_records(&records(), started_at).filter(|line| *line != "renew").eq(expected.iter().copied())),
             "{}",
             records()
         );
@@ -1549,8 +1598,8 @@ fn preview_layout_and_observer() {
     let mut renewals = 0;
     while started.elapsed() < Duration::from_secs(13) {
         let log = records();
-        assert!(watch_records(&log).filter(|line| *line != "renew").eq(visible), "{log}");
-        renewals = watch_records(&log).filter(|line| *line == "renew").count();
+        assert!(watch_records(&log, started_at).filter(|line| *line != "renew").eq(visible), "{log}");
+        renewals = watch_records(&log, started_at).filter(|line| *line == "renew").count();
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(renewals >= 10, "missing sustained heartbeats: {}", records());
@@ -1560,10 +1609,15 @@ fn preview_layout_and_observer() {
         "local b=assert(rex.session.describe_block{{block_id='{anchor_block}'}}).block; assert(b.owner=='{other_id}')"
     ));
     expect_states(&["hide", &first, &resized, "hide"]);
+    lab.rex(&["focus", "-s", &session, &anchor_block]);
+    assert_eq!(focus_main(&anchor_block).trim(), "focus");
+    check_focus(&anchor_block);
     viewer_session("session.own_block", &session);
     drop((input, output));
     assert!(other.wait().unwrap().success());
     expect_states(&["hide", &first, &resized, "hide", &resized]);
+    assert_eq!(focus_main(&anchor_block).trim(), "ok");
+    check_focus(&main);
     // The departure must conceal the pane even if the observer's first
     // snapshot after these calls already sees the original tab again.
     scope(&format!(
