@@ -831,7 +831,10 @@ impl Claude {
         if !changed {
             return settled;
         }
-        let mut unique = HashMap::<&str, Sample>::new();
+        // Appends usually leave the number of distinct IDs nearly unchanged.
+        // Don't reserve for vanished sessions or assume all transcripts have disjoint IDs.
+        let ids: usize = self.files.cached().map(|file| file.samples.identified.len()).sum();
+        let mut unique = HashMap::<&str, Sample>::with_capacity(self.identified.len().min(ids));
         for (id, sample) in self.files.cached().flat_map(ClaudeFile::identified) {
             unique
                 .entry(id)
