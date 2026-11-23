@@ -263,7 +263,11 @@ static void FixtureProven(MiloPreviewPanel *panel, SEL selector, BOOL proven) {
             usleep(1000);
         }
         if (checkInput) {
+            assert(staged);
             assert(![self acceptsPanelInput]); // Same authorization callback used by WebKit Copy.
+            // Denial on an old sample alone is insufficient: the queued hide
+            // must synchronously conceal this panel before the callback returns.
+            assert(!staged);
             Trace("denied-input-after-dismissal\n");
         }
     }
