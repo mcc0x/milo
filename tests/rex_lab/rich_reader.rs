@@ -233,6 +233,22 @@ pub(super) fn verify() {
     reader.keys(&["m"]);
     reader.shows("m source");
 
+    // A real floating tab follows only when asked; its working file may be saved by rename.
+    reader.keys(&["shift+g"]);
+    reader.shows("Following end");
+    let replacement = dir.join("writing.tmp");
+    let observations: String = (1..=100).map(|n| format!("\n- Observation {n}\n")).collect();
+    fs::write(&replacement, format!("{NOTES}{observations}")).unwrap();
+    fs::rename(&replacement, dir.join(MARKDOWN)).unwrap();
+    reader.shows("Observation 100");
+    reader.keys(&["g"]);
+    let top = reader.shows("Riverside field notes");
+    assert!(!top.contains("Following end") && !top.contains("Observation 100"), "{top}");
+    fs::write(dir.join(MARKDOWN), NOTES).unwrap();
+    reader.wait("text", "restored short document", |screen| {
+        !screen.contains("Observation 1") && screen.contains("trail status")
+    });
+
     // Edit from the rendered view; switching tabs must preserve the unsaved source.
     reader.keys(&["e"]);
     reader.shows("^S save");
