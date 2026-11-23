@@ -457,10 +457,13 @@ private struct Content: View {
 }
 
 @MainActor
-private final class AppDelegate: NSObject, NSApplicationDelegate {
+private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let model = Model()
     private let popover = NSPopover()
     private var status: NSStatusItem!
+    private var outsideMouse: Any?
+    private var localInput: Any?
+    private var listeningSince: TimeInterval = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         model.alerts.start()
@@ -472,8 +475,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             button.imageScaling = .scaleProportionallyDown
             button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         }
-        popover.behavior = .transient
-        let host = NSHostingController(rootView: Content(model: model, alerts: model.alerts)); host.sizingOptions = [.preferredContentSize]; popover.contentViewController = host
+        // A transient popover can consume a click while trying (and failing)
+        // to close a panel with a child window. Own dismissal, not the click.
+        popover.behavior = .applicationDefined
+        popover.delegate = self
+        // Finish closing before another status-button action can toggle it again.
+        popover.animates = false
+        let host = NSHostingController(rootView: Content(model: model, alerts: model.alerts))
+        host.sizingOptions = [.preferredContentSize]; popover.contentViewController = host
         model.changed = { [weak self] in self?.updateBadge() }
         model.monitor.changed = { [weak self] in self?.drawIndicator() }
         updateBadge(); model.start()
@@ -530,7 +539,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             button.toolTip = label; button.setAccessibilityLabel(label)
         }
     }
-    @objc private func toggle() { if popover.isShown { popover.performClose(nil) } else { show() } }
+    @objc private func toggle() { if popover.isShown { popover.close() } else { show() } }
     private func show() {
         guard let button = status?.button else { return }
         model.refreshLoginStatus()
@@ -538,8 +547,63 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         updateBadge(opening: true); popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
     }
+    func popoverWillShow(_ notification: Notification) {
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(menuBegan(_:)), name: NSMenu.didBeginTrackingNotification, object: nil)
+        center.addObserver(self, selector: #selector(menuEnded(_:)), name: NSMenu.didEndTrackingNotification, object: nil)
+        center.addObserver(self, selector: #selector(leftApp(_:)), name: NSApplication.didResignActiveNotification, object: NSApp)
+        startListening()
+    }
+    func popoverWillClose(_ notification: Notification) { endDismissal() }
+    @objc private func menuBegan(_ notification: Notification) { stopListening() }
+    @objc private func menuEnded(_ notification: Notification) { startListening() }
+    @objc private func leftApp(_ notification: Notification) { popover.close() }
+
+    private func startListening() {
+        guard localInput == nil && outsideMouse == nil else { return }
+        let buttons: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        localInput = NSEvent.addLocalMonitorForEvents(matching: buttons.union(.keyDown)) { [weak self] event in
+            guard let self, let window = event.window, window !== self.status?.button?.window else { return event }
+            let panel = self.popover.contentViewController?.view.window
+            if event.type == .keyDown {
+                guard window === panel, event.keyCode == 53,
+                      event.modifierFlags.intersection([.shift, .control, .option, .command]).isEmpty else { return event }
+                self.popover.close()
+                return nil
+            }
+            var ancestor: NSWindow? = window
+            while let current = ancestor {
+                if current === panel { return event }
+                ancestor = current.parent ?? current.sheetParent
+            }
+            self.popover.close()
+            return event
+        }
+        listeningSince = ProcessInfo.processInfo.systemUptime
+        // A copy of a mouse-down sent to another app: no keys, interception or
+        // replay. Let AppKit track Milo's own controls and hosted menus.
+        outsideMouse = NSEvent.addGlobalMonitorForEvents(matching: buttons) { [weak self] event in
+            guard let self, self.outsideMouse != nil, event.timestamp >= self.listeningSince else { return }
+            self.popover.close()
+        }
+    }
+    private func stopListening() {
+        if let localInput { NSEvent.removeMonitor(localInput); self.localInput = nil }
+        if let outsideMouse { NSEvent.removeMonitor(outsideMouse); self.outsideMouse = nil }
+    }
+    private func endDismissal() {
+        stopListening()
+        let center = NotificationCenter.default
+        center.removeObserver(self, name: NSMenu.didBeginTrackingNotification, object: nil)
+        center.removeObserver(self, name: NSMenu.didEndTrackingNotification, object: nil)
+        center.removeObserver(self, name: NSApplication.didResignActiveNotification, object: NSApp)
+    }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { show(); return false }
-    func applicationWillTerminate(_ notification: Notification) { NSWorkspace.shared.notificationCenter.removeObserver(self); model.quit() }
+    func applicationWillTerminate(_ notification: Notification) {
+        endDismissal()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        model.quit()
+    }
 }
 
 @main
