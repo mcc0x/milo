@@ -259,8 +259,9 @@ impl Outline {
     /// panes. On screen a pending file is simply one that changed.
     fn draw_hint(&self, s: &mut Screen, layout: &mut Layout) {
         let folders = if self.folds.all() { "e undo open all" } else { "e open all" };
-        // Leave room for the standard Find and changes-only hints before adding both macOS shortcuts.
-        let last = if cfg!(target_os = "macos") && s.w >= 70 { NATIVE_HINT } else { "q quit" };
+        // Keep Find, the Git filter and Actions visible before advertising the two native shortcuts.
+        let native_width = FIND.len() + "c changed only".len() + NATIVE_HINT.len() + ACTIONS_HINT.len() + HELP.len();
+        let last = if cfg!(target_os = "macos") && s.w >= native_width + 4 * 3 + 2 { NATIVE_HINT } else { "q quit" };
         let filter = if self.pending_only { "c all files" } else { "c changed only" };
         let first = if self.pending.is_empty() { "Enter open" } else { "n next change" };
         let actions =
