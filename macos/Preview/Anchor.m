@@ -18,6 +18,10 @@
 
 static const NSTimeInterval SampleInterval = 0.25;
 static const NSTimeInterval SampleLifetime = 0.60;
+// Separate from the safety sampler. Keep short runs of divider updates
+// from repeatedly exposing the page between intermediate widths.
+static const NSTimeInterval DragQuietInterval = 0.15;
+static const NSTimeInterval WindowOrderSettle = 1.0 / 60;
 static const NSTimeInterval LeaseLifetime = 3.0;
 // Rex's synchronous RPC is bounded at 15 seconds (src/rex.rs).
 static const NSTimeInterval FocusReplyLifetime = 16.0;
@@ -528,7 +532,7 @@ static int PrepareFocusInput(int stateFD) {
     int _stateFD, _focusFD, _diagnosticFD;
     pid_t _parent;
     MiloPreviewPanel *_panel;
-    NSTimer *_timer;
+    NSTimer *_timer, *_dragTimer;
     NSMutableArray *_notificationTokens;
     id _inputMonitor;
     dispatch_queue_t _sampleQueue;
@@ -541,6 +545,7 @@ static int PrepareFocusInput(int stateFD) {
     CGRect _orderedPanelFrame;
     CGDirectDisplayID _candidateDisplay;
     NSTimeInterval _lastSample, _nextPinCheck, _focusDeadline, _scopeSince, _revealedAt;
+    NSTimeInterval _lastDividerChange;
     NSUInteger _generation;
     const char *_lastPhase, *_lastReason;
     BOOL _firstOrderedSample, _samplePending, _finished, _sessionInactive, _screensAsleep;
@@ -625,7 +630,7 @@ static int PrepareFocusInput(int stateFD) {
 }
 
 - (BOOL)canSample {
-    return !_finished && !_sessionInactive && !_screensAsleep && !_focusDeadline &&
+    return !_finished && !_dragTimer && !_sessionInactive && !_screensAsleep && !_focusDeadline &&
         [self observerEligible] && FrontmostRex(_rex);
 }
 
@@ -656,15 +661,44 @@ static int PrepareFocusInput(int stateFD) {
     if (!_samplePending) [self queueRequestedSample];
 }
 
+// Let WindowServer retire the previous order before sampling a lone step.
+// A stream of steps revokes immediately but restages only once it pauses.
+- (void)waitForDivider:(NSTimeInterval)now {
+    BOOL moving = _lastDividerChange && now - _lastDividerChange < DragQuietInterval;
+    _lastDividerChange = now;
+    NSTimeInterval delay = moving ? DragQuietInterval : WindowOrderSettle;
+    if (_dragTimer) {
+        _dragTimer.fireDate = [NSDate dateWithTimeIntervalSinceNow:delay];
+    } else {
+        __weak MiloPreviewAnchor *weakSelf = self;
+        _dragTimer = [NSTimer timerWithTimeInterval:delay repeats:NO block:^(NSTimer *timer) {
+            MiloPreviewAnchor *anchor = weakSelf;
+            if (!anchor || timer != anchor->_dragTimer) return;
+            anchor->_dragTimer = nil;
+            [anchor requestSample];
+        }];
+        [NSRunLoop.mainRunLoop addTimer:_dragTimer forMode:NSRunLoopCommonModes];
+    }
+}
+
 - (void)handleLine:(size_t)length {
     ClockObservation observation = [self observeClock];
+    VisibilityLease previous = _lease;
     NSTimeInterval rejectThrough = _clock.uncertain ? INFINITY : _clock.rejectThrough;
     switch (UpdateVisibility(&_lease, observation.before, observation.wall, rejectThrough,
         _rex.processIdentifier, _line, length)) {
         case VisibilityUnchanged: break;
         case VisibilityChanged:
             [self invalidatePlacement];
-            if (_lease.checked) [self requestSample];
+            if (_lease.checked && LeaseFresh(&previous, observation.before) &&
+                !CGRectEqualToRect(_lease.tile, previous.tile)) {
+                [self waitForDivider:observation.before];
+            } else {
+                [_dragTimer invalidate];
+                _dragTimer = nil;
+                _lastDividerChange = 0;
+                if (_lease.checked) [self requestSample];
+            }
             break;
         case VisibilityInvalid: [self finish:"invalid Rex visibility message"]; break;
         case VisibilityWrongOwner: [self finish:"the Rex client changed; reopen the preview in the current Rex client"]; break;
@@ -816,8 +850,14 @@ static int PrepareFocusInput(int stateFD) {
         return;
     }
     _firstOrderedSample = YES;
-    [self requestSample];
-    // Leave the clear, click-through panel ordered for post-order proof.
+    // Give WindowServer an opportunity to publish the new order. An
+    // immediate query often missed the panel and paid a full idle interval.
+    // This one-shot requests evidence only; it never authorizes visibility.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(WindowOrderSettle * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+            if (!_finished && generation == _generation && _panel.visible && !_panel.placementProven)
+                [self requestSample];
+        });
 }
 
 - (void)applySample:(Geometry)geometry checkedPanel:(BOOL)checkedPanel lostPin:(BOOL)lostPin
@@ -1049,6 +1089,7 @@ static int PrepareFocusInput(int stateFD) {
     [self finish:NULL];
 
     [_timer invalidate];
+    [_dragTimer invalidate];
     if (_inputMonitor) [NSEvent removeMonitor:_inputMonitor];
     for (NSArray *pair in _notificationTokens) [pair[0] removeObserver:pair[1]];
     for (NSUInteger i = 0; i < _signalSources.count; ++i) {
