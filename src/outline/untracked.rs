@@ -233,7 +233,8 @@ impl Outline {
     }
 
     fn update_untracked_size(&mut self, i: usize, before: (u32, bool)) {
-        self.tree.update_untracked(i, &self.pending[i], before, |node| {
+        let file = &self.pending[i];
+        self.tree.update_pending_lines(i, file, (before.0, file.del, before.1), |node| {
             if let Some(columns) = &mut self.change_columns {
                 columns.include_size(node);
             }

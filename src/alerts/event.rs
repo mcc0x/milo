@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use super::Content;
 use crate::json::Value;
 
 const TERMINAL: &str = "com.superlogical.terminal";
@@ -84,7 +85,7 @@ pub(crate) enum State {
 pub(crate) enum Event {
     Status { block: String, record: String, state: State, app: Option<String>, text: String },
     StatusRemoved { block: String, records: Vec<String> },
-    Notification { block: String, text: String },
+    Notification { block: String, hash: u64, text: String },
     Bell { block: String },
     BlockClosed { block: String },
 }
@@ -99,7 +100,7 @@ pub(crate) struct Alert {
 }
 
 /// Reads one line of the stream. None for everything Milo has no use for.
-pub(crate) fn parse(line: &[u8]) -> Option<Event> {
+pub(crate) fn parse(line: &[u8], content: Content) -> Option<Event> {
     let [kind, payload] = Value::parse(line)?.fields(["type", "payload"]);
     if !kind?.is("session_event") {
         return None;
@@ -120,9 +121,12 @@ pub(crate) fn parse(line: &[u8]) -> Option<Event> {
         "bell" => Some(Event::Bell { block }),
         "desktop_notification" => {
             let [title, body] = inner.fields(["title", "body"]).map(text);
-            Some(Event::Notification { block, text: join(&title, &body) })
+            // Even in metadata mode, different notifications from one block are distinct alerts.
+            let text = join(&title, &body);
+            let hash = fnv(text.as_bytes());
+            Some(Event::Notification { block, hash, text: if content == Content::Text { text } else { String::new() } })
         }
-        "program_status_changed" => status(block, inner),
+        "program_status_changed" => status(block, inner, content),
         "program_status_removed" => {
             let [ids] = inner.fields(["ids"]);
             let records = ids?.elements()?.filter_map(|id| Some(id.string(128)?.into_owned())).collect();
@@ -132,7 +136,7 @@ pub(crate) fn parse(line: &[u8]) -> Option<Event> {
     }
 }
 
-fn status(block: String, payload: Value<'_>) -> Option<Event> {
+fn status(block: String, payload: Value<'_>, content: Content) -> Option<Event> {
     let [id, record] = payload.fields(["id", "record"]);
     let [state, kind, app, effective, title, msg] =
         record?.fields(["state", "kind", "app", "effective_app", "title", "msg"]);
@@ -155,7 +159,7 @@ fn status(block: String, payload: Value<'_>) -> Option<Event> {
         record: id?.string(128)?.into_owned(),
         state,
         app,
-        text: join(&text(title), &text(msg)),
+        text: if content == Content::Text { join(&text(title), &text(msg)) } else { String::new() },
     })
 }
 
@@ -214,8 +218,7 @@ impl Seen {
                 }
                 None
             }
-            Event::Notification { block, text } => {
-                let hash = fnv(text.as_bytes());
+            Event::Notification { block, hash, text } => {
                 let repeat =
                     self.notified.get(&block).is_some_and(|&(old, at)| old == hash && now.duration_since(at) < QUIET);
                 if repeat {

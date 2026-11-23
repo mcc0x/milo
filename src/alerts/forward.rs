@@ -229,7 +229,7 @@ fn read_stream(
     let (reading, ended) = mpsc::channel::<()>();
     std::thread::scope(|scope| {
         scope.spawn(move || {
-            read(output, settings.kinds, |alert| fan_out(alert, senders, dropped));
+            read(output, settings, |alert| fan_out(alert, senders, dropped));
             drop(reading);
         });
         let ended = loop {
@@ -479,11 +479,11 @@ pub(crate) fn forget_note(state: &Path) {
     let _ = std::fs::remove_file(state.join("alerts.status"));
 }
 
-/// Passes on each alert of a kind in `mirrors` until the stream ends. A line
+/// Passes on each chosen kind with only the chosen content. A line
 /// too long to be an alert is skipped whole. What each terminal last said is
 /// kept only for this stream: Rex repeats nothing to a listener that joins
 /// late, so after the stream is opened again nothing remembered can be trusted.
-pub(super) fn read(stream: impl io::Read, mirrors: [bool; 5], mut queue: impl FnMut(Alert)) {
+pub(super) fn read(stream: impl io::Read, settings: &Settings, mut queue: impl FnMut(Alert)) {
     let mut stream = BufReader::new(stream);
     let mut seen = Seen::default();
     let mut line = Vec::new();
@@ -497,8 +497,9 @@ pub(super) fn read(stream: impl io::Read, mirrors: [bool; 5], mut queue: impl Fn
                 }
             }
             Ok(_) => {
-                let alert = event::parse(line.trim_ascii_end()).and_then(|event| seen.alert(event, Instant::now()));
-                if let Some(alert) = alert.filter(|alert| mirrors[alert.kind as usize]) {
+                let alert = event::parse(line.trim_ascii_end(), settings.content)
+                    .and_then(|event| seen.alert(event, Instant::now()));
+                if let Some(alert) = alert.filter(|alert| settings.mirrors(alert.kind)) {
                     queue(alert);
                 }
             }

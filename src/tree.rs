@@ -26,13 +26,13 @@ pub struct Node {
     pub del: u64,
     /// New files whose additions have yet to be measured.
     pub(crate) uncounted: u32,
-    untracked: Option<NonZeroU32>,
+    /// Only the first pending entry for a path contributes to its line totals.
+    first_pending: Option<NonZeroU32>,
     /// Pending files beneath a directory.
     pub pending: u32,
     /// This file or a file beneath this folder is uncommitted.
     pub uncommitted: bool,
-    /// Keeps a path with multiple pending entries from counting twice.
-    counted: bool,
+    first_untracked: bool,
 }
 
 impl Node {
@@ -49,10 +49,10 @@ impl Node {
             add: 0,
             del: 0,
             uncounted: 0,
-            untracked: None,
+            first_pending: None,
             pending: 0,
             uncommitted: false,
-            counted: false,
+            first_untracked: false,
         }
     }
 
@@ -62,7 +62,11 @@ impl Node {
     }
 
     pub(crate) fn untracked_index(&self) -> Option<usize> {
-        self.untracked.map(|i| (i.get() - 1) as usize)
+        self.pending_index().filter(|_| self.first_untracked)
+    }
+
+    fn pending_index(&self) -> Option<usize> {
+        self.first_pending.map(|i| (i.get() - 1) as usize)
     }
 
     fn is_pending_file(&self) -> bool {
@@ -286,10 +290,12 @@ impl Tree {
     /// Use the uncommitted entry when the same path is also unpushed.
     fn count(&mut self, index: usize, file: &PendingFile) {
         let mut i = self.insert(&file.path);
-        let first = !std::mem::replace(&mut self.node_mut(i).counted, true);
-        if first && file.kind == Kind::Untracked {
-            let index = u32::try_from(index + 1).expect("at most one untracked entry per node");
-            self.node_mut(i).untracked = NonZeroU32::new(index);
+        let node = self.node_mut(i);
+        let first = node.first_pending.is_none();
+        if first {
+            let index = u32::try_from(index + 1).expect("too many pending entries");
+            node.first_pending = NonZeroU32::new(index);
+            node.first_untracked = file.kind == Kind::Untracked;
         }
         loop {
             let n = self.node_mut(i);
@@ -310,25 +316,27 @@ impl Tree {
         }
     }
 
-    /// Updates one count without rebuilding the layout or resumming other children.
-    pub(crate) fn update_untracked(
+    /// Updates line totals when the pending paths, their kinds and order are unchanged.
+    pub(crate) fn update_pending_lines(
         &mut self,
         index: usize,
         file: &PendingFile,
-        before: (u32, bool),
+        before: (u32, u32, bool),
         mut update: impl FnMut(&Node),
     ) {
-        let Some(&id) = self.index.get(file.path.as_str()) else { return };
-        // Only the first pending entry for this path contributed to these totals.
-        if self.node(id).untracked_index() != Some(index) {
+        if before == (file.add, file.del, file.lines_pending) {
             return;
         }
-        let (old_add, old_uncounted) = (u64::from(before.0), before.1);
-        let add = u64::from(file.add);
+        let Some(&id) = self.index.get(file.path.as_str()) else { return };
+        if self.node(id).pending_index() != Some(index) {
+            return;
+        }
+        let (old_add, old_del, old_uncounted) = before;
         let mut i = id;
         loop {
             let n = self.node_mut(i);
-            n.add = n.add - old_add + add;
+            n.add = n.add - u64::from(old_add) + u64::from(file.add);
+            n.del = n.del - u64::from(old_del) + u64::from(file.del);
             n.uncounted = n.uncounted - u32::from(old_uncounted) + u32::from(file.lines_pending);
             if i == 0 {
                 break;
@@ -520,7 +528,7 @@ mod tests {
         assert_eq!(totals(&tree), (max + 1, max + 2));
 
         files[1].add = 3;
-        tree.update_untracked(1, &files[1], (1, false), |_| {});
+        tree.update_pending_lines(1, &files[1], (1, 2, false), |_| {});
         assert_eq!(totals(&tree), (max + 3, max + 2));
     }
 

@@ -169,8 +169,15 @@ struct Document {
 }
 
 struct Run {
-    start: usize,
+    // The input caps keep even expanded Markdown well below 4 GiB.
+    start: u32,
     style: Style,
+}
+
+impl Run {
+    fn start(&self) -> usize {
+        self.start as usize
+    }
 }
 
 struct Block {
@@ -329,7 +336,8 @@ impl Document {
 
     fn run(&mut self, style: Style) {
         if self.runs.last().is_none_or(|run| run.style != style) {
-            self.runs.push(Run { start: self.text.len(), style });
+            let start = u32::try_from(self.text.len()).expect("Markdown preview offset fits in u32");
+            self.runs.push(Run { start, style });
         }
     }
 
@@ -379,9 +387,9 @@ impl Document {
             return;
         }
         let mut start = row.start;
-        let mut run = self.runs.partition_point(|run| run.start <= start).saturating_sub(1);
+        let mut run = self.runs.partition_point(|run| run.start() <= start).saturating_sub(1);
         while start < row.end {
-            let end = self.runs.get(run + 1).map_or(row.end, |next| row.end.min(next.start));
+            let end = self.runs.get(run + 1).map_or(row.end, |next| row.end.min(next.start()));
             x += screen.put(x, y, width - x, &self.text[start..end], self.runs[run].style);
             start = end;
             run += 1;
@@ -817,9 +825,22 @@ mod tests {
             ("alt", FAINT),
         ] {
             let start = doc.text.find(text).unwrap();
-            let run = doc.runs.partition_point(|run| run.start <= start) - 1;
+            let run = doc.runs.partition_point(|run| run.start() <= start) - 1;
             assert!(doc.runs[run].style == style, "wrong style for {text}");
         }
+    }
+
+    #[test]
+    fn compact_runs_keep_styles_at_large_byte_offsets() {
+        assert_eq!(size_of::<Run>(), 8);
+        let earlier = "x".repeat(1 << 16);
+        let mut preview = Preview::new(&lines(&[&earlier, "", "Guide: `café` e\u{0301}nd"]));
+        preview.go_to_line(2);
+        let mut screen = Screen::sized(40, 2);
+        preview.draw(&mut screen, 1);
+        assert!(screen.text()[1].starts_with("Guide: café e\u{0301}nd"));
+        let code = "\x1b[0;33mcafé".as_bytes();
+        assert!(screen.emitted().windows(code.len()).any(|bytes| bytes == code));
     }
 
     #[test]

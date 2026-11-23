@@ -436,6 +436,12 @@ mod omp_limits {
             used_fraction REAL, status TEXT, resets_at INTEGER);
     ";
 
+    // OMP v18.18.0's series and time indexes. Keep unindexed fixtures too.
+    pub(super) const HISTORY_INDEXES: &str = "
+        CREATE INDEX idx_usage_history_series ON usage_history(provider,account_key,limit_id,recorded_at);
+        CREATE INDEX idx_usage_history_recorded ON usage_history(recorded_at);
+    ";
+
     pub(super) fn sqlite(f: &Fixture) -> Option<PathBuf> {
         if !sqlite_installed() {
             return None;
@@ -640,6 +646,41 @@ mod omp_limits {
         let limits = omp::read(&path, NOW, TEST_WAIT).unwrap().claude.unwrap().windows;
         assert_eq!(limits.base.map(|entry| entry.map(|window| window.percent)), [Some(12.5), Some(75.0)]);
         assert_eq!(limits.model_week.unwrap().window.percent, 62.5);
+    }
+
+    #[test]
+    fn omp_history_breaks_timestamp_ties_without_reviving_an_older_limit() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        exec(&path, HISTORY_INDEXES);
+        let now = NOW * 1000;
+        let future = (NOW + CLOCK_SKEW + 1) * 1000;
+        let five = window("anthropic:5h", "0.125", (NOW + HOUR) * 1000, 300, "null");
+        let week = window("anthropic:7d", "0.375", (NOW + DAY) * 1000, 10_080, "null");
+        report(&path, "current", "anthropic", now - 1000, &format!("[{five},{week}]"));
+        // A newer write made the five-hour limit unknown. The subsequent
+        // backfill has a higher row ID but an older observation time.
+        exec(
+            &path,
+            &format!(
+                "INSERT INTO usage_history(provider, account_key, recorded_at, limit_id, used_fraction, window_label)
+                 VALUES ('anthropic','oauth|account:current',{now}-500,'anthropic:5h',0.25,'5 Hours'),
+                        ('anthropic','oauth|account:current',{now}-500,'anthropic:5h',NULL,'5 Hours'),
+                        ('anthropic','oauth|account:current',{now}-900,'anthropic:5h',0.75,'5 Hours'),
+                        ('anthropic','oauth|account:other',{now}-100,'anthropic:7d',0.875,'7 Day'),
+                        ('anthropic','oauth|account:current',{now}-1000,'anthropic:7d',0.50,'7 Day'),
+                        ('anthropic','oauth|account:current',{future},'anthropic:5h',0.625,'5 Hours');"
+            ),
+        );
+        let reports = omp::read(&path, NOW, TEST_WAIT).unwrap();
+        assert_eq!(reports.ahead, Some(future));
+        let limits = reports.claude.unwrap().windows;
+        assert_eq!(limits.base.map(|entry| entry.map(|window| window.percent)), [None, Some(37.5)]);
+
+        let reports = omp::read(&path, NOW + 1, TEST_WAIT).unwrap();
+        assert_eq!(reports.ahead, None);
+        let limits = reports.claude.unwrap().windows;
+        assert_eq!(limits.base.map(|entry| entry.map(|window| window.percent)), [Some(62.5), Some(37.5)]);
     }
 
     #[test]
