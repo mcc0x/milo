@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Rex preview: responsive activity feed</title>
+<style>
+  * { box-sizing: border-box }
+  :root { color-scheme: dark; font: 15px/1.45 -apple-system, system-ui, sans-serif; background: #141821; color: #eef5ff }
+  body { margin: 0 }
+  header { position: sticky; z-index: 1; top: 0; padding: .7rem 1rem; background: #192333f2; backdrop-filter: blur(8px) }
+  h1 { margin: 0 0 .3rem; font-size: 1.2rem }
+  label { display: flex; align-items: center; gap: .5rem }
+  input { min-width: 0; flex: 1; border: 1px solid #526681; border-radius: .25rem; padding: .25rem .4rem }
+  main { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr)); gap: .6rem; padding: .7rem }
+  article { display: grid; align-content: start; gap: .35rem; border: 1px solid #39495d; border-radius: .6rem;
+    padding: .65rem; background: linear-gradient(150deg, #26384d, #1d2535); box-shadow: 0 2px 4px #0005 }
+  h2, p { margin: 0; overflow-wrap: anywhere }
+  h2 { font-size: 1rem }
+  p { color: #d0ddeb; font-size: .84rem }
+  .badge { display: flex; flex-wrap: wrap; gap: .3rem; color: #91ebd8; font-size: .72rem; text-transform: uppercase }
+  .badge span { border-radius: 1rem; background: #344b60; padding: .1rem .45rem }
+  svg { width: 100%; height: 1.6rem; color: #7ed7ff; overflow: visible }
+  @media (min-width: 320px) { main { gap: .9rem; padding: .9rem } article { padding: .8rem } }
+</style>
+<header><h1>Build activity</h1><form autocomplete="off"><label>Notes <input id="divider-form"></label></form></header>
+<main aria-label="Build activity feed"></main>
+<template id="card">
+  <article><h2></h2><div class="badge"><span></span><span></span></div><p></p>
+    <svg aria-hidden="true" viewBox="0 0 100 20" preserveAspectRatio="none"><polyline fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+  </article>
+</template>
+<script>
+  const projects = ['Documentation', 'Index rebuild', 'Preview check', 'Integration tests', 'Package audit'];
+  const descriptions = [
+    'Reconciled the queued changes and published a summary for the next scheduled run.',
+    'Restored a clean cache and verified the generated output against the previous build.',
+    'Collected execution logs, artifact sizes, and the elapsed time by stage.',
+  ];
+  const cards = document.createDocumentFragment();
+  const card = document.querySelector('#card').content.firstElementChild;
+  for (let i = 0; i < 420; i++) {
+    const item = card.cloneNode(true);
+    item.querySelector('h2').textContent = projects[i % projects.length] + ' #' + (5300 - i);
+    const [branch, state] = item.querySelectorAll('.badge span');
+    branch.textContent = i % 7 ? 'main' : 'preview';
+    state.textContent = i % 11 ? 'Passed' : 'Waiting';
+    item.querySelector('p').textContent = descriptions[i % descriptions.length];
+    item.querySelector('polyline').setAttribute('points',
+      Array.from({length: 11}, (_, x) => `${x * 10},${3 + ((i * 3 + x * x * 7 + x * i) % 15)}`).join(' '));
+    cards.append(item);
+  }
+  document.querySelector('main').append(cards);
+</script>

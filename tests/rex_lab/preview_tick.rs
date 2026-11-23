@@ -8,6 +8,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "preview_tick_perf.rs"]
+mod perf;
+
 const COORDINATOR: &str = "preview-rex-tick";
 const DIVIDER: &str = "preview-divider-drag";
 
@@ -22,11 +25,12 @@ impl Drop for OwnedChild {
     }
 }
 
-fn compile(lab: &Lab, binary: &str, sources: &[&str], frameworks: &[&str]) {
+fn compile(lab: &Lab, binary: &str, sources: &[&str], frameworks: &[&str], optimized: bool) {
     let result = lab
         .command("/usr/bin/xcrun")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .args(["clang", "-fobjc-arc", "-mmacosx-version-min=13.0"])
+        .args(optimized.then_some("-Os"))
         .args(sources)
         .args(frameworks.iter().flat_map(|framework| ["-framework", *framework]))
         .arg("-o")
@@ -210,19 +214,19 @@ impl Tile<'_> {
     }
 }
 
-fn serve_fixture(listener: TcpListener, finished: mpsc::Receiver<()>) {
+fn serve_fixture(listener: TcpListener, finished: mpsc::Receiver<()>, benchmark: Option<&'static str>) {
     const PAGE: &str = "<!doctype html><meta charset=utf-8><link rel=icon href=data:,>\
         <p id=rex-lab-page>Rex preview fixture</p><a href=/rex-lab-form id=divider-link>Open the form</a>";
     const FORM: &str = "<!doctype html><meta charset=utf-8><link rel=icon href=data:,>\
         <form autocomplete=off><input id=divider-form></form>";
-    fn reply(mut stream: TcpStream, loads: &mut [usize; 2]) {
+    fn reply(mut stream: TcpStream, loads: &mut [usize; 2], benchmark: Option<&str>) {
         stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let mut lines = BufReader::new(&mut stream).lines();
         let request = lines.next().and_then(Result::ok).unwrap_or_default();
         while lines.next().and_then(Result::ok).is_some_and(|line| !line.is_empty()) {}
         let (status, body) = if request.starts_with("GET /rex-lab-page ") {
             loads[0] += 1;
-            ("200 OK", PAGE)
+            ("200 OK", benchmark.unwrap_or(PAGE))
         } else if request.starts_with("GET /rex-lab-form ") {
             loads[1] += 1;
             ("200 OK", FORM)
@@ -241,7 +245,7 @@ fn serve_fixture(listener: TcpListener, finished: mpsc::Receiver<()>) {
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
-                reply(stream, &mut loads);
+                reply(stream, &mut loads, benchmark);
                 assert!(loads.iter().all(|&count| count <= 1), "WebKit unexpectedly reloaded: {loads:?}");
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -254,21 +258,40 @@ fn serve_fixture(listener: TcpListener, finished: mpsc::Receiver<()>) {
             Err(error) => panic!("loopback fixture: {error}"),
         }
     }
-    assert_eq!(loads, [1, 1], "the two WebKit documents must load exactly once");
+    assert_eq!(loads, [1, usize::from(benchmark.is_none())], "unexpected WebKit document loads");
 }
 
 // cargo test --test rex_lab preview_tick::persistent_preview_coexists_with_shell -- --ignored --nocapture
 #[test]
 #[ignore = "needs Rex, Python 3, Xcode tools and a macOS GUI login; only disposable nonactivating windows"]
 fn persistent_preview_coexists_with_shell() {
+    run_fixture(None);
+}
+
+// Use this same driver against either production source snapshot. The
+// benchmark reports measurements; the separate regression gates behavior.
+#[test]
+#[ignore = "needs Rex, Python 3, Xcode tools and a macOS GUI login; only disposable nonactivating windows"]
+fn benchmark_persistent_preview() {
+    run_fixture(Some(perf::Config::from_env()));
+}
+
+fn run_fixture(benchmark: Option<perf::Config>) {
     let mut lab = Lab::start();
-    compile(
-        &lab,
-        COORDINATOR,
-        &["tests/preview_rex_tick.m", "macos/Preview/Browser.m"],
-        &["AppKit", "CoreGraphics", "WebKit"],
-    );
-    compile(&lab, DIVIDER, &["tests/preview_divider_drag.m"], &["AppKit"]);
+    let benchmark = benchmark.as_ref();
+    let setup = benchmark.map(|config| config.setup(&lab));
+    if let Some(setup) = &setup {
+        compile(&lab, COORDINATOR, &setup.sources(), &["AppKit", "CoreGraphics", "WebKit"], true);
+    } else {
+        compile(
+            &lab,
+            COORDINATOR,
+            &["tests/preview_rex_tick.m", "macos/Preview/Browser.m"],
+            &["AppKit", "CoreGraphics", "WebKit"],
+            false,
+        );
+        compile(&lab, DIVIDER, &["tests/preview_divider_drag.m"], &["AppKit"], false);
+    }
 
     let root = lab.root.to_str().unwrap();
     let host = lab
@@ -296,12 +319,17 @@ fn persistent_preview_coexists_with_shell() {
             .unwrap(),
     );
 
-    let drag = lab.command(lab.root.join(DIVIDER)).output().unwrap();
-    assert!(drag.status.success(), "{}", String::from_utf8_lossy(&drag.stderr));
-    let ratios = std::str::from_utf8(&drag.stdout).unwrap().split_whitespace()
-        .map(|ratio| ratio.parse::<f64>().unwrap()).collect::<Vec<_>>();
-    let [right_start, right_end] = ratios[..] else { panic!("disposable split produced {ratios:?}") };
-    assert!((0.25..0.75).contains(&right_start) && (0.25..0.75).contains(&right_end) && right_end - right_start > 0.08);
+    let (right_start, right_end) = if benchmark.is_some() {
+        (0.4, 0.52)
+    } else {
+        let drag = lab.command(lab.root.join(DIVIDER)).output().unwrap();
+        assert!(drag.status.success(), "{}", String::from_utf8_lossy(&drag.stderr));
+        let ratios = std::str::from_utf8(&drag.stdout).unwrap().split_whitespace()
+            .map(|ratio| ratio.parse::<f64>().unwrap()).collect::<Vec<_>>();
+        let [right_start, right_end] = ratios[..] else { panic!("disposable split produced {ratios:?}") };
+        assert!((0.25..0.75).contains(&right_start) && (0.25..0.75).contains(&right_end) && right_end - right_start > 0.08);
+        (right_start, right_end)
+    };
 
     let new_session = |name: &str| {
         lab.rex(&["new", name, "-c", root, "--shell=none", "--json", "--", "/bin/bash", "--noprofile", "--norc", "-i"])
@@ -319,6 +347,7 @@ fn persistent_preview_coexists_with_shell() {
         .command("python3")
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_lab/preview_viewer.py"))
         .arg(lab.root.join("s.sock"))
+        .args(benchmark.map(|_| "--bench"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -378,45 +407,81 @@ fn persistent_preview_coexists_with_shell() {
     let before = inventory();
     // The same foreign AppKit window is above and intersecting the real
     // fixture window in each case; only its relation to the tile changes.
-    for position in ["sibling", "titlebar", "tile"] {
-        window_command(&lab, position);
-        preflight(position).expect("an overlapping foreign window prevented pinning");
-        assert_eq!(inventory(), before, "{position} changed Rex tabs or panes before the split");
-    }
-    for (scenario, refusal) in [
-        ("background", "was not foreground"),
-        ("second-rex", "additional normal Rex window"),
-        ("fullscreen", "occupies the entire display"),
-    ] {
-        let reason = preflight(scenario).expect_err("unexpected successful pin");
-        assert!(reason.contains(refusal), "{scenario}: {reason}");
-        assert_eq!(inventory(), before, "{scenario} changed Rex tabs or panes before the split");
+    if benchmark.is_some() {
+        window_command(&lab, "sibling");
+        preflight("sibling").expect("the clear benchmark tile could not pin");
+    } else {
+        for position in ["sibling", "titlebar", "tile"] {
+            window_command(&lab, position);
+            preflight(position).expect("an overlapping foreign window prevented pinning");
+            assert_eq!(inventory(), before, "{position} changed Rex tabs or panes before the split");
+        }
+        for (scenario, refusal) in [
+            ("background", "was not foreground"),
+            ("second-rex", "additional normal Rex window"),
+            ("fullscreen", "occupies the entire display"),
+        ] {
+            let reason = preflight(scenario).expect_err("unexpected successful pin");
+            assert!(reason.contains(refusal), "{scenario}: {reason}");
+            assert_eq!(inventory(), before, "{scenario}: changed Rex tabs or panes before the split");
+        }
     }
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/rex-lab-page", listener.local_addr().unwrap());
     let (finish_http, finished) = mpsc::channel();
-    let page = thread::spawn(move || serve_fixture(listener, finished));
+    let body = benchmark.map(perf::Config::body);
+    let page = thread::spawn(move || serve_fixture(listener, finished, body));
+    let script = setup.as_ref().map_or(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/src/rex/preview.lua"),
+        |setup| setup.watcher(),
+    );
     let start = Instant::now();
-    let started = lab.rex(&[
-        "split", "-s", &session, "-b", &shell, "--split=right", "--ratio", &(100.0 * right_start).round().to_string(),
+    let ratio = (100.0_f64 * right_start).round().to_string();
+    let mut split = vec![
+        "split", "-s", &session, "-b", &shell, "--split=right", "--ratio", &ratio,
         "--focus=false", "--shell=none", "--label", "milo:preview", "--keep-open", "--json", "--", "/bin/bash",
         concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_lab/preview_tick.sh"), root,
-        concat!(env!("CARGO_MANIFEST_DIR"), "/src/rex/preview.lua"), client, &owner_pid, &shell, &tab, &url, &target,
-    ]);
+        script, client, &owner_pid, &shell, &tab, &url, &target,
+    ];
+    if let Some(config) = benchmark {
+        split.push(config.page());
+    }
+    let startup = benchmark.map(|_| perf::Startup::begin(&lab));
+    let started = lab.rex(&split);
     let block = id(&started, "block_ids");
     let tile = Tile { lab: &lab, session: &session, block: &block, shell: &shell, tab: &tab };
     let owned = format!(r#"{{"session_id":"{session}","block_ids":["{shell}","{block}"]}}"#);
-    let resize_pane = |viewer: &mut dyn FnMut(&str, &str) -> String, right: f64| {
-        let reply = viewer("session.resize_pane", &format!(
-            r#"{{"session_id":"{session}","direction":"horizontal","before_block_id":"{shell}","after_block_id":"{block}","ratio":{:.6}}}"#,
-            1.0 - right,
-        ));
-        let revision = reply.split_once(r#""revision":"#).unwrap_or_else(|| panic!("no Rex layout revision: {reply}")).1;
-        revision.split(|c: char| !c.is_ascii_digit()).next().unwrap().parse::<u64>().unwrap()
+    let resize_payload = |right: f64| format!(
+        r#"{{"session_id":"{session}","direction":"horizontal","before_block_id":"{shell}","after_block_id":"{block}","ratio":{:.6}}}"#,
+        1.0 - right,
+    );
+    let resize_pane = |viewer: &mut dyn FnMut(&str, &str) -> String, right| {
+        perf::Layout::parse(&viewer("session.resize_pane", &resize_payload(right)))
     };
-    let mut last_revision = resize_pane(&mut viewer, right_start);
+    let initial_layout = resize_pane(&mut viewer, right_start);
     viewer("session.own_block", &owned);
+    if let (Some(config), Some(setup), Some(startup)) = (benchmark, setup, startup) {
+        config.measure(&tile, setup, startup, initial_layout, |requests| {
+            use std::fmt::Write as _;
+            let mut batch = String::from("[");
+            for (i, &(planned, right)) in requests.iter().enumerate() {
+                if i != 0 { batch.push(','); }
+                write!(batch, "[{planned},{}]", resize_payload(right as f64 / 1_000_000.0)).unwrap();
+            }
+            batch.push(']');
+            perf::Layout::parse_batch(&viewer("__bench_resize_batch", &batch))
+        });
+        lab.rex(&["block", "close", "-s", &session, &shell]);
+        tile.wait("benchmark preview did not stop after shell closure", || lab.read("native-exit") == "0\n");
+        lab.rex(&["block", "close", "-s", &session, &block]);
+        finish_http.send(()).unwrap();
+        page.join().unwrap();
+        drop((input, output));
+        lab.stop_server();
+        return;
+    }
+    let mut last_revision = initial_layout.revision;
 
     let layout_is = |right: f64| {
         let latest = lab.read("native-watch.log");
@@ -489,7 +554,7 @@ fn persistent_preview_coexists_with_shell() {
         assert!(next >= right && next <= right_end + 0.000002, "unexpected live split ratio {right} → {next}");
         if next > right { updates += 1; }
         right = next;
-        let revision = resize_pane(&mut viewer, right);
+        let revision = resize_pane(&mut viewer, right).revision;
         assert!(revision > last_revision, "Rex did not apply a fresh divider revision");
         last_revision = revision;
         if updates == 3 && !checked_while_held {

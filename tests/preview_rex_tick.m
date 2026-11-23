@@ -3,6 +3,7 @@
 // frames, z-order, visibility, Space membership and WKWebView are real.
 #import <assert.h>
 #import <fcntl.h>
+#import <inttypes.h>
 #import <objc/runtime.h>
 #import <mach/mach.h>
 #import <stdarg.h>
@@ -106,6 +107,100 @@ static void Trace(const char *format, ...) {
     assert(written == length);
 }
 
+// Benchmark mode adds no polling source. Both builds write to a disposable
+// control directory, use the same monotonic host clock and run the real UI.
+static int perfFD = -1;
+static unsigned perfRight;
+static uint64_t perfTicks;
+static uint64_t perfExposureLosses;
+static _Atomic(uint64_t) perfMainWindows, perfBackgroundWindows, perfPins;
+
+static uint64_t PerfNow(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+
+static void PerfRecord(const char *event, uint64_t when, const char *fields, ...) {
+    char buffer[768];
+    int head = snprintf(buffer, sizeof(buffer), "{\"event\":\"%s\",\"t_ns\":%" PRIu64, event, when);
+    assert(head > 0 && (size_t)head < sizeof(buffer) - 2);
+    va_list args;
+    va_start(args, fields);
+    int tail = vsnprintf(buffer + head, sizeof(buffer) - (size_t)head - 2, fields, args);
+    va_end(args);
+    assert(tail >= 0 && (size_t)tail < sizeof(buffer) - (size_t)head - 2);
+    buffer[head + tail] = '}';
+    buffer[head + tail + 1] = '\n';
+    assert(WriteAll(perfFD, buffer, (size_t)(head + tail + 2)));
+}
+
+static uint64_t CPUTimeNS(struct timeval time) {
+    return (uint64_t)time.tv_sec * NSEC_PER_SEC + (uint64_t)time.tv_usec * NSEC_PER_USEC;
+}
+
+static void PerfCounters(unsigned char marker) {
+    uint64_t when = PerfNow();
+    struct rusage usage;
+    assert(getrusage(RUSAGE_SELF, &usage) == 0);
+
+    // These are kernel-attributed wakeup classes for this helper task, not
+    // run-loop iteration counts or wakeups of WebContent, GPU or WindowServer.
+    task_power_info_data_t power;
+    mach_msg_type_number_t count = TASK_POWER_INFO_COUNT;
+    char interrupt[32] = "null", platformIdle[32] = "null", resident[32] = "null";
+    if (task_info(mach_task_self(), TASK_POWER_INFO, (task_info_t)&power, &count) == KERN_SUCCESS &&
+        count == TASK_POWER_INFO_COUNT) {
+        snprintf(interrupt, sizeof(interrupt), "%" PRIu64, power.task_interrupt_wakeups);
+        snprintf(platformIdle, sizeof(platformIdle), "%" PRIu64, power.task_platform_idle_wakeups);
+    }
+    mach_task_basic_info_data_t memory;
+    count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&memory, &count) == KERN_SUCCESS &&
+        count == MACH_TASK_BASIC_INFO_COUNT)
+        snprintf(resident, sizeof(resident), "%" PRIu64, (uint64_t)memory.resident_size);
+
+    uint64_t mainWindows = atomic_load_explicit(&perfMainWindows, memory_order_relaxed);
+    uint64_t backgroundWindows = atomic_load_explicit(&perfBackgroundWindows, memory_order_relaxed);
+    uint64_t pins = atomic_load_explicit(&perfPins, memory_order_relaxed);
+    PerfRecord("counters", when,
+        ",\"marker\":%u,\"snapshot_end_ns\":%" PRIu64 ",\"cpu_user_ns\":%" PRIu64 ",\"cpu_system_ns\":%" PRIu64
+        ",\"interrupt_wakeups\":%s,\"platform_idle_wakeups\":%s,\"resident_bytes\":%s,\"tick_calls\":%" PRIu64
+        ",\"quartz_window_samples\":%" PRIu64 ",\"quartz_background_samples\":%" PRIu64 ",\"quartz_pin_samples\":%" PRIu64,
+        (unsigned)marker, PerfNow(), CPUTimeNS(usage.ru_utime), CPUTimeNS(usage.ru_stime),
+        interrupt, platformIdle, resident, perfTicks, mainWindows + backgroundWindows, backgroundWindows, pins);
+}
+
+static void PerfVerifyFinalViewport(void);
+
+static dispatch_source_t PerfStart(void) {
+    const char *file = getenv("MILO_REX_TICK_PERF_FILE");
+    if (!file) return nil;
+    const char *page = getenv("MILO_REX_TICK_PERF_PAGE");
+    assert(*file == '/' && page && (!strcmp(page, "light") || !strcmp(page, "busy")));
+    perfFD = open(file, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    assert(perfFD >= 0);
+    PerfRecord("start", PerfNow(), ",\"pid\":%d,\"page\":\"%s\",\"clock\":\"CLOCK_UPTIME_RAW\","
+        "\"resource_scope\":\"preview_helper\"", getpid(), page);
+
+    int control = open(Path(@"perf-control").fileSystemRepresentation, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    struct stat metadata;
+    assert(control >= 0 && fstat(control, &metadata) == 0 && S_ISFIFO(metadata.st_mode));
+    dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)control, 0,
+        dispatch_get_main_queue());
+    assert(source);
+    dispatch_source_set_event_handler(source, ^{
+        unsigned char markers[16];
+        ssize_t n;
+        do { n = read(control, markers, sizeof(markers)); } while (n < 0 && errno == EINTR);
+        if (n < 0 && errno == EAGAIN) return;
+        assert(n > 0);
+        for (ssize_t i = 0; i < n; ++i) {
+            if (markers[i] == 'V') PerfVerifyFinalViewport();
+            else PerfCounters(markers[i]);
+        }
+    });
+    dispatch_source_set_cancel_handler(source, ^{ close(control); });
+    dispatch_resume(source);
+    return source;
+}
+
 static CGRect QuartzFrame(NSRect frame) {
     return CGRectMake(NSMinX(frame), quartzHeight - NSMaxY(frame), NSWidth(frame), NSHeight(frame));
 }
@@ -138,6 +233,10 @@ static CFArrayRef FixtureWindows(CGWindowListOption options, CGWindowID relative
     assert(options == (kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements));
     assert(relative == kCGNullWindowID);
     if (preflightWindows) return CFBridgingRetain(preflightWindows);
+    if (perfFD >= 0) {
+        _Atomic(uint64_t) *counter = NSThread.isMainThread ? &perfMainWindows : &perfBackgroundWindows;
+        atomic_fetch_add_explicit(counter, 1, memory_order_relaxed);
+    }
     NSArray *actual = CFBridgingRelease(CGWindowListCopyWindowInfo(options, relative));
     if (!actual) return NULL;
     CGWindowID preview = atomic_load(&panelID);
@@ -147,7 +246,7 @@ static CFArrayRef FixtureWindows(CGWindowListOption options, CGWindowID relative
         if (id == targetID || id == replacementID) [windows addObject:WithOwner(row, ownerPID)];
         else if (id == coverID || id == preview) [windows addObject:row];
     }
-    if (!NSThread.isMainThread && Flag(@"hold-sample")) {
+    if (perfFD < 0 && !NSThread.isMainThread && Flag(@"hold-sample")) {
         // Preserve the actual captured stack, but deliver it after a real
         // observer revocation. No fake geometry or altered sample clock.
         Trace("sample-held\n");
@@ -163,6 +262,7 @@ static CFArrayRef FixtureWindows(CGWindowListOption options, CGWindowID relative
 
 static CFArrayRef FixturePin(CFArrayRef ids) {
     assert(CFArrayGetCount(ids) == 1 && (uintptr_t)CFArrayGetValueAtIndex(ids, 0) == targetID);
+    if (perfFD >= 0) atomic_fetch_add_explicit(&perfPins, 1, memory_order_relaxed);
     NSArray *rows = CFBridgingRelease(CGWindowListCreateDescriptionFromArray(ids));
     if (!rows.count) return CFBridgingRetain(rows);
     assert(rows.count == 1);
@@ -379,6 +479,42 @@ static void CheckShown(MiloPreviewPanel *panel, CGRect tile) {
     assert(NSEqualRects(frame, panel.frame));
 }
 
+static void PerfFrame(const char *event, uint64_t started, uint64_t when, unsigned right, NSRect frame) {
+    PerfRecord(event, when, ",\"start_ns\":%" PRIu64 ",\"right\":%u,\"width_pt\":%.6f,\"height_pt\":%.6f",
+        started, right, NSWidth(frame), NSHeight(frame));
+}
+
+static void (*ActualPanelFrame)(MiloPreviewPanel *, SEL, NSRect, BOOL);
+static void ObservePanelFrame(MiloPreviewPanel *panel, SEL sel, NSRect frame, BOOL display) {
+    NSRect before = panel.frame;
+    BOOL changing = !NSEqualRects(before, frame);
+    BOOL exposed = changing && panel.placementProven && panel.visible;
+    uint64_t exposureLosses = perfExposureLosses;
+    unsigned right = perfRight;
+    uint64_t started = changing ? PerfNow() : 0;
+    ActualPanelFrame(panel, sel, frame, display);
+    if (changing) {
+        uint64_t when = PerfNow();
+        NSRect after = panel.frame;
+        // Continued exposure is not a new proof. Never infer it from the
+        // frame alone, including across reentrant conceal/order callbacks.
+        BOOL continuous = exposed && perfExposureLosses == exposureLosses &&
+            panel.placementProven && panel.visible && !NSEqualRects(before, after);
+        PerfRecord("frame", when, ",\"start_ns\":%" PRIu64 ",\"right\":%u,\"width_pt\":%.6f,"
+            "\"height_pt\":%.6f,\"visible_continuously\":%s",
+            started, right, NSWidth(after), NSHeight(after), continuous ? "true" : "false");
+    }
+}
+
+static void (*ActualWebFrame)(WKWebView *, SEL, NSRect);
+static void ObserveWebFrame(WKWebView *web, SEL sel, NSRect frame) {
+    BOOL resizing = !NSEqualSizes(web.frame.size, frame.size);
+    unsigned right = perfRight;
+    uint64_t started = resizing ? PerfNow() : 0;
+    ActualWebFrame(web, sel, frame);
+    if (resizing) PerfFrame("web_frame", started, PerfNow(), right, web.frame);
+}
+
 static void (*ActualOrder)(MiloPreviewPanel *, SEL, NSWindowOrderingMode, NSInteger);
 static void ObserveOrder(MiloPreviewPanel *panel, SEL sel, NSWindowOrderingMode order, NSInteger relative) {
     AssertNonactivating(panel);
@@ -386,6 +522,7 @@ static void ObserveOrder(MiloPreviewPanel *panel, SEL sel, NSWindowOrderingMode 
     // not an attempt to order the preview relative to a different window.
     if (order == NSWindowOut) {
         assert(!panel.placementProven && panel.ignoresMouseEvents);
+        if (perfFD >= 0) ++perfExposureLosses;
         ActualOrder(panel, sel, order, relative);
         return;
     }
@@ -395,17 +532,24 @@ static void ObserveOrder(MiloPreviewPanel *panel, SEL sel, NSWindowOrderingMode 
     if (atomic_exchange(&panelID, window) != window) {
         Publish(@"panel-window", [NSString stringWithFormat:@"%u", window]);
     }
+    unsigned right = perfRight;
+    uint64_t started = perfFD >= 0 ? PerfNow() : 0;
     ActualOrder(panel, sel, order, relative);
+    uint64_t when = perfFD >= 0 ? PerfNow() : 0;
     assert(panel.visible);
     AssertNonactivating(panel);
+    if (when) PerfFrame("ordered", started, when, right, panel.frame);
     Trace("ordered\n");
 }
 
 static void (*ActualOut)(MiloPreviewPanel *, SEL, id);
 static void ObserveOut(MiloPreviewPanel *panel, SEL sel, id sender) {
     BOOL wasVisible = panel.visible;
+    unsigned right = perfRight;
+    if (wasVisible && perfFD >= 0) ++perfExposureLosses;
     ActualOut(panel, sel, sender);
     if (wasVisible) {
+        if (perfFD >= 0) PerfRecord("out", PerfNow(), ",\"right\":%u", right);
         AssertNonactivating(panel);
         assert(!panel.visible && !panel.placementProven && panel.contentView.hidden && panel.ignoresMouseEvents);
         Trace("out\n");
@@ -415,9 +559,14 @@ static void ObserveOut(MiloPreviewPanel *panel, SEL sel, id sender) {
 static void (*ActualProven)(MiloPreviewPanel *, SEL, BOOL);
 static void ObserveProven(MiloPreviewPanel *panel, SEL sel, BOOL proven) {
     BOOL changed = panel.placementProven != proven;
+    unsigned right = perfRight;
+    uint64_t started = changed && perfFD >= 0 ? PerfNow() : 0;
+    if (started && !proven) ++perfExposureLosses;
     ActualProven(panel, sel, proven);
     if (!changed) return;
+    uint64_t when = perfFD >= 0 ? PerfNow() : 0;
     if (!proven) {
+        if (when) PerfRecord("concealed", when, ",\"right\":%u", right);
         Trace("concealed\n");
         return;
     }
@@ -430,6 +579,9 @@ static void ObserveProven(MiloPreviewPanel *panel, SEL sel, BOOL proven) {
     if (!seen) { seen = YES; firstWeb = web; }
     else assert(web == firstWeb); // Also fails if the original WK instance deallocated.
     NSRect frame = panel.frame;
+    // Placement is now proven and native content is exposed. This is not
+    // a signal from the compositor or a measurement of physical pixels.
+    if (when) PerfFrame("visible", started, when, right, frame);
     Trace("shown %p %.2f %.2f %.2f %.2f\n", (__bridge void *)web, NSMinX(frame), NSMinY(frame),
         NSWidth(frame), NSHeight(frame));
 }
@@ -440,6 +592,82 @@ static IMP Hook(Class cls, SEL selector, IMP replacement) {
     IMP original = method_getImplementation(method);
     class_replaceMethod(cls, selector, replacement, method_getTypeEncoding(method));
     return original;
+}
+
+// One passive notification after WebKit computed the root layout box.
+// Do not poll, force layout, or assume this is when the display presented it.
+static NSString *const PerfViewportScript =
+    @"(() => {"
+     "const form = document.getElementById('divider-form');"
+     "if (!form) return;"
+     "const observer = new ResizeObserver(([entry]) => {"
+     "  const {width, height} = entry.contentRect;"
+     "  window.webkit.messageHandlers.miloRexViewport.postMessage(["
+     "    innerWidth, innerHeight, width, height, performance.now(), performance.timeOrigin, form.isConnected"
+     "  ]);"
+     "});"
+     "observer.observe(document.documentElement);"
+     "})();";
+static NSString *const PerfViewportMessage = @"miloRexViewport";
+static __weak WKWebView *perfWeb;
+
+// ResizeObserver can coalesce notifications in a non-key window. Verify
+// the final DOM independently, after the passive timing window has ended.
+static void PerfVerifyFinalViewport(void) {
+    WKWebView *web = perfWeb;
+    MiloPreviewPanel *panel = (MiloPreviewPanel *)web.window;
+    assert(web && panel.placementProven && panel.visible && !panel.ignoresMouseEvents);
+    NSSize expected = web.bounds.size;
+    assert(fabs(NSWidth(panel.frame) - expected.width) <= 1);
+    [web evaluateJavaScript:@"[innerWidth, innerHeight, document.documentElement.getBoundingClientRect().width,"
+        " !!document.querySelector('#divider-form')]" completionHandler:^(id result, NSError *error) {
+        assert(!error && [result count] == 4 && [result[3] isEqual:@YES]);
+        assert(fabs([result[0] doubleValue] - expected.width) <= 1 &&
+            fabs([result[1] doubleValue] - expected.height) <= 1 && [result[2] doubleValue] > 0);
+        PerfRecord("final_viewport", PerfNow(), ",\"right\":%u", perfRight);
+    }];
+}
+
+@interface PerfViewport : NSObject <WKScriptMessageHandler>
+@end
+@implementation PerfViewport {
+    BOOL _ready;
+    double _documentOrigin;
+}
+- (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
+    (void)controller;
+    uint64_t when = PerfNow();
+    assert(message.frameInfo.mainFrame && message.webView == perfWeb);
+    assert([message.frameInfo.request.URL.path isEqualToString:@"/rex-lab-page"]);
+    assert([message.body isKindOfClass:NSArray.class] && [message.body count] == 7);
+    NSArray *values = message.body;
+    assert([values[6] isEqual:@YES]);
+    int width = [values[0] intValue], height = [values[1] intValue];
+    double layoutWidth = [values[2] doubleValue], layoutHeight = [values[3] doubleValue];
+    double webTime = [values[4] doubleValue], documentOrigin = [values[5] doubleValue];
+    assert(isfinite(layoutWidth) && isfinite(layoutHeight) && isfinite(webTime) && isfinite(documentOrigin));
+    if (width <= 0 || height <= 0 || layoutWidth <= 0) return;
+    if (!_ready) _documentOrigin = documentOrigin;
+    else assert(documentOrigin == _documentOrigin);
+    PerfRecord(_ready ? "reflow" : "page_ready", when,
+        ",\"width_css\":%d,\"height_css\":%d,\"layout_width_css\":%.6f,\"layout_height_css\":%.6f,\"web_time_ms\":%.6f",
+        width, height, layoutWidth, layoutHeight, webTime);
+    _ready = YES;
+}
+@end
+
+static WKNavigation *(*ActualLoad)(WKWebView *, SEL, NSURLRequest *);
+static WKNavigation *ObserveLoad(WKWebView *web, SEL sel, NSURLRequest *request) {
+    // This is the actual preview's first navigation, not a second load or an
+    // evaluateJavaScript round-trip after content should already be laid out.
+    assert(!perfWeb && [request.URL.path isEqualToString:@"/rex-lab-page"]);
+    perfWeb = web;
+    WKUserContentController *controller = web.configuration.userContentController;
+    WKContentWorld *world = [WKContentWorld worldWithName:@"Milo Rex Layout Fixture"];
+    [controller addScriptMessageHandler:[PerfViewport new] contentWorld:world name:PerfViewportMessage];
+    [controller addUserScript:[[WKUserScript alloc] initWithSource:PerfViewportScript
+        injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES inContentWorld:world]];
+    return ActualLoad(web, sel, request);
 }
 
 static void SeedForm(MiloPreviewPanel *panel, unsigned tries, BOOL navigating) {
@@ -499,16 +727,38 @@ static void Probe(MiloPreviewPanel *panel, NSInteger sequence, CGRect tile) {
 @interface PersistentFixtureAnchor : MiloPreviewAnchor
 @end
 @implementation PersistentFixtureAnchor
+- (void)handleLine:(size_t)length {
+    if (perfFD < 0) {
+        [super handleLine:length];
+        return;
+    }
+    BOOL show = length >= 5 && !memcmp(_line, "show ", 5);
+    uint64_t when = show ? PerfNow() : 0;
+    CGRect before = _lease.tile;
+    [super handleLine:length];
+    if (!_lease.announcedAt) perfRight = 0;
+    else if (show && _lease.checked) {
+        perfRight = (unsigned)llround(_lease.tile.size.width * FractionScale);
+        if (!CGRectEqualToRect(before, _lease.tile))
+            PerfRecord("received", when, ",\"right\":%u", perfRight);
+    }
+}
+
 - (void)applySample:(Geometry)geometry checkedPanel:(BOOL)checkedPanel lostPin:(BOOL)lostPin
     generation:(NSUInteger)generation started:(NSTimeInterval)started {
     [super applySample:geometry checkedPanel:checkedPanel lostPin:lostPin generation:generation started:started];
-    if (atomic_exchange(&heldSample, false)) {
+    if (perfFD < 0 && atomic_exchange(&heldSample, false)) {
         assert(!_panel.placementProven && !_panel.visible);
         Trace("sample-rejected\n");
     }
 }
 
 - (void)tick {
+    if (perfFD >= 0) {
+        ++perfTicks;
+        [super tick];
+        return;
+    }
     BOOL active = !Flag(@"foreground-away");
     if (active != foreground) {
         foreground = active;
@@ -619,6 +869,7 @@ int main(int argc, const char **argv) {
         if (preflight) return Preflight([NSString stringWithUTF8String:argv[4]], screen, strtod(argv[5], NULL));
 
         assert(strtoul(argv[4], NULL, 10) == targetID);
+        dispatch_source_t perfControl = PerfStart();
         SetAccessory();
         // Park the modeled pointer inside the working shell throughout the
         // test. Its left third stays in the shell at every tested split ratio.
@@ -635,6 +886,16 @@ int main(int argc, const char **argv) {
             Hook(MiloPreviewPanel.class, @selector(orderOut:), (IMP)ObserveOut);
         ActualProven = (void (*)(MiloPreviewPanel *, SEL, BOOL))
             Hook(MiloPreviewPanel.class, @selector(setPlacementProven:), (IMP)ObserveProven);
+        if (perfControl) {
+            ActualPanelFrame = (void (*)(MiloPreviewPanel *, SEL, NSRect, BOOL))
+                Hook(MiloPreviewPanel.class, @selector(setFrame:display:), (IMP)ObservePanelFrame);
+            Class webClass = NSClassFromString(@"MiloPreviewWebView");
+            assert(webClass);
+            ActualWebFrame = (void (*)(WKWebView *, SEL, NSRect))
+                Hook(webClass, @selector(setFrame:), (IMP)ObserveWebFrame);
+            ActualLoad = (WKNavigation *(*)(WKWebView *, SEL, NSURLRequest *))
+                Hook(webClass, @selector(loadRequest:), (IMP)ObserveLoad);
+        }
 
         int tty = open("/dev/tty", O_RDONLY | O_CLOEXEC | O_NOCTTY), focus[2];
         struct termios before, after;
@@ -646,6 +907,7 @@ int main(int argc, const char **argv) {
             pinned:targetID stateFD:STDIN_FILENO focusFD:focus[0] parent:getppid()];
         assert(anchor);
         int result = [anchor run];
+        if (perfControl) dispatch_source_cancel(perfControl);
         assert(tcgetattr(tty, &after) == 0 && after.c_iflag == before.c_iflag && after.c_oflag == before.c_oflag &&
             after.c_cflag == before.c_cflag && ((after.c_lflag ^ before.c_lflag) & ~PENDIN) == 0 &&
             memcmp(after.c_cc, before.c_cc, sizeof(before.c_cc)) == 0);
