@@ -127,6 +127,7 @@ pub(crate) struct Place<'a> {
     pub config: &'a Path,
     pub state: &'a Path,
     pub home: Option<&'a Path>,
+    /// The checkout root for export, or the directory to match against for import.
     pub worktree: Option<&'a Path>,
 }
 
@@ -800,9 +801,18 @@ fn read_bundle(file: &OsStr) -> Result<String, String> {
 pub(crate) fn command(request: Request<'_>) -> Result<String, String> {
     let store = Store::real().ok_or("Could not locate your settings folders. Check HOME and XDG_CONFIG_HOME.")?;
     let home = paths::home();
-    let worktree = git::worktree(Path::new("."));
-    let place =
-        Place { config: &store.config, state: &store.state, home: home.as_deref(), worktree: worktree.as_deref() };
+    let cwd = Path::new(".");
+    let root;
+    let worktree = match request {
+        Request::Export { scopes: Scopes::Worktree | Scopes::All, .. } => {
+            root = git::worktree(cwd);
+            root.as_deref()
+        }
+        // Project matching resolves the directory itself, and only when the bundle needs it.
+        Request::Import { .. } => Some(cwd),
+        Request::Export { scopes: Scopes::Global, .. } | Request::Undo => None,
+    };
+    let place = Place { config: &store.config, state: &store.state, home: home.as_deref(), worktree };
     match request {
         Request::Export { groups, scopes, output } => {
             let bundle = export(&place, &groups, scopes)?;
