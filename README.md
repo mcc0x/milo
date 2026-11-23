@@ -107,7 +107,7 @@ The direct pane commands below already work in v0.1.6. **In this checkout**, bar
 | `milo menubar install` / `uninstall` / `indicator` | Optional on macOS with a menu-enabled build; choosing an indicator does not install the app. | Not Rex-dependent. |
 | `milo claude-status` | Status-line helper for an explicitly configured Claude Code profile, not an interactive pane. | Not Rex-dependent. |
 
-`milo setup --skip-onboarding` records a skip without opening a TUI or applying settings. Direct pane commands never run the guide. For input, display fallbacks and split sizes see [Using the panes](docs/panes.md).
+`milo setup --skip-onboarding` records a skip without opening a TUI or applying settings. Direct pane commands never run the guide. See [Using the panes](docs/panes.md) for input and display fallbacks, and [terminal checks and measurements](docs/evidence/terminal-portability/README.md) for the environments actually exercised.
 
 ## Documentation
 

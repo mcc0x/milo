@@ -1,6 +1,6 @@
 # Using the panes
 
-Use an interactive Unix terminal for the panes: both input and output must be terminals. If output is redirected or `TERM=dumb`, use `milo doctor`, `milo COMMAND --help` or another text command instead. You do not need Rex or a particular shell.
+Use a UTF-8, xterm-compatible terminal that supports cursor positioning and an alternate screen. Both input and output must be terminals. Hardware VTs and the Linux text console are not supported; a non-`dumb` `TERM` alone does not establish compatibility. With redirected output, `TERM=dumb` or `TERM=linux`, use `milo doctor`, `milo COMMAND --help` or another text command instead. You do not need Rex or a particular shell.
 
 Outline and History start in the current directory unless you give them a path. Inside a Git repository they use its root, even when you start in a subfolder. In a plain folder, Outline shows just the files and History says it is not a Git project. To outline a directory named like a command, give its path explicitly: `milo ./history`.
 

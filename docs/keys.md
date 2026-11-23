@@ -6,6 +6,8 @@ A help page longer than the pane continues in a second column, and a third, once
 
 In standalone Home, use `↑`/`↓` and `Enter` to choose a pane; the mouse is optional. `q` in a reader opened from Outline or History returns to the list, then `q` returns to Home. A pane started directly returns to the shell instead.
 
+Pasting is distinct from typing only when the terminal supports bracketed paste and forwards its markers. Without it, pasted characters can act as shortcuts. Use the keyboard if your terminal or multiplexer intercepts mouse reports.
+
 ## Moving around
 
 These keys work in the outline tree, history and reader. The reader and help page scroll instead of moving a selection.
