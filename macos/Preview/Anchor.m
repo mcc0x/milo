@@ -883,8 +883,14 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
         _routePointer = point;
         _localMotionAt = now;
     }
-    if (receipt == ResizeInputWaiting || ![self pointerInsideTile] || !_stableGeometry ||
-        !SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample)) return;
+    if (receipt == ResizeInputWaiting) return;
+    if (![self pointerInsideTile] || !_stableGeometry || !SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample)) {
+        if (receipt == ResizeInputCode) {
+            WriteDiagnostic(_tty, "code not used: keep the pointer inside the settled preview tile and wait for the new menu code");
+            if (![self endRoute]) [self finish:"could not reset the preview terminal"];
+        }
+        return;
+    }
     BOOL explicit = receipt == ResizeInputCode && _requireCode;
     if (!explicit) {
         if (receipt != ResizeInputMotion || _sharedInput || _requireCode || down ||

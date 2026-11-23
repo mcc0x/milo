@@ -206,9 +206,12 @@ impl Tile<'_> {
 
     fn confirm_local_receipt(&self) {
         self.wait("no local-only menu receipt after release", || self.read("test-menu-item").len() == 6);
-        let digits = self.read("test-menu-item");
-        assert!(digits.bytes().all(|b| b.is_ascii_digit()));
-        assert!(!self.capture().contains(&digits), "native receipt appeared in the shared terminal");
+        self.type_receipt(&self.read("test-menu-item"));
+    }
+
+    fn type_receipt(&self, digits: &str) {
+        assert!(digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_digit()));
+        assert!(!self.capture().contains(digits), "native receipt appeared in the shared terminal");
         let mut args = vec!["send-key", "-s", self.session, "-b", self.block];
         args.extend((0..6).map(|i| &digits[i..i + 1]));
         args.push("enter");
@@ -613,6 +616,10 @@ fn preview_confirmation_uses_rex_pty() {
     tile.samples(3);
     assert_eq!(tile.presentation(), long, "the expired drag revealed on mouse-up");
     tile.route_ready(route);
+    let on_divider = tile.count(ROUTE_READY);
+    tile.confirm_local_receipt();
+    tile.route_ready(on_divider);
+    assert_eq!(tile.presentation(), long, "a correct receipt revealed over the divider");
     tile.pointer(new.center(), false);
     tile.motion(&mut viewer);
     tile.samples(4);
@@ -635,6 +642,18 @@ fn preview_confirmation_uses_rex_pty() {
         tile.motion(&mut viewer);
         tile.samples(2);
         assert_eq!(tile.presentation(), before);
+        if ratio == 0.48 {
+            let old = tile.read("test-menu-item");
+            assert_eq!(old.len(), 6);
+            thread::sleep(Duration::from_secs(13));
+            tile.wait("the armed return route did not rotate at expiry", || {
+                let current = tile.read("test-menu-item");
+                current.len() == 6 && current != old
+            });
+            tile.type_receipt(&old);
+            tile.samples(2);
+            assert_eq!(tile.presentation(), before, "the pre-expiry receipt started a new grant");
+        }
         tile.confirm_local_receipt();
         tile.restored(before, new);
     }
