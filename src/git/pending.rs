@@ -103,9 +103,8 @@ impl Repo {
             let named = paths.len() <= PATHS_LIMIT;
             // Use the tip from status, not a possibly newer HEAD. The large
             // full diff uses the tip to exclude files that are only unpushed.
-            let ends = self.ends();
-            let tip = if ends.has_commit() { ends.tip.as_str() } else { self.empty_tree()? };
-            let against = if named { ends.base.as_deref().unwrap_or(tip) } else { tip };
+            let tip = if self.status.has_commit() { self.status.tip.as_str() } else { self.empty_tree()? };
+            let against = if named { self.base.as_deref().unwrap_or(tip) } else { tip };
             if !(cacheable
                 && same_paths
                 && changed.len() < paths.len()
@@ -236,7 +235,7 @@ impl Repo {
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
-    use std::fs;
+    use std::{fs, sync::Arc};
 
     fn tracked_page(repo: &mut Repo) -> PendingFile {
         repo.pending().unwrap().into_iter().find(|f| f.path == "page.txt" && !f.unpushed).unwrap()
@@ -281,7 +280,7 @@ mod tests {
         stage(&repo, "HEAD:a.txt");
         repo.read();
         let page = tracked_page(&mut repo);
-        let before = repo.raw.clone();
+        let before = Arc::clone(&repo.status);
 
         stage(&repo, "HEAD:b.txt");
         repo.read();
@@ -290,7 +289,7 @@ mod tests {
             assert!(record.starts_with(b"1 MM "));
             record.splitn(9, |&b| b == b' ').nth(7).unwrap()
         }
-        assert_ne!(staged_id(&before), staged_id(&repo.raw));
+        assert_ne!(staged_id(&before.raw), staged_id(&repo.status.raw));
         assert_eq!(page.stamp, FileStamp::at(&f.root.join("page.txt")));
 
         let objects = f.root.join(".git/objects");
@@ -319,15 +318,21 @@ mod tests {
         repo.read();
         assert_eq!(tracked_page(&mut repo).add, 2);
 
-        let before = repo.raw.clone();
+        let before = Arc::clone(&repo.status);
         f.write("page.txt", "first\nsecond\nthird\nfourth\n");
         repo.read();
-        assert!(tracked_records(&before).eq(tracked_records(&repo.raw)), "the edit only changed the worktree stamp");
+        assert!(
+            tracked_records(&before.raw).eq(tracked_records(&repo.status.raw)),
+            "the edit only changed the worktree stamp"
+        );
         assert_eq!(tracked_page(&mut repo).add, 3);
 
         f.push();
         repo.read();
-        assert!(tracked_records(&before).eq(tracked_records(&repo.raw)), "the push only changed the comparison base");
+        assert!(
+            tracked_records(&before.raw).eq(tracked_records(&repo.status.raw)),
+            "the push only changed the comparison base"
+        );
         assert_eq!(tracked_page(&mut repo).add, 2);
     }
 
@@ -348,7 +353,7 @@ mod tests {
         warm.read();
         let before = warm.pending().unwrap();
         assert_eq!(before.len(), PATHS_LIMIT + 1);
-        let raw = warm.raw.clone();
+        let status = Arc::clone(&warm.status);
 
         // Git can still read status and recount the saved file, but a
         // whole-tree recount needs an unrelated file's missing base blob.
@@ -360,7 +365,7 @@ mod tests {
         f.write(saved, "base\nnext edit\nextra line\n");
 
         warm.read();
-        assert!(tracked_records(&raw).eq(tracked_records(&warm.raw)));
+        assert!(tracked_records(&status.raw).eq(tracked_records(&warm.status.raw)));
         let updated = warm.pending().unwrap();
         assert_eq!(updated.len(), before.len());
         for (old, new) in before.iter().zip(&updated) {
@@ -395,10 +400,10 @@ mod tests {
         assert!(before.iter().any(|file| file.path == "new.txt" && file.kind == Kind::Renamed));
         assert_eq!(warm.moved_from("new.txt").as_deref(), Some("old.txt"));
 
-        let raw = warm.raw.clone();
+        let before = Arc::clone(&warm.status);
         f.write("new.txt", &"nothing in common\n".repeat(20));
         warm.read();
-        assert!(tracked_records(&raw).eq(tracked_records(&warm.raw)));
+        assert!(tracked_records(&before.raw).eq(tracked_records(&warm.status.raw)));
         let after = warm.pending().unwrap();
         assert!(after.iter().any(|file| file.path == "old.txt" && file.kind == Kind::Deleted));
         assert!(after.iter().any(|file| file.path == "new.txt" && file.kind == Kind::Added));

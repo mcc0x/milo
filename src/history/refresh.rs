@@ -105,6 +105,49 @@ mod tests {
         history.finish_check()
     }
 
+    /// Times cloning and dropping the refresh inputs, not starting the worker or running Git.
+    #[test]
+    #[ignore = "timing probe: run in release mode"]
+    fn history_refresh_snapshot_profile() {
+        use std::{hint::black_box, time::Instant};
+
+        const COPIES: u32 = 512;
+        for (files, dirty) in [(12, 2), (6_000, 1_000)] {
+            let f = Fixture::new();
+            f.write("00-probe.txt", "one\n");
+            for i in 1..files {
+                f.write(&format!("src/tracked-{i:05}.txt"), "tracked\n");
+            }
+            f.commit("probe base commit");
+            f.git(&["remote", "add", "origin", "./never-contacted"]);
+            f.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+            f.git(&["branch", "--set-upstream-to=origin/main", "main"]);
+            f.write("ahead.txt", "unpushed\n");
+            f.commit("probe ahead commit");
+            f.write("00-probe.txt", "one\ntwo\n");
+            for i in 1..dirty {
+                f.write(&format!("src/tracked-{i:05}.txt"), "modified\n");
+            }
+            let history = open(&f);
+            let snapshot = || (history.repo.clone(), history.version.clone());
+            let (repo, version) = snapshot();
+            assert_eq!(repo.uncommitted_count(), dirty);
+            assert!(version.unwrap().matches(&repo));
+            assert_eq!(repo.history(1).unwrap()[0].subject, "probe ahead commit");
+
+            let mut samples = [0; 21];
+            for sample in &mut samples {
+                let start = Instant::now();
+                for _ in 0..COPIES {
+                    drop(black_box(snapshot()));
+                }
+                *sample = start.elapsed().as_nanos() / u128::from(COPIES);
+            }
+            samples.sort_unstable();
+            eprintln!("history refresh snapshot: tracked={} dirty={dirty} median={} ns", files + 1, samples[10]);
+        }
+    }
+
     #[test]
     fn a_refresh_away_from_the_loop_shows_what_a_check_in_the_loop_shows() {
         let f = project();
