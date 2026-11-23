@@ -4,7 +4,7 @@
 #import <AppKit/AppKit.h>
 #import <math.h>
 
-typedef NS_ENUM(NSUInteger, DividerEdge) { DividerNone, DividerLeft, DividerRight, DividerTop, DividerBottom };
+typedef NS_ENUM(NSUInteger, DividerEdge) { DividerNone, DividerLeft, DividerRight, DividerTop, DividerBottom, DividerReconfirm };
 
 // The caller restricts p to the pinned window. Outside the inset page an
 // internal edge permits only a hidden wait, never placement or input.
@@ -33,18 +33,22 @@ static DividerEdge ResizedDivider(CGRect old, CGRect newTile) {
 
 // Estimate the moved boundary from the already projected tile. This only
 // decides whether to wait hidden for local confirmation; it never places a panel.
-static BOOL NearMovedDivider(DividerEdge edge, NSPoint p, NSRect body, CGRect old, CGRect next) {
+static BOOL NearMovedDivider(DividerEdge edge, NSPoint p, NSRect body, NSRect window, CGRect old, CGRect next) {
     if ((edge == DividerLeft || edge == DividerRight) && old.size.width > 0 &&
         p.y > NSMinY(body) && p.y < NSMaxY(body)) {
         BOOL left = edge == DividerLeft;
         CGFloat delta = left ? CGRectGetMinX(next) - CGRectGetMinX(old) : CGRectGetMaxX(next) - CGRectGetMaxX(old);
-        return fabs(p.x - (left ? NSMinX(body) : NSMaxX(body)) - delta * NSWidth(body) / old.size.width) <= 40;
+        CGFloat raw = NSMinX(window) + NSWidth(window) * (left ? CGRectGetMinX(next) : CGRectGetMaxX(next));
+        CGFloat inset = (left ? NSMinX(body) : NSMaxX(body)) + delta * NSWidth(body) / old.size.width;
+        return p.x >= MIN(raw, inset) - 40 && p.x <= MAX(raw, inset) + 40;
     }
     if ((edge == DividerTop || edge == DividerBottom) && old.size.height > 0 &&
         p.x > NSMinX(body) && p.x < NSMaxX(body)) {
         BOOL top = edge == DividerTop;
         CGFloat delta = top ? CGRectGetMinY(next) - CGRectGetMinY(old) : CGRectGetMaxY(next) - CGRectGetMaxY(old);
-        return fabs(p.y - (top ? NSMaxY(body) : NSMinY(body)) + delta * NSHeight(body) / old.size.height) <= 40;
+        CGFloat raw = NSMaxY(window) - NSHeight(window) * (top ? CGRectGetMinY(next) : CGRectGetMaxY(next));
+        CGFloat inset = (top ? NSMaxY(body) : NSMinY(body)) - delta * NSHeight(body) / old.size.height;
+        return p.y >= MIN(raw, inset) - 40 && p.y <= MAX(raw, inset) + 40;
     }
     return NO;
 }

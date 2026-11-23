@@ -74,6 +74,8 @@ Resize resumption requires a fresh input report from the original, still-focused
 
 If another app viewer can send input to this session, mouse motion never resumes the preview. To open a new peek the local user must read a one-time code from the Mac menu bar and type it into the original Rex tile. The code is not sent to the shared terminal or the page. Crossing the original deadline discards pending input and rotates the code. If the menu item is not visible, leave the page hidden; the pause ends automatically. No macOS permission is needed.
 
+After a guarded divider interaction, canceling and typing `show` again does not bypass local confirmation: follow the tile’s menu-code prompt. The initial `show` on a newly launched helper remains a shared-terminal action. If several resize updates arrive together, Milo can retain a hidden drag but requires the code rather than assuming the intervening focus was unchanged.
+
 ## Selecting an element for an agent
 
 Use **Select** in the preview and click the element. Review the structural path in Milo’s controls, then choose **Copy** or **Cancel**. Copying does not paste into a terminal, contact an agent or run a command. Paste it yourself if you want to share it. The picker returns a bounded path derived from tag kinds and sibling positions, not DOM content, attributes, input values, cookies, source files or screenshots. Navigation invalidates an outstanding selection.

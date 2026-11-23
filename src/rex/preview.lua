@@ -580,7 +580,10 @@ local function refresh(owner_checked)
         and revision - previous_revision
       -- Within a continuous view, only changes to the same working pair
       -- can retain a paused drag; reparenting or swapping panes revokes it.
-      if (step ~= 0 and step ~= 1) or pair ~= last_pair or (not pair and state ~= last) then emit() end
+      if pair ~= last_pair or (not pair and state ~= last) then emit()
+      elseif step ~= 0 and step ~= 1 then
+        if pair and state ~= last then write("resize-gap") else emit() end
+      end
     end
     last_pair = pair
   end

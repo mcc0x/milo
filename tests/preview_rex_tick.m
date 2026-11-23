@@ -327,9 +327,8 @@ static void FixtureProven(MiloPreviewPanel *panel, SEL selector, BOOL proven) {
         VisibilityLease next = _lease;
         if (UpdateVisibility(&next, LeaseNow(), ownerPID, _line, length) == VisibilityChanged &&
             next.checked && next.tile.origin.x != _lease.tile.origin.x) {
-            CGRect pane;
-            assert(FixturePane(targetFrame, next.tile, &pane));
-            pointer = NSMakePoint(CGRectGetMinX(pane) - 1, NSMidY(_candidateFrame));
+            pointer = NSMakePoint(CGRectGetMinX(targetFrame) + CGRectGetWidth(targetFrame) * next.tile.origin.x,
+                NSMidY(_candidateFrame));
             buttons = 0;
             assert([NSFileManager.defaultManager removeItemAtPath:fastRelease error:NULL]);
         }

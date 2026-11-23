@@ -604,6 +604,12 @@ for _, first_refresh in ipairs{ "session_view_changed", "attachment_poll" } do
   assert(watch(first_refresh, departure) == expected)
   assert(watch("session_view_changed", returned) == expected)
   assert(watch("session_view_changed", departure) == expected)
+  -- Coalesced changes to the same pair are not proof of an uninterrupted
+  -- drag. Native may retain only hidden state and require local confirmation.
+  fence.view.revision = 8
+  fence.main_leaf.rect[3], fence.leaf.rect = 0.45, { 0.7, 0, 0.3, 1 }
+  expected = expected .. "resize-gap\nguard 40 tile 700000 0 300000 1000000\n"
+  assert(watch("session_view_changed", { revision = 7 }) == expected)
   assert(watch("attachment_poll") == expected .. "renew\n" and not fence.stopped)
 end
 

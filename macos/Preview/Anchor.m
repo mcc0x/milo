@@ -460,7 +460,7 @@ static void WritePeekHint(int tty) {
         "This preview needs confirmation in this tile. Click the tile and wait for ready to confirm.\n"
         "Keep the pointer inside, then type show and press Return for up to 12 seconds of preview.\n"
         "Before switching sessions, move the pointer out and wait until the page disappears.\n"
-        "To resize, drag the Rex divider and release. Return inside this tile; after 12 seconds click or press Return.\n"
+        "To resize, drag the Rex divider and release. Return inside this tile and follow the prompt for a Mac menu code if needed.\n"
         "Input queued before readiness or across a confirmation reset is discarded for safety.\n";
     WriteAll(tty, hint, sizeof(hint) - 1);
 }
@@ -604,7 +604,7 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
     NSTimeInterval _localMotionAt;
     CGDirectDisplayID _resizeDisplay;
     BOOL _sharedInput;
-    BOOL _routeExpired, _requireCode;
+    BOOL _routeExpired, _requireCode, _hadDivider;
     uint32_t _routeCode;
     NSStatusItem *_resumeItem;
     NSTimeInterval _resizeStarted, _resizeConsentEnd;
@@ -785,33 +785,44 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
     return NSPointInRect(NSEvent.mouseLocation, _candidateFrame);
 }
 
-- (BOOL)pauseForDivider:(DividerEdge)edge {
-    NSTimeInterval now = LeaseNow();
-    if (!edge || !_lease.guarded || _peek.phase != PeekVisible || !_panel.placementProven ||
-        !_panel.onActiveSpace || !_candidate.windowID || !PeekActive(&_peek, now) ||
-        [self eligibilityFailure] != PeekOK || !ForegroundCanonicalTTY(_tty) ||
-        !SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample)) return NO;
+- (NSRect)candidateWindowFrame {
+    CGRect frame = _candidate.window;
+    return NSMakeRect(frame.origin.x, CGDisplayBounds(CGMainDisplayID()).size.height - CGRectGetMaxY(frame),
+        frame.size.width, frame.size.height);
+}
+
+- (BOOL)beginHiddenReturn:(DividerEdge)edge now:(NSTimeInterval)now {
     _resizeEdge = edge;
     _resizeWindow = _candidate.window;
-    _resizePointerBounds = NSMakeRect(_resizeWindow.origin.x,
-        CGDisplayBounds(CGMainDisplayID()).size.height - CGRectGetMaxY(_resizeWindow),
-        _resizeWindow.size.width, _resizeWindow.size.height);
+    _resizePointerBounds = [self candidateWindowFrame];
     if (!NSPointInRect(NSEvent.mouseLocation, _resizePointerBounds)) {
         _resizeEdge = DividerNone;
         return NO;
     }
     _resizeDisplay = _candidateDisplay;
     _resizeStarted = now;
-    _resizeConsentEnd = _peek.consentEnd;
-    _requireCode = NO;
-    _resizePressed = (NSEvent.pressedMouseButtons & 1) != 0;
+    _resizeConsentEnd = edge == DividerReconfirm ? now : _peek.consentEnd;
+    _requireCode = edge == DividerReconfirm;
+    _resizePressed = _requireCode || (NSEvent.pressedMouseButtons & 1) != 0;
+    _resizeChanged = _resizeReleased = _requireCode;
+    _hadDivider = YES;
     EndPeek(&_peek, YES); // Order out before anything can receive a divider drag.
     [_peekTimer invalidate];
     _peekTimer = nil;
     ++_generation;
     [self hidePanel]; // Keep the existing WKWebView, page history and form state.
-    WriteDiagnostic(_tty, "preview paused for the Rex divider; drag, release, then return inside this tile");
+    if (edge != DividerReconfirm)
+        WriteDiagnostic(_tty, "preview paused for the Rex divider; drag, release, then return inside this tile");
     return YES;
+}
+
+- (BOOL)pauseForDivider:(DividerEdge)edge {
+    NSTimeInterval now = LeaseNow();
+    if (!edge || !_lease.guarded || _peek.phase != PeekVisible || !_panel.placementProven ||
+        !_panel.onActiveSpace || !_candidate.windowID || !PeekActive(&_peek, now) ||
+        [self eligibilityFailure] != PeekOK || !ForegroundCanonicalTTY(_tty) ||
+        !SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample)) return NO;
+    return [self beginHiddenReturn:edge now:now];
 }
 
 - (BOOL)pauseAtPointer {
@@ -830,8 +841,15 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
     // A receipt queued before the deadline must never buy another 12s.
     // Revoke both the old terminal report and any previously displayed code.
     BOOL expired = now >= _resizeConsentEnd;
-    if (_routeArmed && expired != _routeExpired && ![self endRoute]) {
-        [self finish:"could not reset the resize confirmation after expiry"];
+    if (_routeArmed && expired != _routeExpired) {
+        ResizeInputResult last = ReadResizeInput(&_resizeInput, _tty);
+        int queued = 0;
+        if (last == ResizeInputDismiss || last == ResizeInputFailed || ioctl(_tty, FIONREAD, &queued) < 0) {
+            [self invalidateFor:PeekDismissed resetTTY:YES];
+            return;
+        }
+        if (queued) return; // Don't flush a dismissal behind a bounded read.
+        if (![self endRoute]) [self finish:"could not reset the resize confirmation after expiry"];
         return;
     }
     if (!_resizeReleased) {
@@ -846,6 +864,7 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
             [self invalidateFor:PeekDismissed resetTTY:YES];
             return;
         }
+        if (input != PeekNoInput) return; // Drain through any complete queued hide before changing modes.
         if (!_resizeChanged || !_resizeReleased || down || !_stableGeometry ||
             !SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample)) return;
         _routeArmed = YES; // Restore even if terminal mode negotiation fails partway.
@@ -871,7 +890,9 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
                 [self invalidateFor:PeekTTY resetTTY:YES];
                 return;
             }
-            WriteDiagnostic(_tty, "divider released; point inside this tile, type the six digits beside Milo in the Mac menu bar, then press Return");
+            WriteDiagnostic(_tty, _resizeEdge == DividerReconfirm ?
+                "local confirmation required; point inside this tile, type the six digits beside Milo in the Mac menu bar, then press Return" :
+                "divider released; point inside this tile, type the six digits beside Milo in the Mac menu bar, then press Return");
         } else WriteDiagnostic(_tty, "divider released; move back inside this tile to restore the remaining peek");
     }
     if (receipt == ResizeInputFailed || receipt == ResizeInputDismiss) {
@@ -1023,6 +1044,12 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
             [self reportFailure:failure phase:PeekIdle];
             continue;
         }
+        if (_hadDivider) {
+            // Canceling a resize cannot downgrade authorization for a new
+            // grant on the retained page back to an unattributed `show`.
+            if (![self beginHiddenReturn:DividerReconfirm now:received]) [self reportFailure:PeekPointer phase:PeekIdle];
+            return NO;
+        }
         if (!WriteDiagnostic(_tty, "confirmation accepted; checking the tile")) {
             [self finish:NULL];
             return NO;
@@ -1037,6 +1064,15 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
 }
 
 - (void)handleLine:(size_t)length {
+    if (length == 10 && !memcmp(_line, "resize-gap", 10)) {
+        // Revisions can coalesce during a continuous drag. Only an already
+        // concealed gesture may continue; discard its old consent entirely.
+        if (_resizeEdge && !_routeArmed) {
+            _requireCode = YES;
+            ++_generation;
+        } else [self invalidateFor:PeekFocus resetTTY:YES];
+        return;
+    }
     if (length == 12 && !memcmp(_line, "shared-input", 12)) {
         if (!_sharedInput) {
             _sharedInput = YES;
@@ -1065,7 +1101,7 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
                 NSPoint p = NSEvent.mouseLocation;
                 if (!_resizeEdge && edge &&
                     (edge == DividerApproach(p, _candidateFrame, previous.tile) ||
-                     NearMovedDivider(edge, p, _candidateFrame, previous.tile, _lease.tile)) &&
+                     NearMovedDivider(edge, p, _candidateFrame, [self candidateWindowFrame], previous.tile, _lease.tile)) &&
                     [self pauseForDivider:edge]) {
                     // A fast drag can complete between two pointer samples,
                     // including ending inside the *old* frame. The ratio is
@@ -1380,7 +1416,11 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
 
 - (void)mouseExited:(NSEvent *)event {
     // AppKit delivers the page boundary without waiting for a Quartz sample.
-    if (event.window == _panel && _peek.phase == PeekVisible && ![self pointerInsideTile] && ![self pauseAtPointer])
+    if (event.window != _panel || _peek.phase != PeekVisible || [self pointerInsideTile]) return;
+    NSPoint exit = [_panel convertPointToScreen:event.locationInWindow];
+    // The pointer may already be deep inside the working pane by dispatch
+    // time. Use the location of the actual boundary event before polling it.
+    if (![self pauseForDivider:DividerApproach(exit, _candidateFrame, _lease.tile)] && ![self pauseAtPointer])
         [self rejectProof:PeekPointer];
 }
 

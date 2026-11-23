@@ -605,6 +605,10 @@ fn preview_confirmation_uses_rex_pty() {
     // Let the actual 12-second consent expire while continuously held down.
     // After return, no-button motion is not fresh explicit consent.
     let long = tile.start_drag();
+    tile.scope(&format!(
+        "for _,r in ipairs{{0.44,0.45,0.46,0.47}} do assert(rex.session.resize_pane{{direction='horizontal',\
+         before_block_id='{main}',after_block_id='{block}',ratio=r}}) end"
+    ));
     let new = tile.resize(&mut viewer, &main, 0.48);
     tile.pointer(new.divider(), true);
     let renewals = tile.state("renew");
@@ -678,7 +682,16 @@ fn preview_confirmation_uses_rex_pty() {
     tile.enter();
     tile.samples(4);
     assert_eq!(tile.presentation(), pending, "a returned-to tab revived revoked consent");
+    let canceled = tile.count("divider pause ended");
+    tile.type_text("show\nignored\nignored\nhide\n");
+    tile.wait("arming the post-resize route discarded a queued hide", || tile.count("divider pause ended") > canceled);
+    tile.samples(3);
+    assert_eq!(tile.presentation(), pending);
     tile.show();
+    tile.wait("canceling the resize downgraded local confirmation to a shared show command",
+        || tile.read("test-menu-item").len() == 6);
+    assert_eq!(tile.presentation(), pending);
+    tile.confirm_local_receipt();
     tile.wait("a new confirmation did not recover from tab loss", || tile.event("revealed") == pending.1 + 1);
 
     // Close the working block while the hidden tile still owns mouse
