@@ -6,11 +6,154 @@ import QuartzCore
 private extension AppDelegate {
     var popoverShown: Bool { panelOnScreen }
     var panel: NSView? { popover.contentViewController?.view }
-    // Under a sleeping display the closing animation never ends, and the popover does not open again.
-    // A popover that closes at a click or another app's activation would end a row or a check early.
-    func showPopover() { popover.animates = false; popover.behavior = .applicationDefined; show() }
+    // Timing and redraw checks hold the panel open even if another app takes focus.
+    func showPopover() { popover.delegate = nil; show() }
     func closePopover() { popover.close() }
     var statusTitle: String? { status.button?.title }
+
+    func checkPopover() async throws {
+        try await waitForPopoverState("status item to appear") { status?.button?.window?.isVisible == true }
+        guard let button = status.button else { throw PopoverCheckError("Missing status button") }
+        // The status window is created before WindowServer hosts the item.
+        try await Task.sleep(for: .milliseconds(800))
+        let destination = ClickDestination()
+        func open(_ n: Int) async throws {
+            try postPopoverClick(button, eventNumber: n)
+            try await waitForPopoverState("status click \(n) to show the panel") { popover.isShown && panelOnScreen }
+        }
+        func closed(_ reason: String) async throws {
+            try await waitForPopoverState(reason) { !popover.isShown && !panelOnScreen }
+        }
+        // A second app, not the user's frontmost process, triggers a real resignation.
+        let focusBundle = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("MiloBenchFocus.app")
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        configuration.promptsUserIfNeeded = false
+        configuration.arguments = ["--focus-fixture", String(getpid())]
+        configuration.environment = ProcessInfo.processInfo.environment.filter {
+            ["HOME", "CFFIXED_USER_HOME", "TMPDIR", "TMP", "TEMP"].contains($0.key) || $0.key.hasPrefix("XDG_")
+        }
+        let focus = try await NSWorkspace.shared.openApplication(at: focusBundle, configuration: configuration)
+        defer { if !focus.isTerminated { _ = focus.forceTerminate() } }
+        destination.window.makeKeyAndOrderFront(nil)
+        // The input is process-local, not an OS gesture that grants activation.
+        let ready = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"]!).appendingPathComponent("focus-ready")
+        try await waitForPopoverState("the other app to yield activation") { FileManager.default.fileExists(atPath: ready.path) }
+        if #available(macOS 14, *) { _ = NSRunningApplication.current.activate(from: focus, options: []) }
+        else { NSApp.activate(ignoringOtherApps: true) }
+        try await waitForPopoverState("the click destination to take focus") { destination.window.isKeyWindow && NSApp.isActive }
+        for n in 1...20 {
+            try await open(n)
+            try postPopoverClick(destination.button, eventNumber: n)
+            try await closed("outside click \(n) to dismiss")
+            try await waitForPopoverState("destination to receive click \(n) exactly once") { destination.clicks == n }
+        }
+        print("Delivered 20 outside clicks")
+        for n in 1...20 {
+            try await open(n)
+            try postPopoverClick(button, eventNumber: n)
+            try await closed("second status click \(n) to dismiss")
+        }
+        print("Completed 20 rapid status toggles")
+
+        func openWithChild() async throws -> NSWindow {
+            try await open(1)
+            guard let parent = panel?.window else { throw PopoverCheckError("Missing popover window") }
+            try await waitForPopoverState("popover to take key focus before opening a child") { NSApp.isActive && parent.isKeyWindow }
+            let child = NSWindow(contentRect: NSRect(x: parent.frame.midX, y: parent.frame.midY, width: 80, height: 40),
+                                 styleMask: [.titled], backing: .buffered, defer: false)
+            parent.addChildWindow(child, ordered: .above)
+            child.makeKeyAndOrderFront(nil)
+            try await waitForPopoverState("the child to become key without closing its popover") { child.isKeyWindow && panelOnScreen }
+            return child
+        }
+        let child = try await openWithChild()
+        try postPopoverClick(button, eventNumber: 1)
+        try await closed("status click with a key child to dismiss")
+        child.parent?.removeChildWindow(child); child.orderOut(nil)
+
+        let nextChild = try await openWithChild()
+        defer { nextChild.parent?.removeChildWindow(nextChild); nextChild.orderOut(nil) }
+        if #available(macOS 14, *) { NSApp.yieldActivation(to: focus); _ = focus.activate(from: .current, options: []) }
+        else { _ = focus.activate(options: [.activateIgnoringOtherApps]) }
+        try await waitForPopoverState("the disposable app to activate") { focus.isActive && !NSApp.isActive }
+        try await closed("leaving the app with a key child to dismiss")
+        _ = focus.terminate()
+        try await waitForPopoverState("disposable app to exit") { focus.isTerminated }
+    }
+}
+
+private struct PopoverCheckError: LocalizedError {
+    let errorDescription: String?
+    init(_ message: String) { errorDescription = message }
+}
+
+@MainActor
+private func waitForPopoverState(_ state: String, _ condition: () -> Bool) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + .seconds(5)
+    while !condition() {
+        guard clock.now < deadline else { throw PopoverCheckError("Timed out waiting for \(state)") }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+@MainActor
+private func postPopoverClick(_ button: NSButton, eventNumber: Int) throws {
+    guard let window = button.window else { throw PopoverCheckError("Missing click destination window") }
+    let location = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+    // Exercise AppKit hit testing and button tracking with process-local input.
+    for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+        guard let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                                              timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: window.windowNumber, context: nil,
+                                              eventNumber: eventNumber, clickCount: 1,
+                                              pressure: type == .leftMouseDown ? 1 : 0) else {
+            throw PopoverCheckError("Could not construct \(type) event")
+        }
+        NSApp.postEvent(event, atStart: false)
+    }
+}
+
+@MainActor
+private final class ClickDestination: NSObject {
+    let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 240, height: 90),
+                          styleMask: [.titled], backing: .buffered, defer: false)
+    let button = NSButton(title: "Receive outside click", target: nil, action: nil)
+    private(set) var clicks = 0
+
+    override init() {
+        super.init()
+        button.target = self; button.action = #selector(received)
+        button.sizeToFit(); button.setFrameOrigin(NSPoint(x: 20, y: 20))
+        window.contentView?.addSubview(button)
+    }
+    @objc private func received() { clicks += 1 }
+}
+
+@MainActor
+private enum BenchFocusApp {
+    static func run(parent: pid_t) {
+        guard let bench = NSRunningApplication(processIdentifier: parent) else { return }
+        let app = NSApplication.shared
+        app.setActivationPolicy(.regular)
+        let observation = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+            if #available(macOS 14, *) { NSApp.yieldActivation(to: bench) }
+            let ready = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"]!).appendingPathComponent("focus-ready")
+            try? Data().write(to: ready)
+        }
+        defer { NotificationCenter.default.removeObserver(observation) }
+        let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 240, height: 90),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Milo focus fixture"
+        window.makeKeyAndOrderFront(nil)
+        // A killed/interrupted benchmark must not leave a peer app behind.
+        let parentExit = DispatchSource.makeProcessSource(identifier: parent, eventMask: .exit, queue: .main)
+        parentExit.setEventHandler { NSApp.terminate(nil) }
+        parentExit.resume()
+        guard !bench.isTerminated else { return }
+        withExtendedLifetime((window, parentExit)) { app.run() }
+    }
 }
 
 @MainActor
@@ -98,7 +241,7 @@ private enum MenuBench {
         tight("compare-frame") { _ in precondition(same == frame()) }
         let now = Date.now
         tight("badge-reading") { _ in _ = badgeReading(same, mode: "auto", now: now)?.label(at: now) }
-        let suite = "net.usemilo.usage.bench.alerts"
+        let suite = "\(Bundle.main.bundleIdentifier!).alerts"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
         let alerts = UsageAlerts(defaults: defaults, delivery: UsageAlertDelivery(
@@ -325,6 +468,11 @@ private enum MenuBench {
 @main
 private struct MenuBenchApp {
     @MainActor static func main() {
+        let arguments = CommandLine.arguments
+        if arguments.count == 3, arguments[1] == "--focus-fixture", let parent = pid_t(arguments[2]) {
+            BenchFocusApp.run(parent: parent)
+            return
+        }
         setvbuf(stdout, nil, _IOLBF, 0)
         signal(SIGPIPE, SIG_IGN)
         // An app with nothing on screen is slowed down to save power, which would time the scheduler.
@@ -333,8 +481,18 @@ private struct MenuBenchApp {
         let app = NSApplication.shared; app.setActivationPolicy(.accessory)
         let delegate = AppDelegate(); app.delegate = delegate
         Task { @MainActor in
-            // The menu bar item needs a moment before a popover can open from it.
-            if CommandLine.arguments.contains("--check") { try? await Task.sleep(nanoseconds: 1_000_000_000) } else { await MenuBench.run(delegate) }
+            if arguments.contains("--check-popover") {
+                do {
+                    try await delegate.checkPopover()
+                    print("Passed 20 outside button clicks, 20 rapid status toggles, key-child toggle and app resignation")
+                    try Data().write(to: URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"]!).appendingPathComponent("popover-passed"))
+                    exit(0)
+                } catch {
+                    fputs("Popover check failed: \(error.localizedDescription)\n", stderr)
+                    exit(1)
+                }
+            }
+            if arguments.contains("--check") { try? await Task.sleep(nanoseconds: 1_000_000_000) } else { await MenuBench.run(delegate) }
             do {
                 try MenuBench.checkInstallProfile()
                 try await MenuBench.checkIndicatorSaveReplies()
