@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 const READY: &str = "Milo Preview: ready to confirm.";
 const ACCEPTED: &str = "milo preview: confirmation accepted; checking the tile";
 const VISIBLE: &str = "milo preview: preview visible";
-const BAD_STACK: &str = "milo preview: not shown: the Rex window stack could not be verified; uncover the tile and use one visible Rex window";
+const BAD_STACK: &str = "milo preview: not shown: post-order: helper panel is behind the pinned Rex window";
 
 fn records(log: &str) -> impl Iterator<Item = &str> {
     log.split_inclusive('\n').map_while(|line| line.strip_suffix('\n'))
@@ -330,6 +330,35 @@ fn preview_confirmation_uses_rex_pty() {
     assert!(!tile.capture().contains(&url), "a bounded reason must not print the page URL");
 
     fs::remove_file(lab.root.join("deny-placement")).unwrap();
+    assert_eq!(tile.event("quartz-panel-absent"), 1, "the first reveal must survive one missing Quartz record");
+    let absent = lab.root.join("absent-panel");
+    fs::write(&absent, "").unwrap();
+    tile.show();
+    tile.wait("permanently absent panel had no post-order reason", || {
+        tile.count("not shown: post-order: ordered helper panel missing from Quartz") == 1
+    });
+    assert_eq!(tile.event("quartz-panel-absent"), 3, "only one missing snapshot may be retried");
+    fs::remove_file(absent).unwrap();
+    tile.samples(4);
+    let miss = lab.root.join("miss-center");
+    fs::write(&miss, "").unwrap();
+    let stages = tile.geometry();
+    tile.show();
+    tile.wait("AppKit center miss was conflated with post-order verification", || {
+        tile.count("not shown: order: AppKit found no window at the tile center") == 1
+    });
+    assert_eq!(tile.geometry(), stages, "a missing center hit must not order a panel");
+    assert_eq!(tile.event("revealed"), 4, "a failed placement exposed the page");
+    fs::remove_file(miss).unwrap();
+    let chrome = lab.root.join("rex-overlay");
+    fs::write(&chrome, "").unwrap();
+    tile.samples(4);
+    tile.show();
+    tile.wait("overlapping Rex chrome was not distinguished from a second normal Rex window", || {
+        tile.count("not shown: pre-order: a Rex overlay overlaps the tile") == 1
+    });
+    assert_eq!(tile.geometry(), stages);
+    fs::remove_file(chrome).unwrap();
     tile.samples(4);
     // Inject only when the main thread is at the final stacked-panel proof;
     // no earlier tick can have consumed part of this burst.

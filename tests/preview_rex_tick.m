@@ -52,9 +52,11 @@ static NSString *denyPlacement;
 static NSString *delaySamples;
 static NSString *holdProof;
 static NSString *holdInput;
+static NSString *absentPanel, *missCenter, *rexOverlay;
 static int trace;
 static os_unfair_lock sampleLock = OS_UNFAIR_LOCK_INIT;
 static BOOL staged;
+static BOOL exercisedFirstOrder, omitFirstPanel;
 static CGRect stagedFrame;
 
 // Only the sample consumed by FrontmostRex is replaced, not an app's identity.
@@ -112,6 +114,8 @@ static CFArrayRef FixtureWindows(CGWindowListOption options, CGWindowID relative
     os_unfair_lock_lock(&sampleLock);
     BOOL hasPanel = staged;
     CGRect frame = stagedFrame;
+    BOOL omit = hasPanel && omitFirstPanel;
+    if (omit) omitFirstPanel = NO;
     os_unfair_lock_unlock(&sampleLock);
     if ([NSFileManager.defaultManager fileExistsAtPath:delaySamples]) {
         usleep(700000); // Deliberately outlive the production sample, without changing its clock.
@@ -119,7 +123,14 @@ static CFArrayRef FixtureWindows(CGWindowListOption options, CGWindowID relative
     }
     NSDictionary *target = Metadata(ownerPID, Target, targetFrame);
     NSArray *windows = @[target];
-    if (hasPanel) {
+    if ([NSFileManager.defaultManager fileExistsAtPath:rexOverlay]) {
+        NSMutableDictionary *chrome = [Metadata(ownerPID, 55, targetFrame) mutableCopy];
+        chrome[(__bridge NSString *)kCGWindowLayer] = @(CGWindowLevelForKey(kCGFloatingWindowLevelKey));
+        windows = @[chrome, target];
+    }
+    if (hasPanel && (omit || [NSFileManager.defaultManager fileExistsAtPath:absentPanel])) {
+        Trace("quartz-panel-absent\n");
+    } else if (hasPanel) {
         NSDictionary *panel = Metadata(getpid(), Panel, frame);
         BOOL deny = [NSFileManager.defaultManager fileExistsAtPath:denyPlacement];
         windows = deny ? @[target, panel] : @[panel, target];
@@ -144,6 +155,7 @@ static BOOL FixturePane(CGRect window, CGRect normalized, CGRect *pane) {
 
 @implementation NSWindow (RexTickFixture)
 + (NSInteger)fixtureWindowNumberAtPoint:(NSPoint)point belowWindowWithWindowNumber:(NSInteger)below {
+    if ([NSFileManager.defaultManager fileExistsAtPath:missCenter]) return 0;
     CGPoint quartz = CGPointMake(point.x, quartzHeight - point.y);
     return !below && CGRectContainsPoint(targetFrame, quartz) ? RelativeWindow : 0;
 }
@@ -174,6 +186,8 @@ static void FixtureOrder(MiloPreviewPanel *panel, SEL selector, NSWindowOrdering
     os_unfair_lock_lock(&sampleLock);
     stagedFrame = CGRectMake(NSMinX(frame), quartzHeight - NSMaxY(frame), NSWidth(frame), NSHeight(frame));
     staged = YES;
+    omitFirstPanel = !exercisedFirstOrder;
+    exercisedFirstOrder = YES;
     os_unfair_lock_unlock(&sampleLock);
     // No order message reaches AppKit: the actual WKWebView and panel are always offscreen.
     char event[128];
@@ -301,6 +315,9 @@ int main(int argc, const char **argv) {
         delaySamples = [root stringByAppendingPathComponent:@"delay-samples"];
         holdProof = [root stringByAppendingPathComponent:@"hold-staged-proof"];
         holdInput = [root stringByAppendingPathComponent:@"hold-visible-input"];
+        absentPanel = [root stringByAppendingPathComponent:@"absent-panel"];
+        missCenter = [root stringByAppendingPathComponent:@"miss-center"];
+        rexOverlay = [root stringByAppendingPathComponent:@"rex-overlay"];
         trace = open([root stringByAppendingPathComponent:@"native.log"].fileSystemRepresentation,
             O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
         assert(trace >= 0);

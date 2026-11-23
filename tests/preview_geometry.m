@@ -28,19 +28,19 @@ static void ScreenPlacement(void) {
     };
     NSRect overlay;
     CGDirectDisplayID display;
-    Geometry left = {CGRectMake(-1200, 220, 700, 500), CGRectMake(-1199.75, 230.25, 500.5, 400.25), 1};
+    Geometry left = {CGRectMake(-1200, 220, 700, 500), CGRectMake(-1199.75, 230.25, 500.5, 400.25), 1, NULL};
     assert(PlaceOnScreen(left, primary, screens, 3, &overlay, &display));
     assert(display == 2 && NSEqualRects(overlay, NSMakeRect(-1199.5, 269.5, 500, 400)));
 
-    Geometry above = {CGRectMake(1500, -920, 800, 600), CGRectMake(1510, -880, 790, 560), 1};
+    Geometry above = {CGRectMake(1500, -920, 800, 600), CGRectMake(1510, -880, 790, 560), 1, NULL};
     assert(PlaceOnScreen(above, primary, screens, 3, &overlay, &display));
     assert(display == 3 && NSEqualRects(overlay, NSMakeRect(1510, 1220, 790, 560)));
 
-    Geometry crosses = {CGRectMake(-200, 220, 700, 500), CGRectMake(0, 220, 400, 500), 1};
+    Geometry crosses = {CGRectMake(-200, 220, 700, 500), CGRectMake(0, 220, 400, 500), 1, NULL};
     assert(!PlaceOnScreen(crosses, primary, screens, 3, &overlay, &display));
-    Geometry menuBar = {CGRectMake(100, 0, 700, 500), CGRectMake(100, 12, 400, 400), 1};
+    Geometry menuBar = {CGRectMake(100, 0, 700, 500), CGRectMake(100, 12, 400, 400), 1, NULL};
     assert(!PlaceOnScreen(menuBar, primary, screens, 3, &overlay, &display));
-    Geometry fullScreen = {primary, CGRectMake(100, 50, 400, 400), 1};
+    Geometry fullScreen = {primary, CGRectMake(100, 50, 400, 400), 1, NULL};
     assert(!PlaceOnScreen(fullScreen, primary, screens, 3, &overlay, &display));
     screens[1].mirrored = YES;
     assert(!PlaceOnScreen(left, primary, screens, 3, &overlay, &display));
@@ -102,6 +102,9 @@ static void WindowPinning(void) {
     assert(!WindowID(@[harmless, rex], 0, NULL)); // Preflight has no pane, so checks the window.
     assert(!WindowID(@[rex, otherRex], 0, NULL)); // Even a disjoint second Rex window is ambiguous.
     assert(!WindowID(@[otherRex, rex], 1, &right));
+    NSDictionary *chrome = Replacing(otherRex, kCGWindowLayer, @25);
+    assert(WindowID(@[chrome, rex], 1, &right) == 1); // Non-overlapping Rex chrome, not another normal window.
+    assert(!WindowID(@[Replacing(chrome, kCGWindowBounds, occluding[(__bridge NSString *)kCGWindowBounds]), rex], 1, &right));
     assert(!WindowID(@[wrongPID, otherRex], 1, &right));
     assert(!WindowID(@[otherRex], 1, &right)); // Never use a replacement window.
     assert(!WindowID(@[Replacing(rex, kCGWindowLayer, @25)], 1, &right));
@@ -135,7 +138,10 @@ static void PanelOrdering(void) {
     assert(SampleGeometry(@[panel, harmless, rex, occluder], 100, 1, 300, &expected, &right).windowID == 1);
     assert(SampleGeometry(@[rounded, rex], 100, 1, 300, &expected, &right).windowID == 1);
     assert(!SampleGeometry(@[rex, panel], 100, 1, 300, &expected, &right).windowID);
-    assert(!SampleGeometry(@[rex], 100, 1, 300, &expected, &right).windowID);
+    Geometry absent = SampleGeometry(@[rex], 100, 1, 300, &expected, &right);
+    assert(!absent.windowID && absent.rejection == PanelNotListed && CGRectEqualToRect(absent.pane, geometry.pane));
+    Geometry blocked = SampleGeometry(@[occluder, rex], 100, 1, 300, &expected, &right);
+    assert(!blocked.windowID && blocked.rejection != PanelNotListed); // Missing panel must not mask an obstruction.
     assert(!SampleGeometry(@[spoof, rex], 100, 1, 300, &expected, &right).windowID);
     assert(!SampleGeometry(@[popup, rex], 100, 1, 300, &expected, &right).windowID);
     assert(!SampleGeometry(@[panel, rex, popup], 100, 1, 300, &expected, &right).windowID);

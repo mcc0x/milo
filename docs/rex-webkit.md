@@ -116,6 +116,8 @@ cargo test --locked --test rex_lab preview_tick::preview_confirmation_uses_rex_p
 
 The confirmation lab combines a real Rex server, a four-session Unix viewer fixture, the terminal's actual input and the native coordinator. It uses an offscreen `WKWebView` and models window stacking, foreground and pointer position. A verified page pixel there is not an on-screen Rex screenshot; actual keyboard focus, palette stacking and physical display movement remain separate checks.
 
+In a separate two-process check with transparent, click-through fixture windows on two 1× displays, AppKit reported the ordered panel visible and on the active Space while Quartz still listed only the pinned target. The first snapshot showing the panel above the target arrived 9–27 ms after ordering in four trials. This isolates a post-order race; it does not identify the cause of every Rex stacking refusal. Milo now allows **one more sample** only for an absent first panel record, with the original pin, geometry, visibility and consent still valid. The panel remains transparent and cannot receive input while waiting. A panel behind Rex, an obstruction, a changed frame, an invalid Space or a second missing record is not accepted.
+
 ### Human acceptance: start with the right split
 
 From the checkout, serve just the supplied page (not your project files) in one shell:
@@ -131,6 +133,8 @@ Use the printed loopback URL in a fresh **Mac-created Rex terminal**: `/absolute
 For the multi-session check, leave your other sessions attached. Before confirming, verify that only terminal text is visible. Confirm once, move the pointer outside and wait for the page to disappear, then bring it back: the page should stay hidden. Confirm again, leave the pointer inside and wait at least 12 seconds: the page should hide without further input. To isolate **tab switching** from pointer exit, start another peek without clicking into the page, leave the pointer still and use Rex's keyboard shortcut to switch tabs **within the same session** and immediately back. Check that the page stays hidden until a fresh `show`. Record any exposure on the other tab.
 
 If the tile prints `not shown`, resolve the stated reason, keep the pointer inside the focused tile, then type a **new** `show` and press Return. A rejected command is never retried automatically. A `confirmation accepted` line distinguishes receipt by the terminal from successful placement; `preview visible` means the helper presented the panel, not that the page finished loading.
+
+For a stacking refusal, the one `not shown` line names the failed step: `pre-order` for the initial Quartz check, `order` for AppKit placement, or `post-order` for verification of the clear panel. Report that line; no window titles, screenshots, URL, page text or permission change are needed to diagnose the step.
 
 1. Start with one ordinary Rex window. Compare all four green page edges, the preview toolbar, the Rex divider and pane header. Drag the divider in both directions; resize and move the window. Record any offset or incorrect overlap. Repeat with and without the sidebar. **Passing real resize and tab switching is a merge gate**, not a prerequisite for trying this build.
 2. Type into the fixture, click the counter and navigate. Return keyboard focus to the original shell and type there. Select an element, cancel, then select again and copy. For hot reload, repeat with your own same-origin dev server and edit its source; the static geometry fixture does not implement hot reload.

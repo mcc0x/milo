@@ -31,6 +31,7 @@ typedef struct {
     CGRect window;
     CGRect pane;
     CGWindowID windowID;
+    const char *rejection; // Static, non-identifying reason; only set on failure.
 } Geometry;
 
 static BOOL SameGeometry(Geometry a, Geometry b) {
@@ -101,12 +102,20 @@ static CGRect WindowBounds(NSDictionary *window) {
         ValidRect(r) ? r : CGRectNull;
 }
 
+static const char PanelNotListed[] = "ordered helper panel missing from Quartz";
+
+static Geometry RejectedGeometry(const char *reason) {
+    return (Geometry){.rejection = reason};
+}
+
 // Quartz supplies onscreen metadata in front-to-back order. A pinned window is
 // never replaced by another window, even if that window is the only Rex window.
 static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned, pid_t helperPID,
     const CGRect *orderedPanel, const CGRect *normalized) {
-    Geometry none = {0}, geometry = {0};
+    Geometry geometry = {0};
+    if (!windows) return RejectedGeometry("Quartz window list unavailable");
     NSUInteger match = NSNotFound, panel = NSNotFound;
+    BOOL sawTransparentHelper = NO;
     int normal = CGWindowLevelForKey(kCGNormalWindowLevelKey);
     for (NSUInteger i = 0; i < windows.count; ++i) {
         NSDictionary *window = windows[i];
@@ -114,41 +123,64 @@ static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned
         if (![window isKindOfClass:NSDictionary.class] ||
             !WindowInteger(window, kCGWindowOwnerPID, 1, INT_MAX, &owner) ||
             !WindowInteger(window, kCGWindowLayer, INT_MIN, INT_MAX, &layer) ||
-            !WindowInteger(window, kCGWindowNumber, 1, UINT32_MAX, &number)) return none;
-        if (pinned && number == pinned && (owner != rexPID || layer != normal)) return none;
+            !WindowInteger(window, kCGWindowNumber, 1, UINT32_MAX, &number))
+            return RejectedGeometry("incomplete Quartz window identity");
+        if (pinned && number == pinned && (owner != rexPID || layer != normal))
+            return RejectedGeometry("pinned Rex window changed owner or level");
         if (orderedPanel && owner == helperPID && layer == normal) {
             double alpha;
-            if (!WindowAlpha(window, &alpha)) return none;
+            if (!WindowAlpha(window, &alpha)) return RejectedGeometry("helper window opacity unavailable");
             if (alpha != 0) {
                 CGRect bounds = WindowBounds(window);
                 // Some Quartz metadata rounds bounds outward to whole points.
-                if (panel != NSNotFound || (alpha != 1) ||
-                    (!CGRectEqualToRect(bounds, *orderedPanel) &&
-                     !CGRectEqualToRect(bounds, CGRectIntegral(*orderedPanel)))) return none;
+                if (panel != NSNotFound) return RejectedGeometry("multiple visible helper panels");
+                if (alpha != 1) return RejectedGeometry("helper panel opacity changed");
+                if (!CGRectEqualToRect(bounds, *orderedPanel) &&
+                    !CGRectEqualToRect(bounds, CGRectIntegral(*orderedPanel)))
+                    return RejectedGeometry("Quartz helper frame differs from the ordered frame");
                 panel = i;
+            } else {
+                sawTransparentHelper = YES;
             }
         }
         if (owner != rexPID || layer != normal) continue;
         double alpha;
-        if (!WindowAlpha(window, &alpha)) return none;
+        if (!WindowAlpha(window, &alpha)) return RejectedGeometry("Rex window opacity unavailable");
         if (alpha == 0 && number != pinned) continue;
-        if (alpha == 0 || (pinned && number != pinned) || match != NSNotFound) return none;
+        if (alpha == 0) return RejectedGeometry("pinned Rex window transparent");
+        if ((pinned && number != pinned) || match != NSNotFound)
+            return RejectedGeometry("additional normal Rex window; one visible Rex window is supported");
         CGRect bounds = WindowBounds(window);
-        if (CGRectIsNull(bounds)) return none;
-        geometry = (Geometry){bounds, bounds, (CGWindowID)number};
+        if (CGRectIsNull(bounds)) return RejectedGeometry("Rex window bounds unavailable");
+        geometry = (Geometry){.window = bounds, .pane = bounds, .windowID = (CGWindowID)number};
         match = i;
     }
-    if (match == NSNotFound || (orderedPanel && (panel == NSNotFound || panel >= match)) ||
-        (normalized && !MiloApproximatePane(geometry.window, *normalized, &geometry.pane))) return none;
+    if (match == NSNotFound) return RejectedGeometry("pinned Rex window not onscreen");
+    if (panel != NSNotFound && panel >= match) return RejectedGeometry("helper panel is behind the pinned Rex window");
+    if (normalized && !MiloApproximatePane(geometry.window, *normalized, &geometry.pane))
+        return RejectedGeometry("Rex chrome and tile layout do not yield a usable pane");
 
     for (NSUInteger i = 0; i < match; ++i) {
         if (i == panel) continue;
         NSDictionary *window = windows[i];
         double alpha;
-        if (!WindowAlpha(window, &alpha)) return none;
+        if (!WindowAlpha(window, &alpha)) return RejectedGeometry("occlusion cannot be checked: missing opacity");
         if (alpha == 0) continue;
         CGRect bounds = WindowBounds(window);
-        if (CGRectIsNull(bounds) || !CGRectIsEmpty(CGRectIntersection(bounds, geometry.pane))) return none;
+        if (CGRectIsNull(bounds)) return RejectedGeometry("occlusion cannot be checked: missing bounds");
+        if (!CGRectIsEmpty(CGRectIntersection(bounds, geometry.pane))) {
+            pid_t owner = [window[(__bridge NSString *)kCGWindowOwnerPID] intValue];
+            if (owner == rexPID) return RejectedGeometry("a Rex overlay overlaps the tile; dismiss it");
+            if (owner == helperPID) return RejectedGeometry("another helper window overlaps the tile");
+            return RejectedGeometry("another window overlaps the tile; uncover the tile");
+        }
+    }
+    if (orderedPanel && panel == NSNotFound) {
+        if (sawTransparentHelper) return RejectedGeometry("only transparent helper windows listed in Quartz");
+        // Carry the checked pin's geometry, but do not return a usable window ID.
+        // Nothing other than the helper's own missing record can reach this path.
+        geometry.windowID = 0;
+        geometry.rejection = PanelNotListed;
     }
     return geometry;
 }
@@ -516,7 +548,7 @@ static const char *PeekFailureMessage(PeekFailure failure) {
         case PeekFocus: return "the Rex tile lost focus or eligibility; click it and retry";
         case PeekLease: return "Rex stopped confirming tile visibility; wait for the tile to settle or reopen the preview";
         case PeekStale: return "Rex tile geometry is stale or changing; wait for it to settle, then type show and press Return";
-        case PeekStack: return "the Rex window stack could not be verified; uncover the tile and use one visible Rex window";
+        case PeekStack: return NULL; // The rejecting check supplies its phase and reason.
         case PeekPlacement: return "the tile cannot be placed on this display; use a regular window entirely on one display";
         case PeekPointer: return "keep the pointer inside the preview tile and retry";
         case PeekTTY: return "this is not the foreground canonical Rex terminal; click the preview tile or reopen it";
@@ -531,11 +563,6 @@ static const char *PeekFailureMessage(PeekFailure failure) {
 
 static const char *PeekStatusPrefix(PeekPhase phase) {
     return phase == PeekVisible ? "preview hidden: " : "not shown: ";
-}
-
-static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
-    const char *message = PeekFailureMessage(failure);
-    if (message) WriteStatus(tty, PeekStatusPrefix(phase), message);
 }
 
 @interface MiloPreviewAnchor : NSObject <NSWindowDelegate> {
@@ -562,6 +589,8 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
     NSTimeInterval _focusDeadline;
     NSUInteger _generation;
     PeekFailure _geometryFailure;
+    const char *_stackPhase, *_stackReason;
+    BOOL _firstOrderedSample;
     BOOL _samplePending, _initializingPanel, _stableGeometry, _reportedTTYFailure, _finished, _sessionInactive, _screensAsleep;
     char _line[64];
     size_t _lineLength;
@@ -576,6 +605,24 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
 @end
 
 @implementation MiloPreviewAnchor
+- (PeekFailure)stackFailureAt:(const char *)phase reason:(const char *)reason {
+    _stackPhase = phase;
+    _stackReason = reason;
+    return PeekStack;
+}
+
+- (void)reportFailure:(PeekFailure)failure phase:(PeekPhase)phase {
+    if (failure == PeekStack) {
+        // Only fixed phase and reason strings, never window metadata or page data.
+        char reason[160];
+        snprintf(reason, sizeof(reason), "%s: %s", _stackPhase, _stackReason);
+        WriteStatus(_tty, PeekStatusPrefix(phase), reason);
+    } else {
+        const char *message = PeekFailureMessage(failure);
+        if (message) WriteStatus(_tty, PeekStatusPrefix(phase), message);
+    }
+}
+
 - (instancetype)initWithURL:(NSURL *)url rex:(NSRunningApplication *)rex pinned:(CGWindowID)pinned
     stateFD:(int)stateFD focusFD:(int)focusFD parent:(pid_t)parent tty:(int)tty confirm:(BOOL)confirm {
     if ((self = [super init])) {
@@ -625,7 +672,7 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
     if (previous != PeekIdle) {
         // Close the old input epoch before telling the user they can retry.
         if (!resetTTY && [self eligibilityFailure] == PeekOK) ArmPeekTTY(&_peek, _tty);
-        if (previous != PeekVisible || failure != PeekDismissed) WritePeekFailure(_tty, previous, failure);
+        if (previous != PeekVisible || failure != PeekDismissed) [self reportFailure:failure phase:previous];
     }
 }
 
@@ -664,7 +711,7 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
 }
 
 - (void)finishTTYFailure {
-    if (_peek.phase == PeekIdle && !_reportedTTYFailure) WritePeekFailure(_tty, PeekIdle, PeekTTY);
+    if (_peek.phase == PeekIdle && !_reportedTTYFailure) [self reportFailure:PeekTTY phase:PeekIdle];
     [self invalidateFor:PeekTTY resetTTY:YES];
     _status = 1;
     [self finish:NULL];
@@ -723,7 +770,7 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
             for (NSUInteger i = 0; i < 8; ++i) {
                 PeekInput input = ReadPeekInput(&_peek, _tty);
                 if (input == PeekNoInput || input == PeekBadTTY) break;
-                if (input == PeekShow) WritePeekFailure(_tty, PeekIdle, failure);
+                if (input == PeekShow) [self reportFailure:failure phase:PeekIdle];
             }
         }
         return NO;
@@ -731,7 +778,7 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
     if (!ForegroundCanonicalTTY(_tty)) {
         BOOL reported = _reportedTTYFailure || _peek.phase != PeekIdle;
         if (_peek.ttyReady || _peek.phase != PeekIdle) [self invalidateFor:PeekTTY resetTTY:YES];
-        if (!reported) WritePeekFailure(_tty, PeekIdle, PeekTTY);
+        if (!reported) [self reportFailure:PeekTTY phase:PeekIdle];
         _reportedTTYFailure = YES;
         return NO;
     }
@@ -772,7 +819,7 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
         }
         if (failure == PeekOK && ![self pointerInsideTile]) failure = PeekPointer;
         if (failure != PeekOK) {
-            WritePeekFailure(_tty, PeekIdle, failure);
+            [self reportFailure:failure phase:PeekIdle];
             continue;
         }
         if (!WriteDiagnostic(_tty, "confirmation accepted; checking the tile")) {
@@ -875,9 +922,21 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
     if (_finished) return;
     if (generation != _generation) return;
     PeekFailure failure = [self eligibilityFailure];
+    BOOL firstOrdered = checkedPanel && _firstOrderedSample;
+    if (checkedPanel) _firstOrderedSample = NO;
     if (failure == PeekOK) {
         if (!SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) failure = PeekStale;
-        else if (!geometry.windowID) failure = PeekStack;
+        else if (firstOrdered && geometry.rejection == PanelNotListed &&
+            _panel.visible && !_panel.placementProven && _panel.onActiveSpace &&
+            NSEqualRects(_panel.frame, _candidateFrame) &&
+            CGRectEqualToRect(geometry.window, _candidate.window) && CGRectEqualToRect(geometry.pane, _candidate.pane) &&
+            [self proofFailureAt:started] == PeekOK) {
+            // AppKit can report visible one sample before Quartz lists the
+            // panel. Leave it clear and click-through until the next tick;
+            // do not renew consent, update freshness, reorder, or reveal.
+            return;
+        } else if (!geometry.windowID) failure = [self stackFailureAt:checkedPanel ? "post-order" : "pre-order"
+            reason:geometry.rejection];
     }
     NSRect frame;
     CGDirectDisplayID display;
@@ -942,7 +1001,8 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
     }
     if (_panel.visible) {
         if (!checkedPanel || !_panel.onActiveSpace || !NSEqualRects(_panel.frame, frame)) {
-            [self rejectProof:PeekStack];
+            [self rejectProof:[self stackFailureAt:"post-order" reason:!checkedPanel ? "panel changed during the sample" :
+                !_panel.onActiveSpace ? "helper panel is not on the active Space" : "AppKit helper frame changed"]];
             return;
         }
         if (!_panel.placementProven) {
@@ -951,7 +1011,8 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
                 failure = [self proofFailureAt:started];
                 if (failure != PeekOK) { [self rejectProof:failure]; return; }
                 if (!_panel.visible || !_panel.onActiveSpace || !NSEqualRects(_panel.frame, frame)) {
-                    [self rejectProof:PeekStack];
+                    [self rejectProof:[self stackFailureAt:"reveal" reason:!_panel.visible ? "helper panel is not ordered" :
+                        !_panel.onActiveSpace ? "helper panel is not on the active Space" : "AppKit helper frame changed"]];
                     return;
                 }
                 if (!ShowPeek(&_peek, LeaseNow())) { [self expirePeek]; return; }
@@ -977,7 +1038,10 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
     NSInteger relativeWindow = [NSWindow windowNumberAtPoint:center belowWindowWithWindowNumber:0];
     if (_finished || generation != _generation) return;
     failure = [self proofFailureAt:started];
-    if (failure == PeekOK && (relativeWindow <= 0 || !NSEqualRects(_panel.frame, frame))) failure = PeekStack;
+    if (failure == PeekOK && relativeWindow <= 0)
+        failure = [self stackFailureAt:"order" reason:"AppKit found no window at the tile center"];
+    if (failure == PeekOK && !NSEqualRects(_panel.frame, frame))
+        failure = [self stackFailureAt:"order" reason:"AppKit adjusted the requested helper frame"];
     if (failure != PeekOK) {
         [self rejectProof:failure];
         return;
@@ -988,11 +1052,14 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
     [_panel orderWindow:NSWindowAbove relativeTo:relativeWindow];
     if (_finished || generation != _generation) { [self hidePanel]; return; }
     failure = [self proofFailureAt:started];
-    if (failure == PeekOK && (!_panel.visible || !NSEqualRects(_panel.frame, frame))) failure = PeekStack;
+    if (failure == PeekOK && (!_panel.visible || !NSEqualRects(_panel.frame, frame)))
+        failure = [self stackFailureAt:"order" reason:!_panel.visible ? "AppKit did not order the helper panel" :
+            "AppKit changed the frame when ordering the helper panel"];
     if (failure != PeekOK) {
         [self rejectProof:failure];
         return;
     }
+    _firstOrderedSample = YES;
     // Verify the clear, click-through panel before revealing the browser.
     [self tick];
 }
@@ -1020,7 +1087,7 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
     else if (_peek.phase != PeekIdle && ![self pointerInsideTile])
         [self rejectProof:PeekPointer];
     else if (_panel.visible && !_panel.onActiveSpace)
-        [self invalidateFor:PeekStack resetTTY:YES];
+        [self invalidateFor:[self stackFailureAt:"post-order" reason:"helper panel is not on the active Space"] resetTTY:YES];
     else if (_lastSample && !SampleFresh(now, _lastSample))
         [self rejectProof:PeekStale];
     if (_samplePending || _initializingPanel) return;
@@ -1145,7 +1212,8 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
         if (!anchor || !anchor->_panel || event.window != anchor->_panel) return event;
         if (![anchor acceptsPanelInput]) {
             PeekFailure failure = [anchor proofFailureAt:anchor->_lastSample];
-            [anchor rejectProof:failure == PeekOK ? PeekStack : failure];
+            [anchor rejectProof:failure == PeekOK ?
+                [anchor stackFailureAt:"input" reason:"panel is no longer eligible for input"] : failure];
             return nil;
         }
         if (event.type == NSEventTypeKeyDown && anchor->_panel.keyWindow &&
