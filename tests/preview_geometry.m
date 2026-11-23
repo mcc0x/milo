@@ -4,6 +4,7 @@
 // /tmp/preview-geometry
 // /tmp/preview-geometry --panel-staging additionally checks Quartz in a logged-in GUI session.
 #import <assert.h>
+#import <stdio.h>
 #import <time.h>
 #import "../macos/Preview/Chrome.h"
 
@@ -39,7 +40,7 @@ static void ScreenPlacement(void) {
     };
     NSRect overlay;
     CGDirectDisplayID display;
-    Geometry left = {CGRectMake(-1200, 220, 700, 500), CGRectMake(-1199.75, 230.25, 500.5, 400.25), 1, NULL};
+    Geometry left = {CGRectMake(-1200, 220, 700, 500), CGRectMake(-1199.75, 230.25, 500.625, 400.625), 1, NULL};
     assert(!ScreenPlacementFailure(left, primary, screens, 3, &overlay, &display));
     assert(display == 2 && NSEqualRects(overlay, NSMakeRect(-1199.5, 269.5, 500, 400)));
 
@@ -140,16 +141,27 @@ static void PaneOcclusion(void) {
     NSDictionary *sibling = Metadata(200, 3, CGRectMake(22, 180, 100, 100));
     CGRect titlebarRect = CGRectMake(700, 40, 100, 24);
     NSDictionary *titlebar = Metadata(200, 4, titlebarRect);
-    NSDictionary *titlebarChrome = Replacing(Metadata(100, 10, titlebarRect), kCGWindowLayer, @25);
-    CGRect edge = CGRectMake(CGRectGetMinX(clear.pane) - 100, 180, 100, 100);
-    NSDictionary *touching = Metadata(200, 5, edge);
-    for (NSDictionary *surface in @[sibling, titlebar, titlebarChrome, touching]) {
+    NSDictionary *titlebarChrome = Replacing(Metadata(100, 5, titlebarRect), kCGWindowLayer, @25);
+    CGFloat l = CGRectGetMinX(clear.pane), r = CGRectGetMaxX(clear.pane);
+    CGFloat t = CGRectGetMinY(clear.pane), b = CGRectGetMaxY(clear.pane);
+    CGRect edges[] = {
+        CGRectMake(l + 30, t - 20, 10, 20), CGRectMake(r, t + 30, 20, 10),
+        CGRectMake(l + 30, b, 10, 20), CGRectMake(l - 20, t + 30, 20, 10),
+    };
+    const CGPoint inward[] = {{0, 0.5}, {-0.5, 0}, {0, -0.5}, {0.5, 0}};
+    for (size_t i = 0; i < sizeof(edges) / sizeof(*edges); ++i) {
+        assert(WindowID(@[Metadata(200, 5, edges[i]), rex], 1, &right) == 1);
+        CGRect across = CGRectOffset(edges[i], inward[i].x, inward[i].y);
+        Geometry blocked = SampleGeometry(@[Metadata(200, 5, across), rex], 100, 1, 300, NULL, &right);
+        assert(!blocked.windowID && blocked.rejection &&
+            !strcmp(blocked.rejection, "another window overlaps the tile; waiting for clear placement"));
+    }
+    for (NSDictionary *surface in @[sibling, titlebar, titlebarChrome]) {
         assert(WindowID(@[surface, rex], 0, NULL) == 1);
         assert(WindowID(@[surface, rex], 1, &right) == 1);
     }
 
-    edge.size.width += 0.5; // One pixel at 2x, just inside the pane.
-    NSDictionary *onePixel = Metadata(200, 6, edge);
+    NSDictionary *onePixel = Metadata(200, 6, CGRectOffset(edges[3], 0.5, 0));
     NSDictionary *covered = Metadata(200, 7, window);
     NSDictionary *menu = Replacing(covered, kCGWindowLayer, @(CGWindowLevelForKey(kCGMainMenuWindowLevelKey)));
     NSDictionary *chrome = Replacing(Metadata(100, 8, window), kCGWindowLayer, @25);
@@ -161,8 +173,6 @@ static void PaneOcclusion(void) {
     }
     const CGRect workspace = CGRectMake(0, 0, 1, 1);
     assert(WindowID(@[covered, rex], 0, &workspace) == 1); // Foreground preflight projects the workspace.
-    Geometry blocked = SampleGeometry(@[onePixel, rex], 100, 1, 300, NULL, &right);
-    assert(blocked.rejection && !strcmp(blocked.rejection, "another window overlaps the tile; waiting for clear placement"));
     assert(WindowID(@[Replacing(covered, kCGWindowAlpha, @0), rex], 1, &right) == 1);
 
     NSDictionary *unknownOpacity = Replacing(covered, kCGWindowAlpha, nil);
@@ -205,6 +215,31 @@ static void PanelOrdering(void) {
     assert(!SampleGeometry(@[Replacing(panel, kCGWindowAlpha, @0), rex], 100, 1, 300, &expected, &right).windowID);
 }
 
+static void AssertOwnedPixels(NSView *view, CGFloat expectedAlpha) {
+    // AppKit draws only this fixture's own views into memory. It never reads
+    // the WindowServer image, another app's window, or the desktop.
+    NSRect rect = view.bounds;
+    assert(rect.origin.x == 0 && rect.origin.y == 0);
+    NSInteger width = (NSInteger)NSWidth(rect), height = (NSInteger)NSHeight(rect);
+    assert(width > 2 && height > 2);
+    NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL
+        pixelsWide:width pixelsHigh:height bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES
+        isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+    assert(bitmap);
+    NSGraphicsContext *context = [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap];
+    assert(context);
+    CGContextClearRect(context.CGContext, rect);
+    [view displayRectIgnoringOpacity:rect inContext:context];
+    const NSPoint points[] = {
+        {width / 2, 0}, {width - 1, height / 2}, {width / 2, height - 1}, {0, height / 2},
+        {width / 2, height / 2},
+    };
+    for (size_t i = 0; i < sizeof(points) / sizeof(*points); ++i) {
+        NSColor *pixel = [bitmap colorAtX:(NSInteger)points[i].x y:(NSInteger)points[i].y];
+        assert(pixel && pixel.alphaComponent == expectedAlpha);
+    }
+}
+
 static void PanelStaging(void) {
     assert([NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyAccessory]);
     NSRect screen = NSScreen.screens.firstObject.visibleFrame;
@@ -217,11 +252,15 @@ static void PanelStaging(void) {
     panel.collectionBehavior = NSWindowCollectionBehaviorTransient | NSWindowCollectionBehaviorIgnoresCycle;
     panel.hasShadow = NO;
     panel.animationBehavior = NSWindowAnimationBehaviorNone;
-    [panel prepareStaging];
+    // A fully transparent, non-drawing child models the unpainted portions
+    // of a WebKit page without depending on the web process's bitmap path.
+    NSView *transparentPage = [[NSView alloc] initWithFrame:NSZeroRect];
+    [panel installContentForStaging:transparentPage];
     assert(!panel.opaque && panel.backgroundColor.alphaComponent == 0 && panel.alphaValue == 1);
     assert(panel.contentView.hidden && panel.ignoresMouseEvents && !panel.canBecomeKeyWindow);
     [panel orderWindow:NSWindowAbove relativeTo:0];
     assert(panel.visible && !panel.keyWindow && panel.contentView.hidden);
+    AssertOwnedPixels(panel.contentView.superview, 0);
 
     // Observe only this fixture's actual window metadata. Model the foreign
     // target and both ordering outcomes without involving a real target.
@@ -249,12 +288,20 @@ static void PanelStaging(void) {
     assert(SampleGeometry([owned arrayByAddingObject:target], targetPID, UINT32_MAX, fixturePID, &expected, NULL).windowID);
     [panel orderOut:nil];
 
-    // Exercise reveal/revoke with the real panel ordered out, leaving the
-    // fixture invisible and nonactivating throughout its run.
+    // Draw the proven body itself (not the window background) so the native
+    // underlay is exercised beneath the transparent child at all four edges.
     panel.placementProven = YES;
+    assert(panel.opaque && panel.backgroundColor.alphaComponent == 1 && panel.alphaValue == 1);
     assert(!panel.contentView.hidden && !panel.ignoresMouseEvents && panel.canBecomeKeyWindow);
+    assert(transparentPage.superview == panel.contentView && NSEqualRects(transparentPage.frame, panel.contentView.bounds));
+    AssertOwnedPixels(panel.contentView, 1);
+
     panel.placementProven = NO;
+    assert(!panel.opaque && panel.backgroundColor.alphaComponent == 0 && panel.alphaValue == 1);
     assert(panel.contentView.hidden && panel.ignoresMouseEvents && !panel.canBecomeKeyWindow);
+    // Draw the enclosing frame view so AppKit skips the hidden body.
+    AssertOwnedPixels(panel.contentView.superview, 0);
+    assert(transparentPage.superview == panel.contentView);
 }
 
 static void RemapPinnedWindow(void) {
@@ -262,12 +309,12 @@ static void RemapPinnedWindow(void) {
     CGRect window = CGRectMake(20, 40, 1000, 800);
     Geometry initial = SampleGeometry(@[Metadata(100, 1, window)], 100, 1, 300, NULL, &right);
     assert(initial.windowID == 1 && CGRectEqualToRect(initial.window, window));
-    assert(CGRectEqualToRect(initial.pane, CGRectMake(547, 152, 451, 670)));
+    assert(CGRectEqualToRect(initial.pane, CGRectMake(537, 146, 471, 682)));
 
     CGRect moved = CGRectMake(-1200, 220, 800, 600);
     Geometry current = SampleGeometry(@[Metadata(100, 1, moved)], 100, 1, 300, NULL, &right);
     assert(current.windowID == initial.windowID && CGRectEqualToRect(current.window, moved));
-    assert(!SameGeometry(initial, current) && CGRectEqualToRect(current.pane, CGRectMake(-773, 332, 351, 470)));
+    assert(!SameGeometry(initial, current) && CGRectEqualToRect(current.pane, CGRectMake(-783, 326, 371, 482)));
     PreviewScreen screens[] = {
         {CGRectMake(0, 0, 1440, 900), CGRectMake(0, 0, 1440, 875), 1, 1, NO},
         {CGRectMake(-1280, -200, 1280, 1024), CGRectMake(-1280, -180, 1280, 1004), 2, 2, NO},
@@ -275,7 +322,7 @@ static void RemapPinnedWindow(void) {
     NSRect frame;
     CGDirectDisplayID display;
     assert(!ScreenPlacementFailure(current, screens[0].frame, screens, 2, &frame, &display));
-    assert(display == 2 && NSEqualRects(frame, NSMakeRect(-773, 98, 351, 470)));
+    assert(display == 2 && NSEqualRects(frame, NSMakeRect(-783, 92, 371, 482)));
     assert(!WindowID(@[Metadata(100, 2, moved)], 1, &right));
 
     CGRect tiny = CGRectMake(0, 0, 0.001, 0.001);

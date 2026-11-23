@@ -25,7 +25,7 @@ static void WorkspaceLayouts(void) {
                                @"Workspace.paneDensity": @"compact", @"Workspace.interfaceStyle": @"modern",
                                @"Workspace.preservesWindowWidthOnSidebarToggle": @NO};
     CGRect left = Body(vertical, Full);
-    assert(CGRectEqualToRect(left, CGRectMake(-75, -26, 759, 714)));
+    assert(CGRectEqualToRect(left, CGRectMake(-85, -32, 779, 726)));
     NSMutableDictionary *right = [vertical mutableCopy];
     right[@"Workspace.sidebarPosition"] = @"right";
     CGRect flipped = Body(right, Full);
@@ -101,11 +101,31 @@ static void ChromeBehaviors(void) {
     assert(CGRectEqualToRect(noHeader, Body(@{@"Workspace.showsPaneHeaders": @NO}, upper)));
     assert(CGRectEqualToRect(always, Body(@{@"Workspace.paneHeaderVisibility": @"always",
                                            @"Workspace.showsPaneHeaders": @NO}, upper)));
+}
 
-    CGRect padded = Body(@{@"Workspace.terminalPaddingX": @17.8, @"Workspace.terminalPaddingY": @0}, upper);
-    assert(CGRectGetMinX(padded) == CGRectGetMinX(always) + 8);
-    assert(CGRectGetMaxX(padded) == CGRectGetMaxX(always) - 8);
-    assert(CGRectGetMinY(padded) == CGRectGetMinY(always) - 6);
+static void TerminalPaddingIsInsideBody(void) {
+    // Padding styles terminal text, not the chrome and divider edges that
+    // separate one pane's body from the surrounding controls and siblings.
+    const CGRect tiles[] = {
+        CGRectMake(0, 0, 0.5, 1), CGRectMake(0.5, 0, 0.5, 1),
+        CGRectMake(0, 0, 1, 0.5), CGRectMake(0, 0.5, 1, 0.5),
+    };
+    CGRect bounds = Body(@{}, Full), bodies[4];
+    assert(CGRectEqualToRect(bounds, CGRectMake(-288, 6, 976, 682)));
+    for (size_t i = 0; i < sizeof(tiles) / sizeof(*tiles); ++i) {
+        bodies[i] = Body(@{}, tiles[i]);
+        assert(CGRectContainsRect(bounds, bodies[i]));
+        assert(CGRectEqualToRect(bodies[i], Body(@{@"Workspace.terminalPaddingX": @48,
+                                                  @"Workspace.terminalPaddingY": @48}, tiles[i])));
+        assert(CGRectEqualToRect(bodies[i], Body(@{@"Workspace.terminalPaddingX": @0,
+                                                  @"Workspace.terminalPaddingY": @17.8}, tiles[i])));
+    }
+    assert(CGRectGetMaxX(bodies[0]) < CGRectGetMinX(bodies[1]));
+    assert(CGRectGetMaxY(bodies[2]) < CGRectGetMinY(bodies[3]));
+    assert(CGRectGetMinX(bodies[0]) == CGRectGetMinX(bounds));
+    assert(CGRectGetMaxX(bodies[1]) == CGRectGetMaxX(bounds));
+    assert(CGRectGetMinY(bodies[2]) == CGRectGetMinY(bounds));
+    assert(CGRectGetMaxY(bodies[3]) == CGRectGetMaxY(bounds));
 }
 
 static void RejectInvalidInputs(void) {
@@ -113,9 +133,6 @@ static void RejectInvalidInputs(void) {
     assert(!MiloDecodeRexChrome(@{@"Workspace.tabStyle": @"unsupported"}, &chrome));
     assert(!MiloDecodeRexChrome(@{@"Workspace.paneHeaderVisibility": @"hidden"}, &chrome));
     assert(!MiloDecodeRexChrome(@{@"Workspace.toolbarBehavior": @"always"}, &chrome));
-    assert(!MiloDecodeRexChrome(@{@"Workspace.terminalPaddingX": @"10"}, &chrome));
-    assert(!MiloDecodeRexChrome(@{@"Workspace.terminalPaddingY": @(NAN)}, &chrome));
-    assert(!MiloDecodeRexChrome(@{@"Workspace.terminalPaddingY": @49}, &chrome));
     assert(!MiloDecodeRexChrome(@{@"Workspace.tabStyle": @"vertical", @"Workspace.sidebarWidth": @90}, &chrome));
     assert(MiloDecodeRexChrome(@{}, &chrome));
     CGRect result = CGRectZero;
@@ -137,6 +154,7 @@ int main(void) {
         WorkspaceLayouts();
         SidebarWithoutResize();
         ChromeBehaviors();
+        TerminalPaddingIsInsideBody();
         RejectInvalidInputs();
     }
     return 0;

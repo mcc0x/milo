@@ -3,6 +3,7 @@
 // frames, z-order, visibility, Space membership and WKWebView are real.
 #import <assert.h>
 #import <fcntl.h>
+#import <stdio.h>
 #import <inttypes.h>
 #import <objc/runtime.h>
 #import <mach/mach.h>
@@ -458,10 +459,19 @@ static void AssertNonactivating(MiloPreviewPanel *panel) {
     assert(!panel.canBecomeMainWindow && (panel.styleMask & NSWindowStyleMaskNonactivatingPanel));
 }
 
+static void AssertClearPanel(MiloPreviewPanel *panel) {
+    assert(!panel.placementProven && !panel.opaque && panel.backgroundColor.alphaComponent == 0 &&
+        panel.alphaValue == 1 && panel.contentView.hidden && panel.ignoresMouseEvents && !panel.canBecomeKeyWindow);
+}
+
 static void CheckShown(MiloPreviewPanel *panel, CGRect tile) {
     AssertNonactivating(panel);
     assert(panel.visible && panel.onActiveSpace && panel.placementProven &&
         !panel.contentView.hidden && !panel.ignoresMouseEvents && panel.canBecomeKeyWindow);
+    assert(panel.opaque && panel.backgroundColor.alphaComponent == 1 && panel.alphaValue == 1);
+    NSView *body = panel.contentView;
+    assert(NSEqualSizes(body.bounds.size, panel.frame.size));
+    assert(NSEqualRects(body.subviews.firstObject.frame, body.bounds));
     assert(parkedPointer.x + 120 < NSMinX(panel.frame) && !NSPointInRect(parkedPointer, panel.frame));
     CGRect bounds = QuartzFrame(panel.frame);
     NSArray *windows = VisibleWindows();
@@ -522,12 +532,14 @@ static void ObserveOrder(MiloPreviewPanel *panel, SEL sel, NSWindowOrderingMode 
     // not an attempt to order the preview relative to a different window.
     if (order == NSWindowOut) {
         assert(!panel.placementProven && panel.ignoresMouseEvents);
+        if (perfFD < 0) AssertClearPanel(panel);
         if (perfFD >= 0) ++perfExposureLosses;
         ActualOrder(panel, sel, order, relative);
         return;
     }
     assert(order == NSWindowAbove && relative == targetID);
     assert(!panel.placementProven && panel.contentView.hidden && panel.ignoresMouseEvents && !panel.canBecomeKeyWindow);
+    if (perfFD < 0) AssertClearPanel(panel);
     CGWindowID window = (CGWindowID)panel.windowNumber;
     if (atomic_exchange(&panelID, window) != window) {
         Publish(@"panel-window", [NSString stringWithFormat:@"%u", window]);
@@ -552,6 +564,7 @@ static void ObserveOut(MiloPreviewPanel *panel, SEL sel, id sender) {
         if (perfFD >= 0) PerfRecord("out", PerfNow(), ",\"right\":%u", right);
         AssertNonactivating(panel);
         assert(!panel.visible && !panel.placementProven && panel.contentView.hidden && panel.ignoresMouseEvents);
+        if (perfFD < 0) AssertClearPanel(panel);
         Trace("out\n");
     }
 }
@@ -567,12 +580,14 @@ static void ObserveProven(MiloPreviewPanel *panel, SEL sel, BOOL proven) {
     uint64_t when = perfFD >= 0 ? PerfNow() : 0;
     if (!proven) {
         if (when) PerfRecord("concealed", when, ",\"right\":%u", right);
+        if (perfFD < 0) AssertClearPanel(panel);
         Trace("concealed\n");
         return;
     }
     AssertNonactivating(panel);
     assert(panel.visible && panel.onActiveSpace && !panel.contentView.hidden &&
         !panel.ignoresMouseEvents && panel.canBecomeKeyWindow);
+    if (perfFD < 0) assert(panel.opaque && panel.backgroundColor.alphaComponent == 1 && panel.alphaValue == 1);
     WKWebView *web = FindWebView(panel.contentView);
     assert(web);
     static BOOL seen;
@@ -697,6 +712,7 @@ static void SeedForm(MiloPreviewPanel *panel, unsigned tries, BOOL navigating) {
     if (navigating && [web.URL.path isEqualToString:@"/rex-lab-form"] && web.canGoBack && !web.loading) {
         firstURL = web.URL.absoluteString;
         assert([web.backForwardList.backItem.URL.path isEqualToString:@"/rex-lab-page"]);
+        web.underPageBackgroundColor = NSColor.clearColor;
         [web evaluateJavaScript:@"document.getElementById('divider-form').value = 'Rex divider form state'"
             completionHandler:^(id result, NSError *error) {
                 assert(!error && [result isEqual:FormValue]);
@@ -717,13 +733,16 @@ static void Probe(MiloPreviewPanel *panel, NSInteger sequence, CGRect tile) {
     assert([web.URL.absoluteString isEqual:firstURL] && [web.backForwardList.backItem.URL.path isEqual:@"/rex-lab-page"]);
     NSSize size = web.bounds.size;
     assert(size.width > 0 && size.height > 0);
-    [web evaluateJavaScript:@"[location.href, document.getElementById('divider-form').value, innerWidth, innerHeight]"
+    assert(web.underPageBackgroundColor.alphaComponent == 0);
+    [web evaluateJavaScript:@"[location.href, document.getElementById('divider-form').value, innerWidth, innerHeight,"
+        " getComputedStyle(document.documentElement).backgroundColor, getComputedStyle(document.body).backgroundColor]"
         completionHandler:^(id result, NSError *error) {
-            assert(!error && [result isKindOfClass:NSArray.class] && [result count] == 4);
+            assert(!error && [result isKindOfClass:NSArray.class] && [result count] == 6);
             NSArray *state = result;
             assert([state[0] isEqual:firstURL] && [state[1] isEqual:FormValue]);
             int width = [state[2] intValue], height = [state[3] intValue];
             assert(fabs(size.width - width) <= 1 && fabs(size.height - height) <= 1);
+            assert([state[4] isEqual:@"rgba(0, 0, 0, 0)"] && [state[5] isEqual:@"rgba(0, 0, 0, 0)"]);
             struct rusage usage;
             assert(getrusage(RUSAGE_SELF, &usage) == 0);
             double cpu = usage.ru_utime.tv_sec + usage.ru_stime.tv_sec +
@@ -781,15 +800,16 @@ static void Probe(MiloPreviewPanel *panel, NSInteger sequence, CGRect tile) {
     if (!_panel.placementProven) {
         static NSInteger lastBlocked;
         NSInteger sequence = Read(@"blocked-probe").integerValue;
-        if (lastBlocked < sequence && _lastReason && !strcmp(_lastReason, TileCovered)) {
+        if (lastBlocked < sequence && !_panel.visible) {
             NSArray *windows = VisibleWindows();
+            if (_panel && WindowIndex(windows, (CGWindowID)_panel.windowNumber) != NSNotFound) return;
+            Geometry blocked = SampleGeometry(windows, ownerPID, targetID, getpid(), NULL, &_lease.tile);
+            if (!blocked.rejection || strcmp(blocked.rejection, TileCovered)) return;
             CheckCover(windows, @"tile", _lease.tile);
             assert(![self acceptsPanelInput]);
             if (_panel) {
                 AssertNonactivating(_panel);
-                assert(!_panel.visible && !_panel.canBecomeKeyWindow &&
-                    _panel.contentView.hidden && _panel.ignoresMouseEvents);
-                if (WindowIndex(windows, (CGWindowID)_panel.windowNumber) != NSNotFound) return;
+                AssertClearPanel(_panel);
             }
             lastBlocked = sequence;
             Trace("blocked %ld\n", (long)sequence);

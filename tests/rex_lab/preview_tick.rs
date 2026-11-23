@@ -201,10 +201,9 @@ impl Tile<'_> {
         publish(&self.lab.root, "blocked-probe", &sequence.to_string());
         let event = format!("blocked {sequence}");
         self.wait("the overlapping foreign window did not leave the preview hidden and noninteractive", || {
-            self.event_count(&event) == 1
-                && self.shown().is_none()
-                && self.capture(self.block).contains("another window overlaps the tile; waiting for clear placement")
+            self.event_count(&event) == 1 && self.shown().is_none()
         });
+        assert!(self.capture(self.block).trim().is_empty(), "a waiting preview wrote into its blank tile");
     }
 
     fn wait_hidden(&self, previous_outs: usize) {
@@ -218,6 +217,7 @@ fn serve_fixture(listener: TcpListener, finished: mpsc::Receiver<()>, benchmark:
     const PAGE: &str = "<!doctype html><meta charset=utf-8><link rel=icon href=data:,>\
         <p id=rex-lab-page>Rex preview fixture</p><a href=/rex-lab-form id=divider-link>Open the form</a>";
     const FORM: &str = "<!doctype html><meta charset=utf-8><link rel=icon href=data:,>\
+        <style>html, body { background-color: transparent; }</style>\
         <form autocomplete=off><input id=divider-form></form>";
     fn reply(mut stream: TcpStream, loads: &mut [usize; 2], benchmark: Option<&str>) {
         stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();

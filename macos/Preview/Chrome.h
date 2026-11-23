@@ -8,7 +8,7 @@
 typedef struct { CGFloat low, high; } MiloChromeInset;
 typedef struct {
     MiloChromeInset left, top, right, bottom;
-    CGFloat paddingX, paddingY, header, dividerAllowance;
+    CGFloat header, dividerAllowance;
 } MiloRexChrome;
 
 static BOOL MiloChromeNumber(id value, CGFloat fallback, CGFloat lo, CGFloat hi, CGFloat *result) {
@@ -66,8 +66,6 @@ static BOOL MiloDecodeRexChrome(NSDictionary *prefs, MiloRexChrome *result) {
         .header = hasHeader ? (compact ? 32 : 36) : 0,
         .dividerAllowance = compact ? 4 : 10,
     };
-    if (!MiloChromeNumber(prefs[@"Workspace.terminalPaddingX"], 10, 0, 48, &chrome.paddingX) ||
-        !MiloChromeNumber(prefs[@"Workspace.terminalPaddingY"], 6, 0, 48, &chrome.paddingY)) return NO;
 
     if ([@"vertical" isEqual:tabs]) {
         id side = prefs[@"Workspace.sidebarPosition"] ?: @"left";
@@ -106,7 +104,7 @@ static BOOL MiloLoadRexChrome(MiloRexChrome *chrome) {
     NSArray *keys = @[@"Workspace.tabStyle", @"Workspace.tabBarEdge", @"Workspace.sidebarPosition",
                       @"Workspace.sidebarWidth", @"Workspace.toolbarBehavior",
                       @"Workspace.paneHeaderVisibility", @"Workspace.showsPaneHeaders", @"Workspace.paneDensity",
-                      @"Workspace.terminalPaddingX", @"Workspace.terminalPaddingY", @"Workspace.interfaceStyle"];
+                      @"Workspace.interfaceStyle"];
     NSDictionary *prefs = CFBridgingRelease(CFPreferencesCopyMultiple((__bridge CFArrayRef)keys, domain,
                                                      kCFPreferencesCurrentUser, kCFPreferencesAnyHost));
     return prefs && MiloDecodeRexChrome(prefs, chrome);
@@ -136,12 +134,15 @@ static BOOL MiloPaneInRexChrome(CGRect window, CGRect normalized, const MiloRexC
     bottom = fmin(bottom, 1);
     CGFloat w = window.size.width, h = window.size.height;
     if (w <= chrome->left.high + chrome->right.high || h <= chrome->top.high + chrome->bottom.high) return NO;
-    CGFloat insetX = chrome->paddingX + 2, insetY = chrome->paddingY + 2;
+    // Terminal text padding is inside the Rex pane body, not window chrome.
+    // Fill that space too, retaining the surrounding and divider clearances
+    // and a small edge guard for unmeasured pane borders.
+    const CGFloat edgeGuard = 2;
     CGFloat gap = chrome->dividerAllowance;
-    CGFloat minX = MiloChromeEdge(w, x, chrome->left.high, chrome->right.low) + insetX + (x > 0 ? gap : 0);
-    CGFloat maxX = MiloChromeEdge(w, right, chrome->left.low, chrome->right.high) - insetX - (right < 1 ? gap : 0);
-    CGFloat minY = MiloChromeEdge(h, y, chrome->top.high, chrome->bottom.low) + insetY + chrome->header + (y > 0 ? gap : 0);
-    CGFloat maxY = MiloChromeEdge(h, bottom, chrome->top.low, chrome->bottom.high) - insetY - (bottom < 1 ? gap : 0);
+    CGFloat minX = MiloChromeEdge(w, x, chrome->left.high, chrome->right.low) + edgeGuard + (x > 0 ? gap : 0);
+    CGFloat maxX = MiloChromeEdge(w, right, chrome->left.low, chrome->right.high) - edgeGuard - (right < 1 ? gap : 0);
+    CGFloat minY = MiloChromeEdge(h, y, chrome->top.high, chrome->bottom.low) + edgeGuard + chrome->header + (y > 0 ? gap : 0);
+    CGFloat maxY = MiloChromeEdge(h, bottom, chrome->top.low, chrome->bottom.high) - edgeGuard - (bottom < 1 ? gap : 0);
     CGRect body = CGRectMake(window.origin.x + minX, window.origin.y + minY, maxX - minX, maxY - minY);
     if (!MiloChromePositiveRect(body) || !CGRectContainsRect(window, body)) return NO;
     *pane = body;

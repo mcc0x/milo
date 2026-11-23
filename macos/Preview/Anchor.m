@@ -8,7 +8,6 @@
 #import <fcntl.h>
 #import <limits.h>
 #import <signal.h>
-#import <stdio.h>
 #import <stdlib.h>
 #import <string.h>
 #import <math.h>
@@ -26,6 +25,13 @@ static const NSTimeInterval LeaseLifetime = 3.0;
 // Rex's synchronous RPC is bounded at 15 seconds (src/rex.rs).
 static const NSTimeInterval FocusReplyLifetime = 16.0;
 enum { FractionScale = 1000000 };
+
+// Lifecycle protocol for src/preview/mac.rs. Status 2 is reserved for pin refusal.
+typedef NS_ENUM(int, PreviewStatus) {
+    PreviewClosed = 0,
+    PreviewFailed = 1,
+    PreviewUnclaimed = 3,
+};
 
 typedef struct {
     CGRect window;
@@ -442,26 +448,58 @@ CGWindowID milo_preview_pin_window(pid_t pid, const char **reason) {
     return PinForegroundWindow(RexApplication(pid), pid, reason);
 }
 
+@interface MiloPreviewSurface : NSView
+@end
+
+@implementation MiloPreviewSurface
+- (BOOL)isOpaque { return YES; }
+- (void)drawRect:(NSRect)dirtyRect {
+    // The pane owns its backing even when WebKit leaves a transparent pixel.
+    [self.window.backgroundColor setFill];
+    NSRectFill(dirtyRect);
+}
+@end
+
 @interface MiloPreviewPanel : NSPanel
 @property (nonatomic) BOOL placementProven;
-- (void)prepareStaging;
+- (void)installContentForStaging:(NSView *)content;
 @end
 
 @implementation MiloPreviewPanel
 @synthesize placementProven = _placementProven;
 
-- (void)prepareStaging {
-    // Keep window alpha at 1 for Quartz metadata. Only the empty, clear
-    // window is ordered until its bounds and stacking have been verified.
+- (void)concealContent {
+    // Keep global window alpha at 1 for Quartz metadata, but order only a
+    // visually clear, noninteractive window until its placement is proven.
+    self.ignoresMouseEvents = YES;
+    self.contentView.hidden = YES;
     self.opaque = NO;
     self.backgroundColor = NSColor.clearColor;
-    self.placementProven = NO;
+}
+
+- (void)installContentForStaging:(NSView *)content {
+    [self concealContent];
+    NSView *surface = [[MiloPreviewSurface alloc] initWithFrame:self.contentView.frame];
+    surface.hidden = YES;
+    surface.clipsToBounds = YES;
+    content.frame = surface.bounds;
+    content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [surface addSubview:content];
+    self.contentView = surface;
 }
 
 - (void)setPlacementProven:(BOOL)proven {
+    if (_placementProven == proven) return;
     _placementProven = proven;
-    if (!proven) self.ignoresMouseEvents = YES;
-    self.contentView.hidden = !proven;
+    if (!proven) {
+        [self concealContent];
+        return;
+    }
+    self.backgroundColor = [NSColor.windowBackgroundColor colorWithAlphaComponent:1];
+    if (!_placementProven) return;
+    self.opaque = YES;
+    if (!_placementProven) return;
+    self.contentView.hidden = NO;
     if (_placementProven) self.ignoresMouseEvents = NO;
 }
 
@@ -479,32 +517,6 @@ static BOOL WriteAll(int fd, const char *bytes, size_t length) {
         length -= (size_t)count;
     }
     return YES;
-}
-
-// Fixed notices only. Never share the shell's descriptor flags or block the
-// AppKit thread on a stopped terminal. The preview needs no terminal input.
-static int OpenDiagnosticOutput(void) {
-    if (signal(SIGTTOU, SIG_IGN) == SIG_ERR) return -1;
-    return open("/dev/tty", O_WRONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
-}
-
-static void WriteDiagnostic(int fd, const char *context, const char *phase, const char *reason) {
-    if (fd < 0) return;
-    char line[256];
-    int length = context ? snprintf(line, sizeof(line), "milo preview: %s: %s: %s\n", context, phase, reason) :
-        snprintf(line, sizeof(line), "milo preview: %s\n", reason);
-    if (length > 0 && (size_t)length < sizeof(line)) WriteAll(fd, line, (size_t)length);
-}
-
-static int StartupFailure(const char *reason) {
-    int fd = OpenDiagnosticOutput();
-    if (fd >= 0) {
-        WriteDiagnostic(fd, NULL, NULL, reason);
-        close(fd);
-    } else {
-        fprintf(stderr, "milo preview: %s\n", reason);
-    }
-    return 1;
 }
 
 static int PrepareFocusInput(int stateFD) {
@@ -529,7 +541,7 @@ static int PrepareFocusInput(int stateFD) {
     NSURL *_url;
     NSRunningApplication *_rex;
     CGWindowID _pinned;
-    int _stateFD, _focusFD, _diagnosticFD;
+    int _stateFD, _focusFD;
     pid_t _parent;
     MiloPreviewPanel *_panel;
     NSTimer *_timer, *_dragTimer;
@@ -547,12 +559,11 @@ static int PrepareFocusInput(int stateFD) {
     NSTimeInterval _lastSample, _nextPinCheck, _focusDeadline, _scopeSince, _revealedAt;
     NSTimeInterval _lastDividerChange;
     NSUInteger _generation;
-    const char *_lastPhase, *_lastReason;
     BOOL _firstOrderedSample, _samplePending, _finished, _sessionInactive, _screensAsleep;
     BOOL _drainingState, _sampleRequested;
     char _line[96];
     size_t _lineLength;
-    int _status;
+    PreviewStatus _status;
 }
 - (instancetype)initWithURL:(NSURL *)url rex:(NSRunningApplication *)rex pinned:(CGWindowID)pinned
     stateFD:(int)stateFD focusFD:(int)focusFD parent:(pid_t)parent;
@@ -571,7 +582,6 @@ static int PrepareFocusInput(int stateFD) {
         _pinned = pinned;
         _stateFD = stateFD;
         _focusFD = focusFD;
-        _diagnosticFD = -1;
         _parent = parent;
         _sampleQueue = dispatch_queue_create("milo.preview.window", DISPATCH_QUEUE_SERIAL);
         _notificationTokens = [NSMutableArray array];
@@ -598,25 +608,11 @@ static int PrepareFocusInput(int stateFD) {
     [self hidePanel];
 }
 
-- (void)rejectPlacementAt:(const char *)phase reason:(const char *)reason {
-    BOOL visible = _panel.placementProven;
-    [self invalidatePlacement];
-    // Fixed reasons only; a suspended pane may keep retrying until the
-    // window is usable again without flooding the terminal.
-    if (_lastPhase && _lastReason && !strcmp(phase, _lastPhase) && !strcmp(reason, _lastReason)) return;
-    _lastPhase = phase;
-    _lastReason = reason;
-    WriteDiagnostic(_diagnosticFD, visible ? "preview hidden" : "not shown", phase, reason);
-}
-
-- (void)finish:(const char *)reason {
+- (void)finish:(PreviewStatus)status {
     if (_finished) return;
     _finished = YES;
+    _status = status;
     [self invalidatePlacement];
-    if (reason) {
-        _status = 1;
-        WriteDiagnostic(_diagnosticFD, NULL, NULL, reason);
-    }
     [NSApp stop:nil];
     // Wake the run loop so a command-line AppKit process observes -stop:.
     NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0
@@ -700,11 +696,9 @@ static int PrepareFocusInput(int stateFD) {
                 if (_lease.checked) [self requestSample];
             }
             break;
-        case VisibilityInvalid: [self finish:"invalid Rex visibility message"]; break;
-        case VisibilityWrongOwner: [self finish:"the Rex client changed; reopen the preview in the current Rex client"]; break;
-        case VisibilityUnclaimed:
-            [self finish:"the Mac viewer did not claim this preview tile. Close it and retry from a Mac-created working terminal; no permissions are needed."];
-            break;
+        case VisibilityInvalid:
+        case VisibilityWrongOwner: [self finish:PreviewFailed]; break;
+        case VisibilityUnclaimed: [self finish:PreviewUnclaimed]; break;
     }
 }
 
@@ -716,12 +710,12 @@ static int PrepareFocusInput(int stateFD) {
         char bytes[192];
         ssize_t count = read(_stateFD, bytes, sizeof(bytes));
         if (!count) {
-            [self finish:_lineLength ? "incomplete Rex visibility message" : NULL];
+            [self finish:_lineLength ? PreviewFailed : PreviewClosed];
             return;
         }
         if (count < 0) {
             if (errno == EINTR) continue;
-            if (errno != EAGAIN) [self finish:"could not read Rex visibility state"];
+            if (errno != EAGAIN) [self finish:PreviewFailed];
             else {
                 [self observeClock];
                 BOOL wasDraining = _drainingState;
@@ -736,7 +730,7 @@ static int PrepareFocusInput(int stateFD) {
                 _lineLength = 0;
                 [self handleLine:length];
             } else if (_lineLength == sizeof(_line)) {
-                [self finish:"oversized Rex visibility message"];
+                [self finish:PreviewFailed];
             } else {
                 _line[_lineLength++] = bytes[i];
             }
@@ -756,13 +750,13 @@ static int PrepareFocusInput(int stateFD) {
     // the dispatch read handler. A queued change must hide synchronously.
     [self readState];
     if (_finished || !_panel.placementProven) return NO;
-    if (getppid() != _parent || _rex.terminated) { [self finish:NULL]; return NO; }
+    if (getppid() != _parent || _rex.terminated) { [self finish:PreviewClosed]; return NO; }
     if (![self canSample] || !SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample)) {
         [self invalidatePlacement];
         return NO;
     }
     if (!_panel.visible || !_panel.onActiveSpace || !NSEqualRects(_panel.frame, _candidateFrame)) {
-        [self rejectPlacementAt:"input" reason:"panel is no longer eligible for input"];
+        [self invalidatePlacement];
         return NO;
     }
     return YES;
@@ -776,13 +770,13 @@ static int PrepareFocusInput(int stateFD) {
     [self invalidatePlacement];
     static const char focus[] = "focus\n";
     if (!WriteAll(STDOUT_FILENO, focus, sizeof(focus) - 1))
-        [self finish:"could not return focus to the Rex terminal"];
+        [self finish:PreviewFailed];
 }
 
 - (BOOL)proofCurrent:(NSUInteger)generation started:(NSTimeInterval)started {
     [self readState];
     if (_finished || generation != _generation) return NO;
-    if (getppid() != _parent || _rex.terminated) { [self finish:NULL]; return NO; }
+    if (getppid() != _parent || _rex.terminated) { [self finish:PreviewClosed]; return NO; }
     if (![self canSample] || !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) {
         [self invalidatePlacement];
         return NO;
@@ -799,7 +793,7 @@ static int PrepareFocusInput(int stateFD) {
     NSView *browser = MiloPreviewContent(_url, ^BOOL{ return [weakSelf acceptsPanelInput]; },
         ^{ [weakSelf returnToTerminal]; });
     if (_finished) return;
-    if (!browser) { [self finish:"expected an explicit loopback HTTP or HTTPS URL"]; return; }
+    if (!browser) { [self finish:PreviewFailed]; return; }
 
     _panel = [[MiloPreviewPanel alloc] initWithContentRect:frame
         styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
@@ -816,8 +810,7 @@ static int PrepareFocusInput(int stateFD) {
     _panel.releasedWhenClosed = NO;
     _panel.title = @"Milo Preview (Approximate)";
     _panel.delegate = self;
-    _panel.contentView = browser;
-    [_panel prepareStaging];
+    [_panel installContentForStaging:browser];
     [self requestSample];
 }
 
@@ -829,14 +822,13 @@ static int PrepareFocusInput(int stateFD) {
     // number separately from AppKit rather than reusing a Quartz identifier.
     if (!ValidRect(primary) || primary.origin.x != 0 || primary.origin.y != 0 ||
         !CGRectContainsPoint(geometry.pane, CGPointMake(center.x, primary.size.height - center.y))) {
-        [self rejectPlacementAt:"order" reason:"tile center is no longer inside the projected workspace"];
+        [self invalidatePlacement];
         return;
     }
     NSInteger relativeWindow = [NSWindow windowNumberAtPoint:center belowWindowWithWindowNumber:0];
     if (![self proofCurrent:generation started:started]) return;
     if (relativeWindow <= 0 || !NSEqualRects(_panel.frame, frame)) {
-        [self rejectPlacementAt:"order" reason:relativeWindow <= 0 ? "AppKit found no window at the tile center" :
-            "AppKit adjusted the requested helper frame"];
+        [self invalidatePlacement];
         return;
     }
 
@@ -845,8 +837,7 @@ static int PrepareFocusInput(int stateFD) {
     [_panel orderWindow:NSWindowAbove relativeTo:relativeWindow];
     if (![self proofCurrent:generation started:started]) { [self hidePanel]; return; }
     if (!_panel.visible || !NSEqualRects(_panel.frame, frame)) {
-        [self rejectPlacementAt:"order" reason:!_panel.visible ? "AppKit did not order the helper panel" :
-            "AppKit changed the frame when ordering the helper panel"];
+        [self invalidatePlacement];
         return;
     }
     _firstOrderedSample = YES;
@@ -862,11 +853,10 @@ static int PrepareFocusInput(int stateFD) {
 
 - (void)applySample:(Geometry)geometry checkedPanel:(BOOL)checkedPanel lostPin:(BOOL)lostPin
     generation:(NSUInteger)generation started:(NSTimeInterval)started {
-    if (lostPin) { [self finish:NULL]; return; }
+    if (lostPin) { [self finish:PreviewClosed]; return; }
     if (![self proofCurrent:generation started:started]) return;
     if (checkedPanel != _panel.visible || (checkedPanel && !_panel.onActiveSpace)) {
-        [self rejectPlacementAt:"post-order" reason:checkedPanel && _panel.visible ?
-            "helper panel is not on the active Space" : "panel changed during the sample"];
+        [self invalidatePlacement];
         return;
     }
 
@@ -881,7 +871,7 @@ static int PrepareFocusInput(int stateFD) {
         }
     }
     if (!geometry.windowID) {
-        [self rejectPlacementAt:checkedPanel ? "post-order" : "pre-order" reason:geometry.rejection];
+        [self invalidatePlacement];
         return;
     }
     NSRect frame;
@@ -889,7 +879,7 @@ static int PrepareFocusInput(int stateFD) {
     const char *reason = ScreenFrameFailure(geometry, &frame, &display);
     if (![self proofCurrent:generation started:started]) return;
     if (reason) {
-        [self rejectPlacementAt:checkedPanel ? "post-order" : "pre-order" reason:reason];
+        [self invalidatePlacement];
         return;
     }
     if (!SameGeometry(_candidate, geometry) || display != _candidateDisplay || !NSEqualRects(frame, _candidateFrame)) {
@@ -911,11 +901,9 @@ static int PrepareFocusInput(int stateFD) {
     } else if (!checkedPanel) {
         [self stagePanelAt:frame geometry:geometry generation:generation started:started];
     } else if (!_panel.visible || !_panel.onActiveSpace || !NSEqualRects(_panel.frame, frame)) {
-        [self rejectPlacementAt:"post-order" reason:!_panel.visible ? "helper panel is not ordered" :
-            !_panel.onActiveSpace ? "helper panel is not on the active Space" : "AppKit helper frame changed"];
+        [self invalidatePlacement];
     } else if (!_panel.placementProven) {
         if (![self proofCurrent:generation started:started]) return;
-        _lastPhase = _lastReason = NULL;
         _revealedAt = NSProcessInfo.processInfo.systemUptime;
         _panel.placementProven = YES;
     }
@@ -923,26 +911,24 @@ static int PrepareFocusInput(int stateFD) {
 
 - (void)tick {
     if (_finished) return;
-    if (getppid() != _parent || _rex.terminated) { [self finish:NULL]; return; }
+    if (getppid() != _parent || _rex.terminated) { [self finish:PreviewClosed]; return; }
     [self readState];
     if (_finished) return;
     if (_focusDeadline) {
         FocusReply reply = ReadFocusReply(_focusFD, LeaseNow(), &_focusDeadline);
-        if (reply == FocusEnded) { [self finish:NULL]; return; }
-        if (reply == FocusFailed) { [self finish:"could not confirm focus returned to the Rex terminal"]; return; }
+        if (reply == FocusEnded) { [self finish:PreviewClosed]; return; }
+        if (reply == FocusFailed) { [self finish:PreviewFailed]; return; }
         if (reply == FocusRefused) {
             // A tab change can race the focus request. Keep the same page
             // suspended and wait for a fresh observer receipt and proof.
             _scopeSince = LeaseNow();
-            WriteDiagnostic(_diagnosticFD, NULL, NULL, "could not return focus to the original Rex terminal");
         }
     }
     BOOL canSample = [self canSample];
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-    if ((!canSample && (_candidate.windowID || _panel.visible)) || (_lastSample && !SampleFresh(now, _lastSample)))
+    if ((!canSample && (_candidate.windowID || _panel.visible)) || (_lastSample && !SampleFresh(now, _lastSample)) ||
+        (_panel.visible && !_panel.onActiveSpace))
         [self invalidatePlacement];
-    else if (_panel.visible && !_panel.onActiveSpace)
-        [self rejectPlacementAt:"post-order" reason:"helper panel is not on the active Space"];
     if (_samplePending) return;
     BOOL checkPin = !_sessionInactive && !_screensAsleep && now >= _nextPinCheck;
     if (!canSample && !checkPin) return;
@@ -985,7 +971,7 @@ static int PrepareFocusInput(int stateFD) {
 
 - (void)windowWillClose:(NSNotification *)notification {
     (void)notification;
-    [self finish:NULL];
+    [self finish:PreviewClosed];
 }
 
 - (void)observe:(NSNotificationName)name center:(NSNotificationCenter *)center {
@@ -995,7 +981,7 @@ static int PrepareFocusInput(int stateFD) {
         if (!anchor) return;
         if ([event.name isEqualToString:NSWorkspaceDidTerminateApplicationNotification]) {
             NSRunningApplication *app = event.userInfo[NSWorkspaceApplicationKey];
-            if (app.processIdentifier == anchor->_rex.processIdentifier) [anchor finish:NULL];
+            if (app.processIdentifier == anchor->_rex.processIdentifier) [anchor finish:PreviewClosed];
             return;
         }
         if ([event.name isEqualToString:NSWorkspaceSessionDidResignActiveNotification]) anchor->_sessionInactive = YES;
@@ -1020,19 +1006,13 @@ static int PrepareFocusInput(int stateFD) {
 }
 
 - (int)run {
-    // The parent starts the observer only after this process has sampled
-    // both clocks. An old observation cannot queue before that baseline.
-    if (!WriteAll(STDOUT_FILENO, "R", 1)) return StartupFailure("could not start the Rex preview observer");
-    _diagnosticFD = OpenDiagnosticOutput();
     __weak MiloPreviewAnchor *weakSelf = self;
     _stateSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)_stateFD, 0, dispatch_get_main_queue());
     _parentSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, (uintptr_t)_parent, DISPATCH_PROC_EXIT, dispatch_get_main_queue());
     if (!_stateSource || !_parentSource) {
         if (_stateSource) { dispatch_resume(_stateSource); dispatch_source_cancel(_stateSource); }
         if (_parentSource) { dispatch_resume(_parentSource); dispatch_source_cancel(_parentSource); }
-        [self finish:"could not observe the Rex preview lifecycle"];
-        if (_diagnosticFD >= 0) close(_diagnosticFD);
-        return _status;
+        return PreviewFailed;
     }
 
     NSNotificationCenter *workspace = NSWorkspace.sharedWorkspace.notificationCenter;
@@ -1042,7 +1022,7 @@ static int PrepareFocusInput(int stateFD) {
         NSWorkspaceScreensDidSleepNotification, NSWorkspaceScreensDidWakeNotification]) [self observe:name center:workspace];
     [self observe:NSApplicationDidChangeScreenParametersNotification center:NSNotificationCenter.defaultCenter];
     dispatch_source_set_event_handler(_stateSource, ^{ [weakSelf readState]; });
-    dispatch_source_set_event_handler(_parentSource, ^{ [weakSelf finish:NULL]; });
+    dispatch_source_set_event_handler(_parentSource, ^{ [weakSelf finish:PreviewClosed]; });
     dispatch_resume(_stateSource);
     dispatch_resume(_parentSource);
     const int signals[] = {SIGHUP, SIGINT, SIGTERM};
@@ -1053,10 +1033,10 @@ static int PrepareFocusInput(int stateFD) {
         dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, (uintptr_t)signals[i], 0, dispatch_get_main_queue());
         if (!source || sigaction(signals[i], &ignore, &oldActions[i]) != 0) {
             if (source) { dispatch_resume(source); dispatch_source_cancel(source); }
-            [self finish:"could not observe Rex terminal close signals"];
+            [self finish:PreviewFailed];
             break;
         }
-        dispatch_source_set_event_handler(source, ^{ [weakSelf finish:NULL]; });
+        dispatch_source_set_event_handler(source, ^{ [weakSelf finish:PreviewClosed]; });
         [_signalSources addObject:source];
         dispatch_resume(source);
     }
@@ -1073,7 +1053,7 @@ static int PrepareFocusInput(int stateFD) {
         if (event.type == NSEventTypeKeyDown && anchor->_panel.keyWindow &&
             (event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask) == NSEventModifierFlagCommand &&
             [event.charactersIgnoringModifiers isEqualToString:@"w"]) {
-            [anchor finish:NULL];
+            [anchor finish:PreviewClosed];
             return nil;
         }
         return event;
@@ -1084,9 +1064,14 @@ static int PrepareFocusInput(int stateFD) {
     }];
     _timer.tolerance = 0.025;
     [NSRunLoop.mainRunLoop addTimer:_timer forMode:NSRunLoopCommonModes];
-    [self tick];
+    // Only release the observer once the clock baseline and lifecycle hooks
+    // are ready. Stdout belongs to the launcher protocol, never to the PTY.
+    if (!_finished) {
+        if (!WriteAll(STDOUT_FILENO, "R", 1)) [self finish:PreviewFailed];
+        else [self tick];
+    }
     if (!_finished) [NSApp run];
-    [self finish:NULL];
+    [self finish:PreviewClosed];
 
     [_timer invalidate];
     [_dragTimer invalidate];
@@ -1100,7 +1085,6 @@ static int PrepareFocusInput(int stateFD) {
     dispatch_source_cancel(_stateSource);
     _panel.delegate = nil;
     [_panel close];
-    if (_diagnosticFD >= 0) close(_diagnosticFD);
     return _status;
 }
 @end
@@ -1108,22 +1092,21 @@ static int PrepareFocusInput(int stateFD) {
 int milo_preview_run(const char *url, CGWindowID pinned_window, int state_fd) {
     @autoreleasepool {
         if (!NSThread.isMainThread || !url || !pinned_window || state_fd < 0)
-            return StartupFailure("invalid native anchor arguments");
+            return PreviewFailed;
         NSString *address = [NSString stringWithUTF8String:url];
         NSURL *location = address ? [NSURL URLWithString:address] : nil;
         pid_t parent = getppid();
         int inputFlags = fcntl(state_fd, F_GETFL);
         if (!location || parent < 2 || inputFlags < 0 || fcntl(state_fd, F_SETFL, inputFlags | O_NONBLOCK) < 0)
-            return StartupFailure("invalid URL or missing Rex watcher");
+            return PreviewFailed;
         int focusFD = PrepareFocusInput(state_fd);
-        if (focusFD < 0) return StartupFailure("missing Rex focus acknowledgment pipe");
+        if (focusFD < 0) return PreviewFailed;
         pid_t owner;
         PinLookup lookup = LookupPin(pinned_window, &owner);
         NSRunningApplication *rex = lookup == PinFound ? RexApplication(owner) : nil;
         if (!rex) {
             close(focusFD);
-            return StartupFailure(lookup == PinUnavailable ? "could not verify the pinned Rex window; reopen the preview"
-                : "the pinned Rex window is no longer available; reopen the preview");
+            return PreviewFailed;
         }
         // The Rust launcher may disappear before a focus message. Treat that as an I/O error, not SIGPIPE.
         int outputFlags = fcntl(STDOUT_FILENO, F_GETFL);
@@ -1131,13 +1114,13 @@ int milo_preview_run(const char *url, CGWindowID pinned_window, int state_fd) {
             fcntl(STDOUT_FILENO, F_SETNOSIGPIPE, 1) < 0 ||
             ![[NSApplication sharedApplication] setActivationPolicy:NSApplicationActivationPolicyAccessory]) {
             close(focusFD);
-            return StartupFailure("could not initialize the nonactivating panel");
+            return PreviewFailed;
         }
         MiloPreviewAnchor *anchor = [[MiloPreviewAnchor alloc] initWithURL:location rex:rex pinned:pinned_window
             stateFD:state_fd focusFD:focusFD parent:parent];
         if (!anchor) {
             close(focusFD);
-            return StartupFailure("could not establish the preview observation clock");
+            return PreviewFailed;
         }
         int status = [anchor run];
         close(focusFD);
