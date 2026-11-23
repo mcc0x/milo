@@ -121,6 +121,23 @@ Rex and the viewer were already running at startup. The layout origin is a synth
 
 Idle remained at 24 background window samples per six seconds. Individual changes used more samples (93 → 160 light, 93 → 161 busy); no wakeup reduction is claimed. Helper costs include fixture instrumentation, not the WebContent worker or WindowServer. The observer did not change: per layout workload it saw 48 layout events, made 92 view and 92 owner-list calls, wrote 48 geometry and 24 renewal records, and started no subprocess during resize or idle. It ran one shell and one `ps` identity check at startup. The sibling input probe itself starts a Rex CLI for each line.
 
+### Second comparison: keep the physically tested build
+
+The maintainer [reported that resizing feels much better](https://github.com/mcc0x/milo/pull/69#issuecomment-7098003467) on `334f136` (executable SHA-256 `50c497ac5da5fd2378e4cfb292980648134971205efe9c9bf69347e8fec90085`). That executable remains the baseline. We tried laying out the retained, hidden WebKit panel as soon as new geometry arrived, before the usual proof for revealing it. **The trial is not shipped.**
+
+Same host and four-session fixture as above. Each row is one pair of runs, with 24 separate changes followed by 24 requests at 60 Hz. Each cell is **accepted → trial**, in ms. Blank time is the interval with native content concealed during the burst, not a measurement of display scanout. Settle starts at the last request.
+
+| Page / pair | Burst blank | Burst settle | Individual request → native exposure, p50 / p95 | Request → responsive element callback, p50 / p95 |
+|---|---:|---:|---:|---:|
+| Light 1 | 570 → 578 | 188 → 203 | 59 / 68 → 65 / 72 | 34 / 41 → 32 / 35 |
+| Light 2 | 574 → 582 | 195 → 205 | 55 / 60 → 65 / 75 | 34 / 39 → 32 / 38 |
+| Busy 1 | 565 → 576 | 189 → 197 | 57 / 66 → 66 / 75 | 48 / 56 → 46 / 51 |
+| Busy 2 | 579 → 566 | 195 → 187 | 54 / 68 → 63 / 71 | 48 / 60 → 46 / 50 |
+
+Only the last burst width was exposed in all eight runs; each had one uninterrupted blank. The trial delivered responsive element sizes slightly earlier but exposed individual changes later in every pair. Busy burst results reversed between repetitions. Neither proves a physical frame-rate gain. The light input stopped growing at its CSS width cap (10 matching element notifications per 24 individual widths); the busy card changed columns and height (24/24). These are delivered box-size observations, not paint or the duration of layout. One additional busy run aborted on the fixture’s `performance.timeOrigin` equality assertion; it is excluded. Both sides of the final busy pair used the same per-document identity check instead.
+
+All eight runs received the sibling’s eight CLI-to-PTY probes during the burst and finished with the sibling block focused. Burst input p50 ranged from 22–24 ms accepted and 21–23 ms trial; this is not physical keyboard latency. Helper CPU over six seconds idle was 17–21 ms accepted and 16–21 ms trial, with 68–74 and 69–73 interrupt wakeups respectively. Burst plus its fixed tail used 13–15 ms and 15–16 ms of helper CPU. These include the measurement hooks, not WebContent or WindowServer. There is no consistent idle win or continuity improvement to justify a new binary or relaxed exposure checks.
+
 ### Persistent right-split fixture measurement
 
 One Apple Silicon run with sustained divider movement: 1.43 s from creating the Rex split to visible WebKit; 1.88 s to the navigated form with a draft. Across 13.35 s idle, the native fixture used 0.052 CPU seconds (0.39% of one core); RSS was 103.0 MiB at both endpoints. These include test instrumentation and exclude Rex.app, the server, observer and separate WebKit workers. They are not whole-application measurements.
