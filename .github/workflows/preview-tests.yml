@@ -10,6 +10,7 @@ on:
       - 'macos/Preview/**'
       - 'tests/preview_geometry.m'
       - 'tests/preview_chrome.m'
+      - 'tests/preview_divider_drag.m'
 
 permissions:
   contents: read
@@ -28,7 +29,7 @@ jobs:
         working-directory: src/rex
 
   geometry:
-    name: Preview geometry and terminal recovery
+    name: Preview geometry and divider
     runs-on: macos-15
     timeout-minutes: 5
     steps:
@@ -43,6 +44,9 @@ jobs:
           xcrun clang -fobjc-arc -mmacosx-version-min=13.0 tests/preview_chrome.m \
             -framework AppKit -framework CoreGraphics -o "$RUNNER_TEMP/preview-chrome"
           "$RUNNER_TEMP/preview-chrome"
+          xcrun clang -fobjc-arc tests/preview_divider_drag.m -framework AppKit \
+            -o "$RUNNER_TEMP/preview-divider"
+          "$RUNNER_TEMP/preview-divider"
       - name: Verify the preview's native keyboard shortcut without a desktop
         run: sh macos/Preview/tests/smoke.sh --keys-only
       - name: Check picker controls and resize invalidation without a key window
