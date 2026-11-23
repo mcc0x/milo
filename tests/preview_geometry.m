@@ -343,6 +343,23 @@ static void GuardedLease(void) {
     close(pipeFD[0]);
 }
 
+static void GuardedPresentation(void) {
+    VisibilityLease lease = {.guarded = YES};
+    GuardedPeek peek = {.ttyReady = YES, .announced = YES};
+    StartPeek(&peek, 10);
+    assert(peek.phase == PeekStarting && peek.deadline == 18);
+    assert(ConsentAllowsReveal(&lease, &peek, 17, YES) && !ConsentAllowsReveal(&lease, &peek, 17, NO));
+    assert(ShowPeek(&peek, 17.5));
+    assert(peek.phase == PeekVisible && peek.deadline == 22);
+    assert(PeekActive(&peek, 21.99) && !PeekActive(&peek, 22));
+    assert(!ShowPeek(&peek, 21)); // A later verification cannot extend a visible peek.
+    EndPeek(&peek, NO);
+    assert(!peek.ttyReady && peek.announced && !ConsentAllowsReveal(&lease, &peek, 21, YES));
+    StartPeek(&peek, 30);
+    assert(!ShowPeek(&peek, 38) && !ConsentAllowsReveal(&lease, &peek, 38, YES));
+    assert(!ShowPeek(&peek, 42));
+}
+
 static void TTYStep(int wire) {
     char ready;
     assert(WriteAll(wire, "?", 1));
@@ -358,38 +375,58 @@ static void GuardedTTYChild(int wire) {
     mode.c_iflag = (mode.c_iflag | ICRNL) & ~(IGNCR | INLCR);
     assert(tcsetattr(tty, TCSANOW, &mode) == 0 && tcgetattr(tty, &before) == 0);
     GuardedPeek peek = {0};
-    VisibilityLease lease = {.guarded = YES};
-    TTYStep(wire); // Complete and partial lines entered before eligibility.
-    assert(PollPeek(&peek, tty, 9) == PeekUnchanged && !PeekActive(&peek, 9));
-    assert(ArmPeek(&peek, tty) && PollPeek(&peek, tty, 9) == PeekUnchanged);
-    TTYStep(wire); // Return during eligibility cannot complete the stale partial line.
-    assert(PollPeek(&peek, tty, 9) == PeekUnchanged);
-    TTYStep(wire); // Fresh input without Return still does not suffice.
-    assert(PollPeek(&peek, tty, 9) == PeekUnchanged && !PeekActive(&peek, 9));
+    TTYStep(wire); // A complete and partial command typed before readiness.
+    assert(ArmPeekTTY(&peek, tty) && ReadPeekInput(&peek, tty) == PeekNoInput);
+    TTYStep(wire); // Return cannot complete the pretyped partial line.
+    assert(ReadPeekInput(&peek, tty) == PeekIgnored);
     TTYStep(wire);
-    assert(PollPeek(&peek, tty, 10) == PeekOpened && peek.deadline == 22);
-    assert(ConsentAllowsReveal(&lease, &peek, 10, YES) && !ConsentAllowsReveal(&lease, &peek, 10, NO));
-    TTYStep(wire); // A second show while open does not extend this peek.
-    assert(PollPeek(&peek, tty, 21) == PeekUnchanged && peek.deadline == 22);
-    assert(ConsentAllowsReveal(&lease, &peek, 21.99, YES));
-    TTYStep(wire); // Buffered input at expiry cannot renew or reopen it.
-    assert(PollPeek(&peek, tty, 22) == PeekRevoked && !ConsentAllowsReveal(&lease, &peek, 22, YES));
-    peek = (GuardedPeek){0};
-    assert(ArmPeek(&peek, tty) && PollPeek(&peek, tty, 23) == PeekUnchanged);
-    TTYStep(wire); // The tail of a long line is not a command.
-    assert(PollPeek(&peek, tty, 23) == PeekUnchanged && peek.discarding);
-    assert(PollPeek(&peek, tty, 23) == PeekUnchanged && !peek.discarding);
+    assert(ReadPeekInput(&peek, tty) == PeekNoInput); // "sh" without Return.
+    EndPeek(&peek, NO); // Losing only a geometry sample while idle doesn't rearm the TTY.
+    assert(peek.ttyReady && peek.announced);
     TTYStep(wire);
-    assert(PollPeek(&peek, tty, 24) == PeekOpened);
-    TTYStep(wire); // Closing a peek invalidates both complete and pending subsequent input.
-    assert(PollPeek(&peek, tty, 25) == PeekRevoked);
-    peek = (GuardedPeek){0};
-    assert(!ConsentAllowsReveal(&lease, &peek, 25, YES));
-    assert(ArmPeek(&peek, tty) && PollPeek(&peek, tty, 26) == PeekUnchanged);
+    assert(ReadPeekInput(&peek, tty) == PeekShow); // "ow" and Return complete that line.
+    StartPeek(&peek, 10);
     TTYStep(wire);
-    assert(PollPeek(&peek, tty, 26) == PeekUnchanged);
+    assert(ReadPeekInput(&peek, tty) == PeekShow && peek.phase == PeekStarting && peek.deadline == 18);
+    assert(ShowPeek(&peek, 13) && peek.deadline == 22);
+
+    TTYStep(wire); // Hard revocation must discard both queued and partial stale commands.
+    EndPeek(&peek, YES);
+    assert(!peek.ttyReady && !PeekActive(&peek, 22));
+    assert(ArmPeekTTY(&peek, tty) && ReadPeekInput(&peek, tty) == PeekNoInput);
     TTYStep(wire);
-    assert(PollPeek(&peek, tty, 27) == PeekOpened && peek.deadline == 39);
+    assert(ReadPeekInput(&peek, tty) == PeekIgnored);
+    TTYStep(wire); // The tail of a long canonical line is not a command.
+    assert(ReadPeekInput(&peek, tty) == PeekIgnored && peek.discarding);
+    assert(ReadPeekInput(&peek, tty) == PeekIgnored && !peek.discarding);
+    TTYStep(wire);
+    assert(ReadPeekInput(&peek, tty) == PeekShow);
+    StartPeek(&peek, 40);
+    TTYStep(wire);
+    assert(ReadPeekInput(&peek, tty) == PeekHide);
+    EndPeek(&peek, YES);
+    assert(ArmPeekTTY(&peek, tty) && ReadPeekInput(&peek, tty) == PeekNoInput);
+    TTYStep(wire);
+    assert(ReadPeekInput(&peek, tty) == PeekIgnored);
+
+    // Do not consume from a noncanonical or wrongly configured terminal.
+    mode.c_lflag &= ~ICANON;
+    assert(tcsetattr(tty, TCSANOW, &mode) == 0);
+    assert(!ArmPeekTTY(&peek, tty) && ReadPeekInput(&peek, tty) == PeekBadTTY);
+    mode = before;
+    mode.c_iflag &= ~ICRNL;
+    assert(tcsetattr(tty, TCSANOW, &mode) == 0);
+    assert(!ArmPeekTTY(&peek, tty) && ReadPeekInput(&peek, tty) == PeekBadTTY);
+    assert(tcsetattr(tty, TCSANOW, &before) == 0);
+    int wrong[2];
+    assert(pipe(wrong) == 0 && WriteAll(wrong[1], "show\n", 5));
+    assert(!ArmPeekTTY(&peek, wrong[0]) && ReadPeekInput(&peek, wrong[0]) == PeekBadTTY);
+    char unread[5];
+    assert(read(wrong[0], unread, sizeof(unread)) == (ssize_t)sizeof(unread) && !memcmp(unread, "show\n", sizeof(unread)));
+    close(wrong[0]);
+    close(wrong[1]);
+    TTYStep(wire);
+    assert(ReadPeekInput(&peek, tty) == PeekShow);
 
     assert(tcgetattr(tty, &after) == 0);
     assert(before.c_iflag == after.c_iflag && before.c_oflag == after.c_oflag &&
@@ -411,7 +448,7 @@ static void GuardedTTY(void) {
     }
     close(wire[1]);
     const char *input[] = {
-        "show\rshow", "\r", "show", "\r", "show\r", "show\r",
+        "show\rshow", "\r", "sh", "ow\r", "show\r", "show\rshow", "\r",
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "show\r", "show\r",
         "hide\rshow\rshow", "\r", "show\r",
     };
@@ -420,10 +457,17 @@ static void GuardedTTY(void) {
         assert(read(wire[0], &step, 1) == 1 && step == '?');
         assert(WriteAll(master, input[i], strlen(input[i])) && WriteAll(wire[0], "!", 1));
     }
-    // Drain the ready prompts like a terminal viewer. Darwin waits for a
+    // Drain the one-shot readiness notice like a terminal viewer. Darwin waits for a
     // session leader's pending PTY output when it exits.
-    char output[512];
-    while (read(master, output, sizeof(output)) > 0) {}
+    char output[512] = {0};
+    size_t used = 0;
+    ssize_t count;
+    while ((count = read(master, output + used, sizeof(output) - 1 - used)) > 0) {
+        used += (size_t)count;
+        assert(used < sizeof(output) - 1);
+    }
+    const char *ready = strstr(output, "Milo Preview: ready to confirm.");
+    assert(ready && !strstr(ready + 1, "Milo Preview: ready to confirm."));
     int status;
     assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     close(master);
@@ -447,6 +491,7 @@ int main(int argc, const char *argv[]) {
         WatcherLease();
         FocusAcknowledgment();
         GuardedLease();
+        GuardedPresentation();
         GuardedTTY();
         puts("preview geometry tests passed");
     }

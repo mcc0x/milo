@@ -12,7 +12,9 @@ CGWindowID milo_preview_pin_window(pid_t pid);
 // Main thread. state_fd carries the observer's show/guard (PID and tile in
 // integer millionths), renew, hide, guard-hide and unclaimed records. EOF
 // ends the preview. confirm, guard or guard-hide permanently requires local
-// TTY consent. A focus request on stdout needs a separate parent acknowledgment.
+// TTY consent. Readiness is independent of window sampling; a confirmation
+// must pass a fresh placement check and expires within 12 seconds of receipt.
+// A focus request on stdout needs a separate parent acknowledgment.
 int milo_preview_run(const char *url, CGWindowID pinned_window, int state_fd, bool confirm);
 
 #endif

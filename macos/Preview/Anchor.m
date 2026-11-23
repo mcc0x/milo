@@ -21,6 +21,7 @@ static const NSTimeInterval SampleInterval = 0.25;
 static const NSTimeInterval SampleLifetime = 0.60;
 static const NSTimeInterval LeaseLifetime = 3.0;
 static const NSTimeInterval PeekLifetime = 12.0;
+static const NSTimeInterval PresentationLifetime = 8.0;
 // Rex's synchronous RPC is bounded at 15 seconds (src/rex.rs).
 static const NSTimeInterval FocusReplyLifetime = 16.0;
 enum { FractionScale = 1000000 };
@@ -215,13 +216,35 @@ typedef struct {
     BOOL guarded;
 } VisibilityLease;
 
+typedef NS_ENUM(NSUInteger, PeekPhase) { PeekIdle, PeekStarting, PeekVisible };
+
 typedef struct {
-    NSTimeInterval deadline;
-    BOOL armed, discarding;
+    NSTimeInterval deadline, consentEnd;
+    PeekPhase phase;
+    BOOL ttyReady, announced, discarding, pendingIdleReset, announcedIdleReset;
 } GuardedPeek;
 
 static BOOL PeekActive(const GuardedPeek *peek, NSTimeInterval now) {
-    return peek->deadline && now < peek->deadline;
+    return peek->phase != PeekIdle && now < peek->deadline;
+}
+
+static void StartPeek(GuardedPeek *peek, NSTimeInterval now) {
+    peek->phase = PeekStarting;
+    peek->consentEnd = now + PeekLifetime;
+    peek->deadline = MIN(now + PresentationLifetime, peek->consentEnd);
+}
+
+static BOOL ShowPeek(GuardedPeek *peek, NSTimeInterval now) {
+    if (peek->phase != PeekStarting || !PeekActive(peek, now) || now >= peek->consentEnd) return NO;
+    peek->phase = PeekVisible;
+    peek->deadline = peek->consentEnd;
+    return YES;
+}
+
+static void EndPeek(GuardedPeek *peek, BOOL resetTTY) {
+    if (resetTTY || peek->phase != PeekIdle) peek->ttyReady = NO;
+    peek->phase = PeekIdle;
+    peek->deadline = peek->consentEnd = 0;
 }
 
 static BOOL ConsentAllowsReveal(const VisibilityLease *lease, const GuardedPeek *peek, NSTimeInterval now,
@@ -393,51 +416,55 @@ static int OpenTTY(const char *path) {
     return open(path, O_RDWR | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
 }
 
-static const char PeekInstructions[] =
-    "Keep the pointer near the center of this tile. Type show and press Return for a 12-second preview.\n"
-    "Before switching sessions, move the pointer out and wait until the page disappears.\n";
-
 static void WritePeekHint(int tty) {
     static const char hint[] =
-        "With several Rex sessions attached, this preview needs confirmation in this tile.\n"
-        "Click this tile and wait for the ready message.\n";
+        "This preview needs confirmation in this tile. Click the tile and wait for ready to confirm.\n"
+        "Keep the pointer inside, then type show and press Return for up to 12 seconds of preview.\n"
+        "Before switching sessions, move the pointer out and wait until the page disappears.\n"
+        "Input queued before readiness or across a confirmation reset is discarded for safety.\n";
     WriteAll(tty, hint, sizeof(hint) - 1);
-    WriteAll(tty, PeekInstructions, sizeof(PeekInstructions) - 1);
 }
 
 static BOOL ForegroundCanonicalTTY(int tty) {
     struct termios mode;
-    return tcgetpgrp(tty) == getpgrp() && tcgetattr(tty, &mode) == 0 && (mode.c_lflag & ICANON);
+    return tcgetpgrp(tty) == getpgrp() && tcgetattr(tty, &mode) == 0 && (mode.c_lflag & ICANON) &&
+        (mode.c_iflag & (ICRNL | IGNCR | INLCR)) == ICRNL;
 }
 
-static BOOL ArmPeek(GuardedPeek *peek, int tty) {
-    // A canonical read alone cannot discard a partial line typed while hidden.
-    // Flush both complete and partial input at the start of each eligibility
-    // epoch, without changing the terminal's line discipline.
+static BOOL ArmPeekTTY(GuardedPeek *peek, int tty) {
     static const char ready[] = "Milo Preview: ready to confirm.\n";
-    if (!ForegroundCanonicalTTY(tty) || tcflush(tty, TCIFLUSH) < 0 ||
-        !WriteAll(tty, ready, sizeof(ready) - 1) ||
-        !WriteAll(tty, PeekInstructions, sizeof(PeekInstructions) - 1)) return NO;
-    *peek = (GuardedPeek){.armed = YES};
+    // Only a new consent epoch needs to discard canonical partial input. A
+    // sample, a resize, or an ordinary lease renewal is not a new epoch.
+    if (!ForegroundCanonicalTTY(tty) || tcflush(tty, TCIFLUSH) < 0 || !ForegroundCanonicalTTY(tty)) return NO;
+    if (!peek->announced && !WriteAll(tty, ready, sizeof(ready) - 1)) return NO;
+    if (peek->pendingIdleReset && !peek->announcedIdleReset) {
+        static const char reset[] =
+            "Milo Preview: Rex focus or eligibility changed; any pending input was discarded.\n"
+            "Click this tile and type show after focus settles.\n";
+        WriteAll(tty, reset, sizeof(reset) - 1);
+        peek->announcedIdleReset = YES;
+    }
+    peek->pendingIdleReset = NO;
+    peek->announced = peek->ttyReady = YES;
+    peek->discarding = NO;
     return YES;
 }
 
-typedef NS_ENUM(NSUInteger, PeekUpdate) { PeekUnchanged, PeekOpened, PeekRevoked };
+typedef NS_ENUM(NSUInteger, PeekInput) { PeekNoInput, PeekIgnored, PeekShow, PeekHide, PeekBadTTY };
 
-static PeekUpdate PollPeek(GuardedPeek *peek, int tty, NSTimeInterval now) {
-    if (!peek->armed) return PeekUnchanged;
-    if ((peek->deadline && !PeekActive(peek, now)) || !ForegroundCanonicalTTY(tty)) return PeekRevoked;
+static PeekInput ReadPeekInput(GuardedPeek *peek, int tty) {
+    if (!ForegroundCanonicalTTY(tty)) return PeekBadTTY;
     char line[64];
     ssize_t count = read(tty, line, sizeof(line));
-    if (count < 0) return errno == EINTR || errno == EAGAIN ? PeekUnchanged : PeekRevoked;
+    if (count < 0) return errno == EAGAIN || errno == EINTR ? PeekNoInput : PeekBadTTY;
+    if (!count) return PeekNoInput; // Canonical EOF key, not a command.
     // Never accept the tail of a long canonical line as a new command.
     BOOL discarding = peek->discarding;
     peek->discarding = count == (ssize_t)sizeof(line) && line[sizeof(line) - 1] != '\n';
-    if (discarding || count != 5) return PeekUnchanged;
-    if (!memcmp(line, "hide\n", 5)) return PeekRevoked;
-    if (peek->deadline || memcmp(line, "show\n", 5)) return PeekUnchanged;
-    peek->deadline = now + PeekLifetime;
-    return PeekOpened;
+    if (!ForegroundCanonicalTTY(tty)) return PeekBadTTY;
+    if (discarding || count != 5) return PeekIgnored;
+    if (!memcmp(line, "hide\n", 5)) return PeekHide;
+    return !memcmp(line, "show\n", 5) ? PeekShow : PeekIgnored;
 }
 
 static int PrepareFocusInput(int stateFD) {
@@ -458,10 +485,46 @@ static int PrepareFocusInput(int stateFD) {
     return fd;
 }
 
-static void WriteDiagnostic(int fd, const char *reason) {
+static BOOL WriteStatus(int fd, const char *prefix, const char *reason) {
     char line[256];
-    int length = snprintf(line, sizeof(line), "milo preview: %s\n", reason);
-    if (length > 0 && (size_t)length < sizeof(line)) WriteAll(fd, line, (size_t)length);
+    int length = snprintf(line, sizeof(line), "milo preview: %s%s\n", prefix, reason);
+    return length > 0 && (size_t)length < sizeof(line) && WriteAll(fd, line, (size_t)length);
+}
+
+static BOOL WriteDiagnostic(int fd, const char *reason) {
+    return WriteStatus(fd, "", reason);
+}
+
+typedef NS_ENUM(NSUInteger, PeekFailure) {
+    PeekOK, PeekFocus, PeekLease, PeekStale, PeekStack, PeekPlacement, PeekPointer,
+    PeekTTY, PeekWebKit, PeekExpired, PeekClosed, PeekDismissed,
+};
+
+static const char *PeekFailureMessage(PeekFailure failure) {
+    switch (failure) {
+        case PeekFocus: return "the Rex tile lost focus or eligibility; click it and retry";
+        case PeekLease: return "Rex stopped confirming tile visibility; wait for the tile to settle or reopen the preview";
+        case PeekStale: return "Rex tile geometry is stale or changing; wait for it to settle, then type show and press Return";
+        case PeekStack: return "the Rex window stack could not be verified; uncover the tile and use one visible Rex window";
+        case PeekPlacement: return "the tile cannot be placed on this display; use a regular window entirely on one display";
+        case PeekPointer: return "keep the pointer inside the preview tile and retry";
+        case PeekTTY: return "this is not the foreground canonical Rex terminal; click the preview tile or reopen it";
+        case PeekWebKit: return "WebKit startup did not finish in time; reopen the preview";
+        case PeekExpired: return "the confirmation expired before presentation; type show and press Return again";
+        case PeekClosed: return "the preview or its original Rex window closed; reopen it";
+        case PeekDismissed: return "the confirmation was canceled; type show and press Return again";
+        case PeekOK: return NULL;
+    }
+    return NULL;
+}
+
+static const char *PeekStatusPrefix(PeekPhase phase) {
+    return phase == PeekVisible ? "preview hidden: " : "not shown: ";
+}
+
+static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
+    const char *message = PeekFailureMessage(failure);
+    if (message) WriteStatus(tty, PeekStatusPrefix(phase), message);
 }
 
 @interface MiloPreviewAnchor : NSObject <NSWindowDelegate> {
@@ -487,7 +550,8 @@ static void WriteDiagnostic(int fd, const char *reason) {
     NSTimeInterval _nextPinCheck;
     NSTimeInterval _focusDeadline;
     NSUInteger _generation;
-    BOOL _samplePending, _finished, _sessionInactive, _screensAsleep;
+    PeekFailure _geometryFailure;
+    BOOL _samplePending, _initializingPanel, _stableGeometry, _reportedTTYFailure, _finished, _sessionInactive, _screensAsleep;
     char _line[64];
     size_t _lineLength;
     int _status;
@@ -496,6 +560,8 @@ static void WriteDiagnostic(int fd, const char *reason) {
     stateFD:(int)stateFD focusFD:(int)focusFD parent:(pid_t)parent tty:(int)tty confirm:(BOOL)confirm;
 - (int)run;
 - (void)tick;
+- (void)readState;
+- (void)readPeek;
 @end
 
 @implementation MiloPreviewAnchor
@@ -517,37 +583,67 @@ static void WriteDiagnostic(int fd, const char *reason) {
     return self;
 }
 
-- (void)conceal {
-    _peek = (GuardedPeek){0};
-    [_peekTimer invalidate];
-    _peekTimer = nil;
-    _candidate = (Geometry){0};
-    _lastSample = 0;
+- (void)hidePanel {
     if (_panel.placementProven) _panel.placementProven = NO;
     if (_panel.visible) [_panel orderOut:nil];
 }
 
-- (void)invalidate {
+- (void)clearGeometry:(PeekFailure)failure {
+    _candidate = (Geometry){0};
+    _lastSample = 0;
+    _stableGeometry = NO;
+    _geometryFailure = failure == PeekStack || failure == PeekPlacement ? failure : PeekStale;
+    [self hidePanel];
+}
+
+- (PeekFailure)eligibilityFailure {
+    if (_sessionInactive || _screensAsleep || _lineLength || _focusDeadline || !FrontmostRex(_rex) || !_lease.checked)
+        return PeekFocus;
+    return LeaseAllowsSampling(&_lease, LeaseNow(), _focusDeadline) ? PeekOK : PeekLease;
+}
+
+- (void)invalidateFor:(PeekFailure)failure resetTTY:(BOOL)resetTTY {
+    PeekPhase previous = _peek.phase;
+    if (previous == PeekIdle && resetTTY && _peek.ttyReady && failure != PeekOK && failure != PeekDismissed)
+        _peek.pendingIdleReset = YES;
+    EndPeek(&_peek, resetTTY);
+    [_peekTimer invalidate];
+    _peekTimer = nil;
     ++_generation;
-    [self conceal];
+    [self clearGeometry:failure];
+    if (previous != PeekIdle) {
+        // Close the old input epoch before telling the user they can retry.
+        if (!resetTTY && [self eligibilityFailure] == PeekOK) ArmPeekTTY(&_peek, _tty);
+        if (previous != PeekVisible || failure != PeekDismissed) WritePeekFailure(_tty, previous, failure);
+    }
+}
+
+- (void)expirePeek {
+    if (_peek.phase == PeekIdle) return;
+    PeekFailure failure = _peek.phase == PeekStarting ? (_initializingPanel ? PeekWebKit : PeekExpired) : PeekOK;
+    [self invalidateFor:failure resetTTY:NO];
 }
 
 - (void)schedulePeekExpiry {
+    [_peekTimer invalidate];
     __weak MiloPreviewAnchor *weakSelf = self;
     _peekTimer = [NSTimer timerWithTimeInterval:MAX(0, _peek.deadline - LeaseNow()) repeats:NO block:^(NSTimer *timer) {
-        (void)timer;
-        [weakSelf invalidate];
+        MiloPreviewAnchor *anchor = weakSelf;
+        if (!anchor || anchor->_peekTimer != timer) return;
+        if (PeekActive(&anchor->_peek, LeaseNow())) [anchor schedulePeekExpiry];
+        else [anchor expirePeek];
     }];
     [NSRunLoop.mainRunLoop addTimer:_peekTimer forMode:NSRunLoopCommonModes];
 }
 
 - (void)finish:(const char *)reason {
     if (_finished) return;
+    PeekPhase previous = _peek.phase;
     _finished = YES;
-    [self invalidate];
+    [self invalidateFor:reason ? PeekOK : PeekClosed resetTTY:YES];
     if (reason) {
         _status = 1;
-        WriteDiagnostic(_tty, reason);
+        WriteStatus(_tty, previous == PeekIdle ? "" : PeekStatusPrefix(previous), reason);
     }
     [NSApp stop:nil];
     // Wake the run loop so a command-line AppKit process observes -stop:.
@@ -556,9 +652,15 @@ static void WriteDiagnostic(int fd, const char *reason) {
     [NSApp postEvent:wake atStart:YES];
 }
 
+- (void)finishTTYFailure {
+    if (_peek.phase == PeekIdle && !_reportedTTYFailure) WritePeekFailure(_tty, PeekIdle, PeekTTY);
+    [self invalidateFor:PeekTTY resetTTY:YES];
+    _status = 1;
+    [self finish:NULL];
+}
+
 - (BOOL)canSample {
-    return !_sessionInactive && !_screensAsleep && LeaseAllowsSampling(&_lease, LeaseNow(), _focusDeadline) &&
-        FrontmostRex(_rex);
+    return [self eligibilityFailure] == PeekOK;
 }
 
 - (BOOL)pointerInsideTile {
@@ -566,51 +668,149 @@ static void WriteDiagnostic(int fd, const char *reason) {
 }
 
 - (BOOL)canReveal {
-    return [self canSample] && ConsentAllowsReveal(&_lease, &_peek, LeaseNow(),
-        _lease.guarded && [self pointerInsideTile]);
+    return [self canSample] && (!_lease.guarded || ForegroundCanonicalTTY(_tty)) &&
+        ConsentAllowsReveal(&_lease, &_peek, LeaseNow(), _lease.guarded && [self pointerInsideTile]);
 }
 
 - (BOOL)acceptsPanelInput {
-    return _panel.visible && _panel.placementProven && _panel.onActiveSpace && [self canReveal] &&
+    return _panel.visible && _panel.placementProven && _panel.onActiveSpace &&
+        (!_lease.guarded || _peek.phase == PeekVisible) && [self canReveal] &&
         NSEqualRects(_panel.frame, _candidateFrame) && SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample);
 }
 
-- (void)handleLine {
-    BOOL wasGuarded = _lease.guarded;
-    VisibilityUpdate update = UpdateVisibility(&_lease, LeaseNow(), _rex.processIdentifier, _line, _lineLength);
+- (PeekFailure)proofFailureAt:(NSTimeInterval)started {
+    PeekFailure failure = [self eligibilityFailure];
+    if (failure != PeekOK) return failure;
+    if (_lease.guarded) {
+        if (!ForegroundCanonicalTTY(_tty)) return PeekTTY;
+        if (![self pointerInsideTile]) return PeekPointer;
+        if (!PeekActive(&_peek, LeaseNow())) return PeekExpired;
+    }
+    return SampleFresh(NSProcessInfo.processInfo.systemUptime, started) ? PeekOK : PeekStale;
+}
+
+- (void)readPeek {
+    if (_finished || !_lease.guarded) return;
+    if (getppid() != _parent || _rex.terminated) { [self finish:NULL]; return; }
+    // Drain observer records before checking consent, even if no geometry
+    // sample can run. Only the foreground canonical controlling TTY is read.
+    [self readState];
+    if (_finished) return;
+    PeekFailure failure = [self eligibilityFailure];
+    if (failure != PeekOK) {
+        if (_peek.ttyReady || _peek.phase != PeekIdle) [self invalidateFor:failure resetTTY:YES];
+        if (_peek.announced && ForegroundCanonicalTTY(_tty)) {
+            for (NSUInteger i = 0; i < 8; ++i) {
+                PeekInput input = ReadPeekInput(&_peek, _tty);
+                if (input == PeekNoInput || input == PeekBadTTY) break;
+                if (input == PeekShow) WritePeekFailure(_tty, PeekIdle, failure);
+            }
+        }
+        return;
+    }
+    if (!ForegroundCanonicalTTY(_tty)) {
+        BOOL reported = _reportedTTYFailure || _peek.phase != PeekIdle;
+        if (_peek.ttyReady || _peek.phase != PeekIdle) [self invalidateFor:PeekTTY resetTTY:YES];
+        if (!reported) WritePeekFailure(_tty, PeekIdle, PeekTTY);
+        _reportedTTYFailure = YES;
+        return;
+    }
+    if (_peek.phase != PeekIdle) {
+        if (!PeekActive(&_peek, LeaseNow())) { [self expirePeek]; return; }
+        if (![self pointerInsideTile]) { [self invalidateFor:PeekPointer resetTTY:NO]; return; }
+    }
+    if (!_peek.ttyReady) {
+        if (!ArmPeekTTY(&_peek, _tty)) [self finishTTYFailure];
+        return;
+    }
+    // Bound work per callback, including attempts with invalid placement.
+    for (NSUInteger i = 0; i < 8; ++i) {
+        PeekInput input = ReadPeekInput(&_peek, _tty);
+        if (input == PeekNoInput) return;
+        if (input == PeekBadTTY) {
+            [self finishTTYFailure];
+            return;
+        }
+        if (input == PeekHide) {
+            [self invalidateFor:PeekDismissed resetTTY:_peek.phase == PeekIdle];
+            if (!_peek.ttyReady && [self eligibilityFailure] == PeekOK) ArmPeekTTY(&_peek, _tty);
+            return;
+        }
+        if (input != PeekShow || _peek.phase != PeekIdle) continue;
+        NSTimeInterval received = LeaseNow();
+        failure = [self eligibilityFailure];
+        if (failure == PeekOK && (!_stableGeometry ||
+            !SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample))) {
+            failure = _geometryFailure ? _geometryFailure : PeekStale;
+        }
+        if (failure == PeekOK && ![self pointerInsideTile]) failure = PeekPointer;
+        if (failure != PeekOK) {
+            WritePeekFailure(_tty, PeekIdle, failure);
+            continue;
+        }
+        if (!WriteDiagnostic(_tty, "confirmation accepted; checking the tile")) {
+            [self finish:NULL];
+            return;
+        }
+        StartPeek(&_peek, received);
+        ++_generation; // An in-flight sample may have started before the command.
+        _lastSample = 0; // Keep the geometry identity, not its pre-consent proof.
+        _stableGeometry = NO;
+        [self schedulePeekExpiry];
+    }
+}
+
+- (void)handleLine:(size_t)length {
+    VisibilityLease previous = _lease;
+    NSTimeInterval now = LeaseNow();
+    VisibilityUpdate update = UpdateVisibility(&_lease, now, _rex.processIdentifier, _line, length);
     switch (update) {
         case VisibilityUnchanged: break;
-        case VisibilityChanged: [self invalidate]; break;
+        case VisibilityChanged:
+            if (!_lease.checked || previous.guarded != _lease.guarded)
+                [self invalidateFor:PeekFocus resetTTY:YES];
+            else if (previous.checked && !LeaseFresh(&previous, now))
+                [self invalidateFor:PeekLease resetTTY:YES];
+            else
+                [self invalidateFor:PeekStale resetTTY:NO];
+            break;
         case VisibilityInvalid: [self finish:"invalid Rex visibility message"]; break;
         case VisibilityWrongOwner: [self finish:"the Rex client changed; reopen the preview in the current Rex client"]; break;
         case VisibilityUnclaimed:
             [self finish:"the Mac viewer did not claim this preview tile. Close it and retry from a Mac-created working terminal; no permissions are needed."];
             break;
     }
-    if (!wasGuarded && _lease.guarded) WritePeekHint(_tty);
+    if (!previous.guarded && _lease.guarded) WritePeekHint(_tty);
 }
 
 - (void)readState {
-    char bytes[192];
-    ssize_t count = read(_stateFD, bytes, sizeof(bytes));
-    if (!count) {
-        [self finish:_lineLength ? "incomplete Rex visibility message" : NULL];
-        return;
-    }
-    if (count < 0) {
-        if (errno != EINTR && errno != EAGAIN) [self finish:"could not read Rex visibility state"];
-        return;
-    }
-    for (ssize_t i = 0; i < count && !_finished; ++i) {
-        if (bytes[i] == '\n') {
-            [self handleLine];
-            _lineLength = 0;
-        } else if (_lineLength == sizeof(_line)) {
-            [self finish:"oversized Rex visibility message"];
-        } else {
-            _line[_lineLength++] = bytes[i];
+    // Bound continuous writer activity and never grant consent while a
+    // previously queued visibility revocation might still be unread.
+    for (NSUInteger chunk = 0; chunk < 8 && !_finished; ++chunk) {
+        char bytes[192];
+        ssize_t count = read(_stateFD, bytes, sizeof(bytes));
+        if (!count) {
+            [self finish:_lineLength ? "incomplete Rex visibility message" : NULL];
+            return;
+        }
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            if (errno != EAGAIN) [self finish:"could not read Rex visibility state"];
+            return;
+        }
+        for (ssize_t i = 0; i < count && !_finished; ++i) {
+            if (bytes[i] == '\n') {
+                size_t length = _lineLength;
+                _lineLength = 0;
+                [self handleLine:length];
+            } else if (_lineLength == sizeof(_line)) {
+                [self finish:"oversized Rex visibility message"];
+            } else {
+                _line[_lineLength++] = bytes[i];
+            }
         }
     }
+    if (!_finished) [self finish:"too many pending Rex visibility messages; reopen the preview"];
 }
 
 - (void)returnToTerminal {
@@ -618,7 +818,7 @@ static void WriteDiagnostic(int fd, const char *reason) {
     // Keep the sample and click gates closed even if the watcher renews the
     // visible tile while Rex is still processing the focus request.
     _focusDeadline = LeaseNow() + FocusReplyLifetime;
-    [self invalidate];
+    [self invalidateFor:PeekDismissed resetTTY:YES];
     static const char focus[] = "focus\n";
     static const char guardedFocus[] = "focus-confirm\n";
     BOOL sent = _lease.guarded ? WriteAll(STDOUT_FILENO, guardedFocus, sizeof(guardedFocus) - 1)
@@ -626,27 +826,42 @@ static void WriteDiagnostic(int fd, const char *reason) {
     if (!sent) [self finish:"could not return focus to the Rex terminal"];
 }
 
+- (void)rejectProof:(PeekFailure)failure {
+    if (failure == PeekExpired) {
+        [self expirePeek];
+        return;
+    }
+    BOOL hard = failure == PeekFocus || failure == PeekLease || failure == PeekTTY;
+    [self invalidateFor:failure resetTTY:hard];
+    if (failure == PeekTTY) _reportedTTYFailure = YES;
+}
+
 - (void)applySample:(Geometry)geometry checkedPanel:(BOOL)checkedPanel lostPin:(BOOL)lostPin
     generation:(NSUInteger)generation started:(NSTimeInterval)started {
     _samplePending = NO;
     if (_finished) return;
+    if (getppid() != _parent || _rex.terminated) { [self finish:NULL]; return; }
     if (lostPin) { [self finish:NULL]; return; }
-    // Prefer observer revocation already on the pipe over accepting a line
-    // from the tile or revealing a staged panel on this sample.
+    // Prefer queued observer revocation over staging or revealing a panel.
     if (_lease.guarded) [self readState];
     if (_finished) return;
     if (generation != _generation) return;
+    PeekFailure failure = [self eligibilityFailure];
+    if (failure == PeekOK) {
+        if (!SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) failure = PeekStale;
+        else if (!geometry.windowID) failure = PeekStack;
+    }
     NSRect frame;
     CGDirectDisplayID display;
-    if (![self canSample] || !geometry.windowID ||
-        !SampleFresh(NSProcessInfo.processInfo.systemUptime, started) || !ScreenFrame(geometry, &frame, &display) ||
-        !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) {
-        [self conceal];
+    if (failure == PeekOK && !ScreenFrame(geometry, &frame, &display)) failure = PeekPlacement;
+    if (failure == PeekOK && !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) failure = PeekStale;
+    if (failure != PeekOK) {
+        [self rejectProof:failure];
         return;
     }
     if (!SameGeometry(_candidate, geometry) || display != _candidateDisplay ||
         !NSEqualRects(frame, _candidateFrame)) {
-        [self conceal];
+        [self invalidateFor:PeekStale resetTTY:NO];
         _candidate = geometry;
         _candidateFrame = frame;
         _candidateDisplay = display;
@@ -654,31 +869,27 @@ static void WriteDiagnostic(int fd, const char *reason) {
         return;
     }
     _lastSample = started;
-    if (_lease.guarded) {
-        if (![self pointerInsideTile]) {
-            if (_peek.armed) [self invalidate];
-            return;
-        }
-        if (!_peek.armed) {
-            ArmPeek(&_peek, _tty);
-            return;
-        }
-        PeekUpdate update = PollPeek(&_peek, _tty, LeaseNow());
-        if (update == PeekRevoked) { [self invalidate]; return; }
-        if (update == PeekOpened) [self schedulePeekExpiry];
-        if (![self canReveal]) {
-            if (_peek.deadline) [self invalidate];
-            return;
-        }
-    }
+    _stableGeometry = YES;
+    _geometryFailure = PeekOK;
+    if (_lease.guarded && _peek.phase == PeekIdle) return;
+    failure = [self proofFailureAt:started];
+    if (failure != PeekOK) { [self rejectProof:failure]; return; }
     if (!_panel) {
+        // The old proof cannot survive a blocked or nested AppKit run loop
+        // during WebKit construction. No panel is ordered in this phase.
+        _lastSample = 0;
+        _stableGeometry = NO;
+        _initializingPanel = YES;
         __weak MiloPreviewAnchor *weakSelf = self;
         NSView *browser = MiloPreviewContent(_url, ^BOOL{ return [weakSelf acceptsPanelInput]; },
             ^{ [weakSelf returnToTerminal]; });
+        _initializingPanel = NO;
         if (!browser) {
             [self finish:"expected an explicit loopback HTTP or HTTPS URL"];
             return;
         }
+        if (_finished || generation != _generation) return;
+        if (_lease.guarded && !PeekActive(&_peek, LeaseNow())) { [self rejectProof:PeekWebKit]; return; }
         _panel = [[MiloPreviewPanel alloc] initWithContentRect:frame
             styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
             backing:NSBackingStoreBuffered defer:NO];
@@ -696,15 +907,33 @@ static void WriteDiagnostic(int fd, const char *reason) {
         _panel.delegate = self;
         _panel.contentView = browser;
         [_panel prepareStaging];
-        // WebKit startup can outlast a sample. Wait for another one before showing.
+        // Keep the bounded, hidden attempt tied to the same candidate. Only
+        // fresh Quartz proof taken after initialization can stage the panel.
+        [self tick];
         return;
     }
     if (_panel.visible) {
         if (!checkedPanel || !_panel.onActiveSpace || !NSEqualRects(_panel.frame, frame)) {
-            [self invalidate];
+            [self rejectProof:PeekStack];
             return;
         }
-        if (!_panel.placementProven) _panel.placementProven = YES;
+        if (!_panel.placementProven) {
+            if (_lease.guarded) {
+                [self readPeek]; // A queued local dismissal wins over reveal.
+                if (_finished || generation != _generation) return;
+                failure = [self proofFailureAt:started];
+                if (failure != PeekOK) { [self rejectProof:failure]; return; }
+                if (!_panel.visible || !_panel.onActiveSpace || !NSEqualRects(_panel.frame, frame)) {
+                    [self rejectProof:PeekStack];
+                    return;
+                }
+                if (!ShowPeek(&_peek, LeaseNow())) { [self expirePeek]; return; }
+                [self schedulePeekExpiry];
+            }
+            _panel.placementProven = YES;
+            if (_lease.guarded && !_finished && generation == _generation && _panel.placementProven)
+                WriteDiagnostic(_tty, "preview visible");
+        }
         return;
     }
 
@@ -715,22 +944,26 @@ static void WriteDiagnostic(int fd, const char *reason) {
     // separately from AppKit rather than reusing the Quartz identifier.
     if (!ValidRect(primary) || primary.origin.x != 0 || primary.origin.y != 0 ||
         !CGRectContainsPoint(geometry.pane, CGPointMake(center.x, primary.size.height - center.y))) {
-        [self invalidate];
+        [self rejectProof:PeekPlacement];
         return;
     }
     NSInteger relativeWindow = [NSWindow windowNumberAtPoint:center belowWindowWithWindowNumber:0];
-    if (relativeWindow <= 0 || generation != _generation || ![self canReveal] ||
-        !NSEqualRects(_panel.frame, frame) || !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) {
-        [self invalidate];
+    if (_finished || generation != _generation) return;
+    failure = [self proofFailureAt:started];
+    if (failure == PeekOK && (relativeWindow <= 0 || !NSEqualRects(_panel.frame, frame))) failure = PeekStack;
+    if (failure != PeekOK) {
+        [self rejectProof:failure];
         return;
     }
     _orderedPanelFrame = CGRectMake(NSMinX(frame), primary.size.height - NSMaxY(frame),
         NSWidth(frame), NSHeight(frame));
     if (_panel.placementProven) _panel.placementProven = NO;
     [_panel orderWindow:NSWindowAbove relativeTo:relativeWindow];
-    if (!_panel.visible || generation != _generation || ![self canReveal] ||
-        !NSEqualRects(_panel.frame, frame) || !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) {
-        [self invalidate];
+    if (_finished || generation != _generation) { [self hidePanel]; return; }
+    failure = [self proofFailureAt:started];
+    if (failure == PeekOK && (!_panel.visible || !NSEqualRects(_panel.frame, frame))) failure = PeekStack;
+    if (failure != PeekOK) {
+        [self rejectProof:failure];
         return;
     }
     // Verify the clear, click-through panel before revealing the browser.
@@ -746,14 +979,24 @@ static void WriteDiagnostic(int fd, const char *reason) {
         if (reply == FocusEnded) { [self finish:NULL]; return; }
         if (reply == FocusFailed) { [self finish:"could not confirm focus returned to the Rex terminal"]; return; }
     }
-    BOOL canSample = [self canSample];
+    // Nonblocking canonical input is serviced even while Quartz is stalled
+    // or the tile is currently ineligible; never wait for a sample result.
+    if (_lease.guarded) [self readPeek];
+    if (_finished) return;
+    PeekFailure eligibility = [self eligibilityFailure];
+    BOOL canSample = eligibility == PeekOK;
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-    if ((!canSample && (_candidate.windowID || _panel.visible)) ||
-        (_peek.armed && ![self pointerInsideTile]) ||
-        (_peek.deadline && !PeekActive(&_peek, LeaseNow())) ||
-        (_lastSample && !SampleFresh(now, _lastSample)) ||
-        (_panel.visible && !_panel.onActiveSpace)) [self invalidate];
-    if (_samplePending) return;
+    if (!canSample && (_candidate.windowID || _panel.visible || _peek.ttyReady))
+        [self rejectProof:eligibility];
+    else if (_peek.phase != PeekIdle && !PeekActive(&_peek, LeaseNow()))
+        [self expirePeek];
+    else if (_peek.phase != PeekIdle && ![self pointerInsideTile])
+        [self rejectProof:PeekPointer];
+    else if (_panel.visible && !_panel.onActiveSpace)
+        [self invalidateFor:PeekStack resetTTY:YES];
+    else if (_lastSample && !SampleFresh(now, _lastSample))
+        [self rejectProof:PeekStale];
+    if (_samplePending || _initializingPanel) return;
     BOOL checkPin = !_sessionInactive && !_screensAsleep && now >= _nextPinCheck;
     if (!canSample && !checkPin) return;
     if (checkPin) _nextPinCheck = now + 1.0;
@@ -779,7 +1022,12 @@ static void WriteDiagnostic(int fd, const char *reason) {
                 lostPin = lookup == PinMissing || (lookup == PinFound && owner != pid);
             }
             dispatch_async(dispatch_get_main_queue(), ^{
-                [weakSelf applySample:geometry checkedPanel:checkedPanel lostPin:lostPin generation:generation started:now];
+                MiloPreviewAnchor *anchor = weakSelf;
+                if (canSample || lostPin) {
+                    [anchor applySample:geometry checkedPanel:checkedPanel lostPin:lostPin generation:generation started:now];
+                } else if (anchor) {
+                    anchor->_samplePending = NO;
+                }
             });
         }
     });
@@ -792,7 +1040,7 @@ static void WriteDiagnostic(int fd, const char *reason) {
 
 - (void)windowDidResignKey:(NSNotification *)notification {
     (void)notification;
-    if (_lease.guarded && _peek.deadline) [self invalidate];
+    if (_lease.guarded && _peek.phase == PeekVisible) [self invalidateFor:PeekFocus resetTTY:YES];
 }
 
 - (void)observe:(NSNotificationName)name center:(NSNotificationCenter *)center {
@@ -809,7 +1057,16 @@ static void WriteDiagnostic(int fd, const char *reason) {
         if ([event.name isEqualToString:NSWorkspaceSessionDidBecomeActiveNotification]) anchor->_sessionInactive = NO;
         if ([event.name isEqualToString:NSWorkspaceScreensDidSleepNotification]) anchor->_screensAsleep = YES;
         if ([event.name isEqualToString:NSWorkspaceScreensDidWakeNotification]) anchor->_screensAsleep = NO;
-        [anchor invalidate];
+        if ([event.name isEqualToString:NSApplicationDidChangeScreenParametersNotification]) {
+            [anchor rejectProof:PeekStale];
+            return;
+        }
+        if ([event.name isEqualToString:NSWorkspaceDidDeactivateApplicationNotification]) {
+            NSRunningApplication *app = event.userInfo[NSWorkspaceApplicationKey];
+            if (app && app.processIdentifier != anchor->_rex.processIdentifier) return;
+        }
+        if ([event.name isEqualToString:NSWorkspaceDidActivateApplicationNotification] && FrontmostRex(anchor->_rex)) return;
+        [anchor invalidateFor:PeekFocus resetTTY:YES];
     }];
     [_notificationTokens addObject:@[center, token]];
 }
@@ -860,7 +1117,8 @@ static void WriteDiagnostic(int fd, const char *reason) {
         MiloPreviewAnchor *anchor = weakSelf;
         if (!anchor || !anchor->_panel || event.window != anchor->_panel) return event;
         if (![anchor acceptsPanelInput]) {
-            [anchor invalidate];
+            PeekFailure failure = [anchor proofFailureAt:anchor->_lastSample];
+            [anchor rejectProof:failure == PeekOK ? PeekStack : failure];
             return nil;
         }
         if (event.type == NSEventTypeKeyDown && anchor->_panel.keyWindow &&
