@@ -141,18 +141,17 @@ static inline ResizeInputResult ResizeReadLineByte(ResizeInput *input, unsigned 
         ResizeLine line = input->line;
         unsigned length = input->lineLength;
         input->line = ResizeLineEmpty;
-        if (!ResizeInputReady(input)) return ResizeInputWaiting;
         if (line == ResizeLineHide && length == 4) return ResizeInputDismiss;
+        if (!ResizeInputReady(input)) return ResizeInputWaiting;
         if (line == ResizeLineDigits && length == 6 && input->code) {
             if (input->codeMatches) return ResizeInputCode;
             if (++input->incorrectCodes == 3) return ResizeInputFailed;
         }
-    } else if (!ResizeInputReady(input)) {
-        // Never assemble a line from characters on opposite sides of arming.
-        input->line = ResizeLineRejected;
     } else if (input->line == ResizeLineEmpty) {
         input->lineLength = 1;
-        if (byte >= '0' && byte <= '9') {
+        // Never assemble digits across the arming boundary, but honor a
+        // negative command even while terminal mode replies are outstanding.
+        if (ResizeInputReady(input) && byte >= '0' && byte <= '9') {
             input->line = ResizeLineDigits;
             input->codeMatches = input->code / 100000 == (unsigned)(byte - '0');
         } else input->line = byte == 'h' ? ResizeLineHide : ResizeLineRejected;
@@ -282,10 +281,11 @@ static inline ResizeInputResult ReadResizeInput(ResizeInput *input, int tty) {
         }
     }
     if (!ResizeTTYMatches(input, tty)) goto failed;
+    if (result == ResizeInputDismiss) { input->code = 0; return result; }
     if (input->mode != ResizeProbe) {
         // A positive receipt must not outrun a dismissal queued behind it.
-        if (result != ResizeInputDismiss && (!empty || input->escape != ResizeGround)) return ResizeInputWaiting;
-        if (result == ResizeInputCode || result == ResizeInputDismiss) input->code = 0;
+        if (!empty || input->escape != ResizeGround) return ResizeInputWaiting;
+        if (result == ResizeInputCode) input->code = 0;
         return result;
     }
     bool expired = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) >= input->probeEnd;

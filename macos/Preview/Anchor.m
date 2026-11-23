@@ -1067,6 +1067,7 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
     if (length == 10 && !memcmp(_line, "resize-gap", 10)) {
         // Revisions can coalesce during a continuous drag. Only an already
         // concealed gesture may continue; discard its old consent entirely.
+        _hadDivider = YES; // Even the first coalesced ratio change ends ordinary shared-show authority.
         if (_resizeEdge && !_routeArmed) {
             _requireCode = YES;
             ++_generation;

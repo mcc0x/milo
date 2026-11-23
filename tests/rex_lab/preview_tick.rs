@@ -175,6 +175,13 @@ impl Tile<'_> {
         (self.geometry().len(), self.event("revealed"), self.count(ACCEPTED))
     }
 
+    // The Lua fixtures cover when Rex snapshots emit the marker. Deliver
+    // that same pipe record at a deterministic native gesture boundary.
+    fn model_revision_gap(&self) {
+        let mut states = fs::OpenOptions::new().write(true).open(self.root.join("native-input")).unwrap();
+        states.write_all(b"resize-gap\n").unwrap();
+    }
+
     fn start_drag(&self) -> (usize, usize, usize) {
         self.check_focus(self.block);
         let counts = self.presentation();
@@ -602,6 +609,20 @@ fn preview_confirmation_uses_rex_pty() {
     tile.restored(short, new);
     assert_eq!(tile.active_route_modes(), initial_modes, "resume leaked terminal reporting modes");
 
+    let gap = tile.start_drag();
+    tile.model_revision_gap();
+    let new = tile.resize(&mut viewer, &main, 0.44);
+    tile.pointer(new.divider(), true);
+    let route = tile.count(ROUTE_READY);
+    tile.pointer(new.divider(), false);
+    tile.route_ready(route);
+    tile.pointer(new.center(), false);
+    tile.motion(&mut viewer);
+    tile.samples(2);
+    assert_eq!(tile.presentation(), gap, "a revision gap retained passive consent");
+    tile.confirm_local_receipt();
+    tile.restored(gap, new);
+
     // Let the actual 12-second consent expire while continuously held down.
     // After return, no-button motion is not fresh explicit consent.
     let long = tile.start_drag();
@@ -738,6 +759,18 @@ fn preview_confirmation_uses_rex_pty() {
     tile.reveal(1);
     tile.wait("fresh anchor never loaded WebKit", || tile.event("webkit-loaded") == 1);
     page.join().unwrap();
+    // No previous divider interaction: a gap arriving before hover or press
+    // must still fence subsequent shared `show`, not merely hide the pixels.
+    let hidden = tile.event("hidden");
+    tile.model_revision_gap();
+    tile.wait("first gap did not conceal", || tile.event("hidden") > hidden);
+    tile.resize(&mut viewer, &main, 0.46);
+    tile.samples(3);
+    tile.show();
+    tile.wait("first-gap show bypassed the local code", || tile.read("test-menu-item").len() == 6);
+    assert_eq!(tile.event("revealed"), 1);
+    tile.confirm_local_receipt();
+    tile.wait("local confirmation did not recover after the first gap", || tile.event("revealed") == 2);
     let detached = tile.start_drag();
     let new = tile.resize(&mut viewer, &main, 0.45);
     tile.pointer(new.divider(), true);

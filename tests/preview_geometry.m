@@ -586,6 +586,11 @@ static void ResizeTTYChild(int wire) {
     ResizeExpect(wire, &input, tty, ResizeInputFailed); // No verified bracketed paste.
     assert(!ResizeInputReady(&input) && EndResizeInput(&input, tty));
     ResizeTTYRestored(tty, &before, flags);
+
+    assert(BeginResizeInput(&input, tty, 123456));
+    ResizeExpect(wire, &input, tty, ResizeInputDismiss); // hide during negotiation beats the final mode replies.
+    assert(!ResizeInputReady(&input) && EndResizeInput(&input, tty));
+    ResizeTTYRestored(tty, &before, flags);
     close(tty);
 }
 
@@ -639,13 +644,14 @@ static void GuardedResizeTTY(void) {
         "111111\r222222\r",
         "333333\r100000\r",
         "\033[?2004;0$y\033[?1006;1$y\033[?1003;1$y",
+        "123456\rhide\r\033[?2004;1$y\033[?1006;1$y\033[?1003;1$y",
     };
     for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); ++i) {
         char step;
         assert(read(wire[0], &step, 1) == 1 && step == '?');
         assert(WriteAll(master, steps[i], strlen(steps[i])) && WriteAll(wire[0], "!", 1));
     }
-    char output[512] = {0};
+    char output[640] = {0};
     size_t used = 0;
     ssize_t count;
     while ((count = read(master, output + used, sizeof(output) - 1 - used)) > 0) {
@@ -655,7 +661,7 @@ static void GuardedResizeTTY(void) {
     const char *save = "\033[?1003;1006;2004s";
     const char *restore = "\033[?1003;1006;2004r";
     const char *cursor = output;
-    for (unsigned i = 0; i < 5; ++i) {
+    for (unsigned i = 0; i < 6; ++i) {
         cursor = strstr(cursor, save);
         assert(cursor && strstr(cursor, "\033[?2004h\033[?1006h\033[?1003h"));
         cursor = strstr(cursor, restore);
