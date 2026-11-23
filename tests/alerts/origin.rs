@@ -1,7 +1,7 @@
 //! Exercise origin attribution and recovery without attaching to a user session.
 
 use std::fs;
-use std::io::Write as _;
+use std::io::{ErrorKind, Read as _, Write as _};
 use std::os::unix::net::UnixListener;
 
 use super::{DISCORD, ENABLED, Home, PAUSED, RECOVERED, TELEGRAM, settle, soon};
@@ -204,7 +204,10 @@ fn recover(origin: bool) {
     }
     let lookups = home.root.join("lookups");
     if origin {
-        assert_eq!(fs::read_to_string(lookups).unwrap(), format!("session:{A}\nsession:{B}\nsession:{B}\nsession:{B}\n"));
+        assert_eq!(
+            fs::read_to_string(lookups).unwrap(),
+            format!("session:{A}\nsession:{B}\nsession:{B}\nsession:{B}\n")
+        );
     } else {
         assert!(!lookups.exists(), "origin was looked up despite the default being off");
     }
@@ -218,4 +221,55 @@ fn recovery_keeps_origin_off_by_default_and_keeps_one_provider_paused() {
 #[test]
 fn recovery_refreshes_opted_in_origin_without_leaking_it_into_notices_or_ambiguous_alerts() {
     recover(true);
+}
+
+#[test]
+fn replacing_the_socket_during_subscription_open_does_not_report_false_recovery() {
+    let Some(home) = Home::new_unbound() else { return };
+    let original = bind(&home);
+    view(&home, A, "original-context");
+    home.save_discord();
+    home.run(&["alerts", "origin", "on"]);
+    home.run(&["alerts", "notices", "on", "discord"]);
+    home.run(&["alerts", "on", "discord"]);
+    home.wait_for_health("Listening");
+    expect_message(&home, DISCORD, 0, ENABLED);
+    emit(&home, A, "done");
+    expect_message(&home, DISCORD, 1, "`amp` **finished** · `original-context`");
+    home.checkpoint();
+
+    home.rex_fault("rex-down", true);
+    home.wait_for_health("Waiting for Rex");
+    let mut lease = home.rex_lease();
+    home.rex_fault("rex-down", false);
+    // The FIFO byte comes from the new subscriber only after it has passed
+    // the fault gate. It stays alive even if the socket pathname changes.
+    let mut ready = [0];
+    assert!(soon(|| match lease.read(&mut ready) {
+        Ok(1) => true,
+        Ok(0) => false,
+        Err(error) if error.kind() == ErrorKind::WouldBlock => false,
+        result => panic!("unexpected Rex lease data: {result:?}"),
+    }));
+    assert_eq!(ready, [b'x']);
+    let unconfirmed = home.starts();
+    // Refuse every later subscription until we have observed the stale
+    // attempt retire without announcing that Rex returned.
+    home.rex_fault("rex-flaps", true);
+    fs::remove_file(home.rex_socket()).unwrap();
+    let _replacement = bind(&home);
+    drop(original);
+    assert!(soon(|| home.starts() > unconfirmed), "the stale subscription was not replaced");
+    settle();
+    assert!(home.health("Waiting for Rex"));
+    assert_eq!(home.destination.texts(), [ENABLED, "`amp` **finished** · `original-context`"]);
+
+    view(&home, B, "replacement-context");
+    home.rex_fault("rex-flaps", false);
+    home.wait_for_health("Listening");
+    expect_message(&home, DISCORD, 2, RECOVERED);
+    emit(&home, B, "error");
+    expect_message(&home, DISCORD, 3, "`amp` **reported an error** · `replacement-context`");
+    settle();
+    assert_eq!(home.destination.requests().len(), 4);
 }
