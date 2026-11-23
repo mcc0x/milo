@@ -11,8 +11,8 @@ use crate::pane::{After, Pane};
 use crate::preferences::Preferences;
 use crate::reader::ReadFile;
 
-use super::Outline;
 use super::draw::{Layout, margin};
+use super::{Note, Outline};
 
 pub(super) struct Click {
     target: ClickTarget,
@@ -87,16 +87,16 @@ impl Outline {
         }
         if let Some(action) = native {
             self.clicked = None;
-            let result = if self.painted.strip {
-                Err("Use / to choose a file")
-            } else {
-                self.tree.row(self.sel).ok_or("No file selected").and_then(|node| {
-                    let path = node.path.as_ref();
-                    // The tree marks folder rows with a trailing slash; the opener wants the entry itself.
-                    let path = if node.dir { path.strip_suffix('/').unwrap_or(path) } else { path };
-                    action.run(&self.repo.root, self.root_identity, Path::new(path))
-                })
-            };
+            if self.painted.strip {
+                self.note = Some((Note::StripFind, now));
+                return After::Stay;
+            }
+            let result = self.tree.row(self.sel).ok_or("No file selected").and_then(|node| {
+                let path = node.path.as_ref();
+                // The tree marks folder rows with a trailing slash; the opener wants the entry itself.
+                let path = if node.dir { path.strip_suffix('/').unwrap_or(path) } else { path };
+                action.run(&self.repo.root, self.root_identity, Path::new(path))
+            });
             match result {
                 Ok(()) => self.note = None,
                 Err(why) => self.say(why),

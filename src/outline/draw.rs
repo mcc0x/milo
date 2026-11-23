@@ -11,8 +11,8 @@ use crate::tree::{Node, Tree};
 use crate::ui::{self, FAINT};
 use crate::width::str_width;
 
-use super::{NATIVE_HINT, Outline};
 use super::attention::{LIVE, PULSE};
+use super::{NATIVE_HINT, Outline};
 
 /// The shortest pane with room for the project heading.
 const HEADING_ROWS: usize = 4;
@@ -132,7 +132,7 @@ impl Outline {
             }
         }
         let git_unavailable = !layout.strip && self.repo.git_unavailable();
-        if (self.note.is_some() || git_unavailable) && !layout.hint {
+        if (self.note_text(layout.strip).is_some() || git_unavailable) && !layout.hint {
             layout.body_rows = layout.body_rows.saturating_sub(1);
         }
         if layout.strip {
@@ -144,7 +144,7 @@ impl Outline {
             self.draw_tree(s, &mut layout, now);
             self.discover_untracked();
         }
-        if let Some((note, _)) = &self.note {
+        if let Some(note) = self.note_text(layout.strip) {
             s.put_fit(1, s.h - 1, layout.width.saturating_sub(2), note, Style::fg(screen::YELLOW));
         } else if git_unavailable {
             s.put_fit(1, s.h - 1, s.w - 2, GIT_UNAVAILABLE, ui::DEL);
@@ -238,15 +238,14 @@ impl Outline {
     /// panes. On screen a pending file is simply one that changed.
     fn draw_hint(&self, s: &mut Screen) -> bool {
         let folders = if self.folds.all() { "e undo open all" } else { "e open all" };
-        let first_hint = usize::from(!cfg!(target_os = "macos"));
+        // Leave room for the standard Find and changes-only hints before adding both macOS shortcuts.
+        let last = if cfg!(target_os = "macos") && s.w >= 70 { NATIVE_HINT } else { "q quit" };
         if self.repo.git {
             let filter = if self.pending_only { "c all files" } else { "c changed only" };
             let first = if self.pending.is_empty() { "Enter open" } else { "n next change" };
-            let hints = [NATIVE_HINT, first, folders, filter, "q quit"];
-            help::draw_hint(s, FIND, &hints[first_hint..], "? help").index_at(1, s.h - 1) == Some(0)
+            help::draw_hint(s, FIND, &[first, folders, filter, last], "? help").index_at(1, s.h - 1) == Some(0)
         } else {
-            let hints = [NATIVE_HINT, "Enter open", folders, "q quit"];
-            help::draw_hint(s, FIND, &hints[first_hint..], "? help").index_at(1, s.h - 1) == Some(0)
+            help::draw_hint(s, FIND, &["Enter open", folders, last], "? help").index_at(1, s.h - 1) == Some(0)
         }
     }
 

@@ -34,6 +34,11 @@ use self::draw::{ChangeColumns, Layout};
 const NOTE: Duration = Duration::from_secs(4);
 const NATIVE_HINT: &str = "Ctrl-O open · Ctrl-R reveal";
 
+enum Note {
+    Tree(String),
+    StripFind,
+}
+
 pub struct Outline {
     repo: Repo,
     root_identity: Option<(u64, u64)>,
@@ -77,7 +82,7 @@ pub struct Outline {
     search: Option<search::Search>,
     search_walk: Option<std::thread::JoinHandle<walk::Listing>>,
     /// Something to say in place of the key hint, and when it was said.
-    note: Option<(String, Instant)>,
+    note: Option<(Note, Instant)>,
     /// A file being read here, in place of the outline, outside Rex.
     reading: Option<Reader>,
     /// Checks refresh away from the pane loop, which then takes them in when they finish.
@@ -384,7 +389,15 @@ impl Outline {
 
     /// Shows a line in place of the key hint for a few seconds.
     fn say(&mut self, text: impl Into<String>) {
-        self.note = Some((text.into(), Instant::now()));
+        self.note = Some((Note::Tree(text.into()), Instant::now()));
+    }
+
+    fn note_text(&self, strip: bool) -> Option<&str> {
+        match (&self.note, strip) {
+            (Some((Note::Tree(text), _)), false) => Some(text),
+            (Some((Note::StripFind, _)), true) => Some("Use / to choose a file"),
+            _ => None,
+        }
     }
 
     fn draw_at(&mut self, screen: &mut Screen, now: Instant) {
@@ -666,7 +679,8 @@ mod tests {
         o.key(Key::Char('e'));
         let rows = draw(&mut o, 100, 12).text();
         assert_eq!(rows[11].contains(NATIVE_HINT), cfg!(target_os = "macos"));
-        let y = rows.iter().enumerate().filter_map(|(y, row)| row.contains("same name.txt").then_some(y)).nth(1).unwrap();
+        let mut name_rows = rows.iter().enumerate().filter_map(|(y, row)| row.contains("same name.txt").then_some(y));
+        let y = name_rows.nth(1).unwrap();
         o.key(Key::Click(4, y));
 
         let (after, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
