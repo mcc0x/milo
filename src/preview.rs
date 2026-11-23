@@ -28,6 +28,7 @@ Keep working in the sibling terminal or drag the Rex divider. The page stays
 loaded. Command-L edits the address; Return opens it. Command-Shift-Return
 returns keyboard focus; Command-W in the preview closes it. Only the original
 local dev origin offers Select → review → Copy. Nothing is sent to an agent.
+A link leaving the dev origin shows its destination. Choose Open link or Stay.
 
 Experimental macOS overlay: placement is approximate. Start in a Mac-created
 terminal with one visible local Rex window. No Accessibility, Screen Recording,
