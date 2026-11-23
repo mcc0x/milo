@@ -24,13 +24,13 @@ No native Kitty, iTerm2, WezTerm, GNU screen, SSH, Windows console or mobile-cli
 
 ## Matched release benchmark
 
-`python3 tests/standalone_bench.py /path/to/base/milo /path/to/candidate/milo`. Each binary built with `cargo build --release --locked`, Rust 1.100.0, Apple M5 Pro, macOS 27.2.1. Both builds used the same 128-file, single-commit fixture and an already-skipped welcome guide. Twelve runs per build, alternating which ran first. Times are median milliseconds to a complete **PTY frame**, including process startup for the first three rows, not the time a display finished painting.
+`python3 tests/standalone_bench.py /path/to/base/milo /path/to/candidate/milo`. Baseline `536342f` and candidate `c3eff71` were built with `cargo build --release --locked`, Rust 1.100.0, Apple M5 Pro, macOS 27.2.1. Both builds used the same 128-file, single-commit fixture and an already-skipped welcome guide. Twelve runs per build, alternating which ran first. Times are median milliseconds to a complete **PTY frame**, including process startup for the first three rows, not the time a display finished painting.
 
 | Workload, 160×50 PTY | Baseline (ms) | Candidate (ms) |
 | --- | ---: | ---: |
-| Bare Home | 5.93 | 5.84 |
-| History, first commit visible | 28.58 | 29.65 |
-| Outline, first file visible | 28.31 | 29.06 |
-| Enter on file → reader contents | 12.93 | 14.75 |
+| Bare Home | 5.37 | 5.54 |
+| History, first commit visible | 24.91 | 25.01 |
+| Outline, first file visible | 24.95 | 24.56 |
+| Enter on file → reader contents | 12.51 | 11.59 |
 
-The largest observed difference was 1.82 ms slower opening the inline reader. This is a small, warm local fixture with scripted terminal replies, not a general speed comparison or a measurement of first-run onboarding, graphics, network latency or large repositories.
+The medians differed by less than 1 ms on all four workloads. This is a small, warm local fixture with scripted terminal replies, not a general speed comparison or a measurement of first-run onboarding, graphics, network latency or large repositories.
