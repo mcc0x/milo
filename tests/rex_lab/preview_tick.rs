@@ -1,7 +1,10 @@
 use super::{Lab, PATIENCE, id};
+use std::cell::Cell;
 use std::fs;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::TcpListener;
+use std::os::unix::fs::symlink;
+use std::path::Path;
 use std::process::Stdio;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -9,19 +12,57 @@ use std::time::{Duration, Instant};
 const READY: &str = "Milo Preview: ready to confirm.";
 const ACCEPTED: &str = "milo preview: confirmation accepted; checking the tile";
 const VISIBLE: &str = "milo preview: preview visible";
+const ROUTE_READY: &str = "milo preview: divider released";
+const PAUSED: &str = "milo preview: preview paused for the Rex divider";
 const BAD_STACK: &str = "milo preview: not shown: post-order: helper panel is behind the pinned Rex window";
 
 fn records(log: &str) -> impl Iterator<Item = &str> {
     log.split_inclusive('\n').map_while(|line| line.strip_suffix('\n'))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PaneFrame {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    divider_x: f64,
+}
+
+impl PaneFrame {
+    fn parse(line: &str) -> Self {
+        let dimensions = line.split_whitespace().map(|n| n.parse::<f64>().unwrap()).collect::<Vec<_>>();
+        let [x, y, width, height, divider_x] = dimensions.try_into().unwrap();
+        Self { x, y, width, height, divider_x }
+    }
+
+    fn approach(self) -> (f64, f64) {
+        (self.x - 1.0, self.y + self.height / 2.0)
+    }
+
+    fn divider(self) -> (f64, f64) {
+        (self.divider_x, self.y + self.height / 2.0)
+    }
+
+    fn center(self) -> (f64, f64) {
+        (self.x + self.width / 2.0, self.y + self.height / 2.0)
+    }
+}
+
 struct Tile<'a> {
     lab: &'a Lab,
+    root: &'a Path,
     session: &'a str,
     block: &'a str,
+    window: &'a str,
+    pointer_serial: Cell<u32>,
 }
 
 impl Tile<'_> {
+    fn read(&self, name: &str) -> String {
+        fs::read_to_string(self.root.join(name)).unwrap_or_default()
+    }
+
     fn capture(&self) -> String {
         self.lab.rex(&["capture", "-s", self.session, "-b", self.block, "--trim", "--unwrap"])
     }
@@ -31,17 +72,59 @@ impl Tile<'_> {
     }
 
     fn event(&self, event: &str) -> usize {
-        records(&self.lab.read("native.log")).filter(|line| *line == event).count()
+        records(&self.read("native.log")).filter(|line| *line == event).count()
     }
 
     fn geometry(&self) -> Vec<String> {
-        records(&self.lab.read("native.log"))
+        records(&self.read("native.log"))
             .filter_map(|line| line.strip_prefix("stage ").map(str::to_owned))
             .collect()
     }
 
+    fn frame(&self) -> PaneFrame {
+        PaneFrame::parse(
+            records(&self.read("native.log"))
+                .filter_map(|line| line.strip_prefix("projected "))
+                .last()
+                .expect("no geometry from the real Rex layout"),
+        )
+    }
+
+    fn pointer(&self, (x, y): (f64, f64), down: bool) {
+        let serial = self.pointer_serial.get() + 1;
+        self.pointer_serial.set(serial);
+        let next = self.root.join("pointer-next");
+        fs::write(&next, format!("{serial} {x} {y} {}\n", u8::from(down))).unwrap();
+        fs::rename(next, self.root.join("pointer-state")).unwrap();
+        self.wait("the fixture did not sample the modeled pointer", || self.event(&format!("pointer {serial}")) == 1);
+    }
+
+    fn scope(&self, script: &str) -> String {
+        self.lab.rex(&["do", "-s", self.session, "-e", script])
+    }
+
+    fn resize(&self, viewer: &mut impl FnMut(&str, &str), main: &str, ratio: f64) -> PaneFrame {
+        let old = self.frame();
+        let guards = self.state("guard ");
+        viewer("session.resize_pane", &format!(
+            r#"{{"session_id":"{}","direction":"horizontal","before_block_id":"{main}","after_block_id":"{}","ratio":{ratio}}}"#,
+            self.session, self.block,
+        ));
+        self.wait("real Rex resize did not move the preview tile", || self.state("guard ") > guards && self.frame() != old);
+        self.frame()
+    }
+
+    fn check_focus(&self, expected: &str) {
+        self.scope(&format!(
+            "local view=assert(rex.session.view{{}}); for _,w in ipairs(view.windows) do \
+             if w.window_id=='{}' then assert(w.focused_block_id=='{expected}',tostring(w.focused_block_id)); return end \
+             end; error('missing working tab')",
+            self.window,
+        ));
+    }
+
     fn state(&self, prefix: &str) -> usize {
-        records(&self.lab.read("native-watch.log")).filter(|line| line.starts_with(prefix)).count()
+        records(&self.read("native-watch.log")).filter(|line| line.starts_with(prefix)).count()
     }
 
     fn focus(&self, target: &str) {
@@ -68,9 +151,9 @@ impl Tile<'_> {
                 Instant::now() < until,
                 "{description}\nterminal:\n{}\nnative:\n{}\nwatcher:\n{}{}",
                 self.capture(),
-                self.lab.read("native.log"),
-                self.lab.read("native-watch.log"),
-                self.lab.read("native-watch.errors"),
+                self.read("native.log"),
+                self.read("native-watch.log"),
+                self.read("native-watch.errors"),
             );
             thread::sleep(Duration::from_millis(50));
         }
@@ -87,13 +170,68 @@ impl Tile<'_> {
         });
         assert_eq!(self.count(ACCEPTED), count, "{}", self.capture());
     }
+
+    fn presentation(&self) -> (usize, usize, usize) {
+        (self.geometry().len(), self.event("revealed"), self.count(ACCEPTED))
+    }
+
+    fn start_drag(&self) -> (usize, usize, usize) {
+        self.check_focus(self.block);
+        let counts = self.presentation();
+        let frame = self.frame();
+        let hidden = self.event("hidden");
+        let paused = self.count(PAUSED);
+        self.pointer(frame.approach(), false);
+        self.wait("crossing the right tile's left edge did not conceal before the press", || {
+            self.event("hidden") == hidden + 1 && self.count(PAUSED) == paused + 1
+        });
+        self.pointer(frame.divider(), true);
+        assert_eq!(self.presentation(), counts, "pressing the divider staged or revealed the page");
+        counts
+    }
+
+    fn route_ready(&self, previous: usize) {
+        self.wait("Rex divider return did not arm on the terminal", || self.count(ROUTE_READY) > previous);
+    }
+
+    fn motion(&self, viewer: &mut impl FnMut(&str, &str)) {
+        viewer("block.event", &format!(
+            r#"{{"session_id":"{}","block_id":"{}","event":{{"type":"mouse","payload":{{"action":"motion","x":3,"y":3}}}}}}"#,
+            self.session, self.block,
+        ));
+    }
+
+    fn active_route_modes(&self) -> usize {
+        self.scope(&format!(
+            "local modes=assert(rex.call('com.superlogical.terminal.modes',{{session_id='{}',block_id='{}'}})).modes; \
+             local count=0; for _,m in ipairs(modes) do \
+             if m.set and (m.number==1003 or m.number==1006 or m.number==2004) then count=count+1 end end; print(count)",
+            self.session, self.block,
+        )).trim().parse().unwrap()
+    }
+
+    fn restored(&self, (stages, reveals, confirmations): (usize, usize, usize), new: PaneFrame) {
+        self.wait("fresh routed input did not reprove and reveal the same WebKit form", || {
+            self.event("revealed") == reveals + 1
+                && self.count(VISIBLE) == reveals + 1
+                && self.event("webkit-state-preserved") == reveals
+        });
+        assert_eq!(self.presentation(), (stages + 1, reveals + 1, confirmations));
+        let stage = format!("{:.1} {:.1} {:.1} {:.1}", new.x, new.y, new.width, new.height);
+        assert_eq!(self.geometry().last(), Some(&stage), "reveal did not follow the new Rex divider");
+        self.check_focus(self.block);
+    }
 }
 
-fn serve_fixture(listener: TcpListener) {
+fn serve_fixture(listener: TcpListener, expect_form: bool) {
     const PAGE: &str = "<!doctype html><meta charset=utf-8><link rel=icon href=data:,>\
-        <style>html,body{background:#08ba49}</style><p id=rex-lab-page>Rex preview fixture</p>";
+        <style>html,body{background:#08ba49}</style><p id=rex-lab-page>Rex preview fixture</p>\
+        <a href=/rex-lab-form id=divider-link>Open the form</a>";
+    const FORM: &str = "<!doctype html><meta charset=utf-8><link rel=icon href=data:,>\
+        <form autocomplete=off><input id=divider-form></form>";
     listener.set_nonblocking(true).unwrap();
     let until = Instant::now() + 3 * PATIENCE;
+    let (mut page_served, mut form_served) = (false, false);
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
@@ -101,16 +239,26 @@ fn serve_fixture(listener: TcpListener) {
                 let mut lines = BufReader::new(&mut stream).lines();
                 let request = lines.next().and_then(Result::ok).unwrap_or_default();
                 while lines.next().and_then(Result::ok).is_some_and(|line| !line.is_empty()) {}
-                if !request.starts_with("GET /rex-lab-page ") {
+                let body = if request.starts_with("GET /rex-lab-page ") {
+                    assert!(!page_served, "WebKit unexpectedly reloaded the initial page");
+                    page_served = true;
+                    PAGE
+                } else if request.starts_with("GET /rex-lab-form ") {
+                    assert!(!form_served, "WebKit unexpectedly reloaded the form");
+                    form_served = true;
+                    FORM
+                } else {
                     continue;
-                }
+                };
                 write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PAGE}",
-                    PAGE.len(),
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
                 )
                 .unwrap();
-                return;
+                if page_served && (!expect_form || form_served) {
+                    return;
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 assert!(Instant::now() < until, "the isolated WKWebView never requested its page");
@@ -158,7 +306,10 @@ fn preview_confirmation_uses_rex_pty() {
     let main = id(&created, "block_ids");
     let another_tab = lab.new_tab(&session, &lab.root);
     let attached = ["native-attached-a", "native-attached-b", "native-attached-c"]
-        .map(|name| id(&new_session(name), "session_id"));
+        .map(|name| {
+            let created = new_session(name);
+            (id(&created, "session_id"), id(&created, "block_ids"))
+        });
 
     let mut peer = lab
         .command("python3")
@@ -176,15 +327,16 @@ fn preview_confirmation_uses_rex_pty() {
     output.read_line(&mut client).unwrap();
     assert!(client.starts_with("client:"), "{client}");
     let client = client.trim();
-    let mut viewer = |method: &str, target: &str| {
-        writeln!(input, r#"["{method}",{{"session_id":"{target}"}}]"#).unwrap();
+    let mut viewer = |method: &str, payload: &str| {
+        writeln!(input, r#"["{method}",{payload}]"#).unwrap();
         let mut reply = String::new();
         output.read_line(&mut reply).unwrap();
         assert!(reply.contains(r#""type":"response""#), "{method}: {reply}");
     };
-    viewer("session.attach", &session);
-    for attached in &attached {
-        viewer("session.attach", attached);
+    let owner_session = format!(r#"{{"session_id":"{session}"}}"#);
+    viewer("session.attach", &owner_session);
+    for (attached, _) in &attached {
+        viewer("session.attach", &format!(r#"{{"session_id":"{attached}"}}"#));
     }
     let check_attachments = format!(
         "for _,c in ipairs(assert(rex.call('client.list',{{kinds={{'app'}}}})).clients) do \
@@ -195,16 +347,21 @@ fn preview_confirmation_uses_rex_pty() {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/rex-lab-page", listener.local_addr().unwrap());
-    let page = thread::spawn(move || serve_fixture(listener));
-    let started = lab.rex(&[
-        "split", "-s", &session, "-b", &main, "--split=right", "--ratio", "40", "--focus=false", "--shell=none",
-        "--label", "milo:preview:confirm", "--keep-open", "--json", "--", "/bin/bash",
-        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_lab/preview_tick.sh"),
-        root, concat!(env!("CARGO_MANIFEST_DIR"), "/src/rex/preview.lua"), client, &pid.to_string(), &main, &tab, &url,
-    ]);
-    let block = id(&started, "block_ids");
-    let tile = Tile { lab: &lab, session: &session, block: &block };
-    viewer("session.own_block", &session);
+    let page = thread::spawn(move || serve_fixture(listener, true));
+    let launch = |root: &Path, main: &str, tab: &str, url: &str| {
+        let started = lab.rex(&[
+            "split", "-s", &session, "-b", main, "--split=right", "--ratio", "40", "--focus=false", "--shell=none",
+            "--label", "milo:preview:confirm", "--keep-open", "--json", "--", "/bin/bash",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_lab/preview_tick.sh"), root.to_str().unwrap(),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/rex/preview.lua"), client, &pid.to_string(), main, tab, url,
+        ]);
+        id(&started, "block_ids")
+    };
+    let block = launch(&lab.root, &main, &tab, &url);
+    let tile = Tile {
+        lab: &lab, root: &lab.root, session: &session, block: &block, window: &tab, pointer_serial: Cell::new(0),
+    };
+    viewer("session.own_block", &owner_session);
     tile.focus(&main);
     tile.wait("the real watcher did not start hidden", || tile.state("hide") >= 1);
     // A line that arrived before the tile became eligible must not open it.
@@ -263,7 +420,6 @@ fn preview_confirmation_uses_rex_pty() {
     assert_eq!(tile.event("cold-start-delay"), 1, "cold WebKit startup must not require another confirmation");
     assert_eq!(tile.count(READY), 1, "sampling or guard renew repeatedly rearmed the PTY");
     tile.wait("real WebKit did not load the loopback fixture", || tile.event("webkit-loaded") == 1);
-    page.join().unwrap();
     let until = Instant::now() + Duration::from_secs(2);
     while tile.event("webkit-offscreen-paint") + tile.event("webkit-snapshot-unavailable") == 0 && Instant::now() < until {
         thread::sleep(Duration::from_millis(50));
@@ -273,6 +429,9 @@ fn preview_confirmation_uses_rex_pty() {
     } else {
         eprintln!("real WebKit loaded the fixture DOM; offscreen paint not confirmed; stacking modeled");
     }
+    fs::write(lab.root.join("seed-form"), "").unwrap();
+    tile.wait("the actual WebKit view did not navigate and retain a form value", || tile.event("webkit-form-seeded") == 1);
+    page.join().unwrap();
 
     tile.focus(&main);
     tile.wait("losing tile focus did not conceal it", || tile.state("hide") >= 2 && tile.event("hidden") == 1);
@@ -376,7 +535,7 @@ fn preview_confirmation_uses_rex_pty() {
     tile.show();
     tile.wait("did not reach the post-stage proof", || tile.event("awaiting-dismissal-burst") == 1);
     tile.type_text("\n\n\n\n\n\n\n\nhide\n");
-    fs::remove_file(hold).unwrap();
+    fs::remove_file(&hold).unwrap();
     tile.wait("queued dismissal was not consumed", || tile.count("not shown: the confirmation was canceled") == 1);
     assert_eq!(tile.event("revealed"), 4);
     tile.samples(4);
@@ -391,11 +550,154 @@ fn preview_confirmation_uses_rex_pty() {
     tile.samples(4);
     tile.show();
     tile.wait("did not recover after terminal dismissal", || tile.event("revealed") == 6);
-    // A canceled attempt may also order out a transparent staging window.
-    let hidden_before_close = tile.event("hidden");
+
+    // The simulated macOS pointer leaves the page before Rex receives the
+    // press. It stays concealed while Rex itself actually resizes the split.
+    let initial_modes = tile.active_route_modes();
+    let short = tile.start_drag();
+    let new = tile.resize(&mut viewer, &main, 0.43);
+    tile.pointer(new.divider(), true);
+    tile.samples(2);
+    assert_eq!(tile.presentation(), short, "a pressed divider revealed the page");
+    let route = tile.count(ROUTE_READY);
+    tile.pointer(new.divider(), false);
+    tile.route_ready(route);
+    assert_eq!(tile.active_route_modes(), 3, "the offscreen route must use actual Rex reporting modes");
+    tile.motion(&mut viewer); // Even routed motion cannot expose the page while on the divider.
+    tile.samples(3);
+    assert_eq!(tile.presentation(), short, "releasing on the divider revealed the page");
+    tile.pointer(new.center(), false);
+
+    // A switch to a different attached session/host may be unobservable.
+    // Old saved focus, a global pointer return, guard renewals and input in a
+    // different attached terminal cannot count as a return to this anchor.
+    let (other_session, other_block) = &attached[0];
+    viewer("block.event", &format!(
+        r#"{{"session_id":"{other_session}","block_id":"{other_block}","event":{{"type":"mouse","payload":{{"action":"motion","x":3,"y":3}}}}}}"#,
+    ));
+    let renewals = tile.state("renew");
+    tile.wait("watcher did not renew while awaiting the routed return", || tile.state("renew") > renewals);
+    tile.samples(2);
+    assert_eq!(tile.presentation(), short, "an unobservable switch or global pointer return reopened the preview");
+    let (x, y) = new.center();
+    tile.pointer((x + 4.0, y), false); // Fresh modeled movement, not the older global position.
+    tile.motion(&mut viewer);
+    tile.restored(short, new);
+    assert_eq!(tile.active_route_modes(), initial_modes, "resume leaked terminal reporting modes");
+
+    // Let the actual 12-second consent expire while continuously held down.
+    // After return, no-button motion is not fresh explicit consent.
+    let long = tile.start_drag();
+    let new = tile.resize(&mut viewer, &main, 0.48);
+    tile.pointer(new.divider(), true);
+    let renewals = tile.state("renew");
+    thread::sleep(Duration::from_secs(13));
+    assert!(tile.state("renew") >= renewals + 8, "the real Rex lease did not stay alive during the drag");
+    assert_eq!(tile.presentation(), long, "holding past the consent deadline staged or revealed the page");
+    let route = tile.count(ROUTE_READY);
+    tile.pointer(new.divider(), false);
+    tile.samples(3);
+    assert_eq!(tile.presentation(), long, "the expired drag revealed on mouse-up");
+    tile.route_ready(route);
+    tile.pointer(new.center(), false);
+    tile.motion(&mut viewer);
+    tile.samples(4);
+    assert_eq!(tile.presentation(), long, "mouse motion revived expired consent");
+    tile.enter(); // Actual Return in the owning Rex PTY, not another `show`.
+    tile.restored(long, new);
+
+    // Real tab loss while concealed is a hard revocation, even if the same
+    // tab and block are selected again and then receive terminal input.
+    let pending = tile.start_drag();
+    let new = tile.resize(&mut viewer, &main, 0.43);
+    tile.pointer(new.divider(), true);
+    let route = tile.count(ROUTE_READY);
+    tile.pointer(new.divider(), false);
+    tile.route_ready(route);
+    let hides = tile.state("hide");
+    tile.focus(&another_tab);
+    tile.wait("leaving the tab did not revoke the watcher lease", || tile.state("hide") > hides);
+    tile.pointer(new.center(), false);
+    let guards = tile.state("guard ");
+    tile.focus(&block);
+    tile.wait("returning to the tab did not reacquire eligibility", || tile.state("guard ") > guards);
+    tile.samples(4);
+    assert_eq!(tile.active_route_modes(), initial_modes, "tab loss leaked terminal reporting modes");
+    tile.enter();
+    tile.samples(4);
+    assert_eq!(tile.presentation(), pending, "a returned-to tab revived revoked consent");
+    tile.show();
+    tile.wait("a new confirmation did not recover from tab loss", || tile.event("revealed") == pending.1 + 1);
+
+    // Close the working block with a routed return waiting on final proof.
+    // A transparent staging order is allowed, but it may never be revealed.
+    let closing = tile.start_drag();
+    let new = tile.resize(&mut viewer, &main, 0.48);
+    tile.pointer(new.divider(), true);
+    let route = tile.count(ROUTE_READY);
+    tile.pointer(new.divider(), false);
+    tile.route_ready(route);
+    let proofs = tile.event("awaiting-dismissal-burst");
+    fs::write(&hold, "").unwrap();
+    tile.pointer(new.center(), false);
+    tile.motion(&mut viewer);
+    tile.wait("the return did not reach final placement proof", || tile.event("awaiting-dismissal-burst") > proofs);
+    let hidden = tile.event("hidden");
+    let hides = tile.state("hide");
     lab.rex(&["block", "close", "-s", &session, &main]);
-    tile.wait("closing the working block left the panel revealed", || tile.event("hidden") > hidden_before_close);
-    tile.wait("anchor did not end on watcher EOF", || lab.read("native-exit") == "0\n");
+    tile.wait("the real watcher did not revoke placement on close", || tile.state("hide") > hides);
+    fs::remove_file(&hold).unwrap();
+    tile.wait("anchor did not end on watcher EOF", || tile.read("native-exit") == "0\n");
+    assert!(tile.event("hidden") > hidden, "close left the staged panel ordered");
+    assert_eq!(tile.event("revealed"), closing.1, "a late proof revealed after close");
+
+    // Use another anchor in the same four-attached viewer to exercise actual
+    // owner attachment loss independently of working-terminal closure.
+    let client_root = lab.root.join("client-loss");
+    fs::create_dir(&client_root).unwrap();
+    for asset in ["bin", "preview-rex-tick"] {
+        symlink(lab.root.join(asset), client_root.join(asset)).unwrap();
+    }
+    let created = lab.rex(&[
+        "window", "new", "-s", &session, "client-loss", "-c", root, "--shell=none",
+        "--json", "--", "/bin/sleep", "300",
+    ]);
+    let main = id(&created, "block_ids");
+    let tab = id(&created, "window_id");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/rex-lab-page", listener.local_addr().unwrap());
+    let page = thread::spawn(move || serve_fixture(listener, false));
+    let block = launch(&client_root, &main, &tab, &url);
+    let tile = Tile {
+        lab: &lab, root: &client_root, session: &session, block: &block, window: &tab, pointer_serial: Cell::new(0),
+    };
+    viewer("session.own_block", &owner_session);
+    tile.focus(&block);
+    tile.wait("fresh anchor never became eligible", || tile.count(READY) == 1);
+    tile.samples(4);
+    tile.show();
+    tile.reveal(1);
+    tile.wait("fresh anchor never loaded WebKit", || tile.event("webkit-loaded") == 1);
+    page.join().unwrap();
+    let detached = tile.start_drag();
+    let new = tile.resize(&mut viewer, &main, 0.45);
+    tile.pointer(new.divider(), true);
+    let route = tile.count(ROUTE_READY);
+    tile.pointer(new.divider(), false);
+    tile.route_ready(route);
+    let hold = client_root.join("hold-staged-proof");
+    fs::write(&hold, "").unwrap();
+    tile.pointer(new.center(), false);
+    tile.motion(&mut viewer);
+    tile.wait("the return did not reach final placement proof", || tile.event("awaiting-dismissal-burst") == 1);
+    let hidden = tile.event("hidden");
+    let hides = tile.state("hide");
+    viewer("session.detach", &owner_session);
+    tile.wait("the real watcher did not revoke the departing owner", || tile.state("hide") > hides);
+    fs::remove_file(hold).unwrap();
+    tile.wait("the anchor survived owner attachment loss", || tile.read("native-exit") == "0\n");
+    assert!(tile.event("hidden") > hidden, "owner loss left the staged panel ordered");
+    assert_eq!(tile.event("revealed"), detached.1, "a late proof referred to the departed client");
     drop((input, output));
     lab.stop_server();
 }

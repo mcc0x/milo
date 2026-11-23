@@ -15,6 +15,7 @@
 
 @interface NSEvent (RexTickFixture)
 + (NSPoint)fixtureMouseLocation;
++ (NSUInteger)fixturePressedMouseButtons;
 @end
 
 @interface NSWindow (RexTickFixture)
@@ -31,10 +32,12 @@ static NSView *SlowStartContent(NSURL *url, BOOL (^input)(void), void (^focus)(v
 #define MiloApproximatePane FixturePane
 #define NSWorkspace FixtureWorkspace
 #define mouseLocation fixtureMouseLocation
+#define pressedMouseButtons fixturePressedMouseButtons
 #define windowNumberAtPoint fixtureWindowNumberAtPoint
 #import "../macos/Preview/Anchor.m"
 #undef MiloPreviewContent
 #undef windowNumberAtPoint
+#undef pressedMouseButtons
 #undef mouseLocation
 #undef NSWorkspace
 #undef MiloApproximatePane
@@ -48,12 +51,15 @@ static pid_t ownerPID;
 static CGRect targetFrame;
 static CGFloat quartzHeight;
 static NSPoint pointer;
+static NSUInteger buttons;
+static unsigned pointerSerial;
 static NSString *denyPlacement;
 static NSString *delaySamples;
 static NSString *holdProof;
 static NSString *holdInput;
 static NSString *absentPanel, *missCenter, *rexOverlay;
 static NSString *leavePointer;
+static NSString *pointerState, *seedForm;
 static int trace;
 static os_unfair_lock sampleLock = OS_UNFAIR_LOCK_INIT;
 static BOOL staged;
@@ -152,6 +158,7 @@ static BOOL FixturePane(CGRect window, CGRect normalized, CGRect *pane) {
 
 @implementation NSEvent (RexTickFixture)
 + (NSPoint)fixtureMouseLocation { return pointer; }
++ (NSUInteger)fixturePressedMouseButtons { return buttons; }
 @end
 
 @implementation NSWindow (RexTickFixture)
@@ -218,6 +225,43 @@ static WKWebView *FindWebView(NSView *view) {
     return nil;
 }
 
+static __weak WKWebView *firstWeb;
+static const char *const FormValue = "Rex divider form state";
+
+static void VerifyForm(WKWebView *web, unsigned tries, BOOL seed) {
+    assert(tries);
+    if (![web.URL.path isEqualToString:@"/rex-lab-form"] || !web.canGoBack || web.loading) {
+        assert(seed);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            VerifyForm(web, tries - 1, seed);
+        });
+        return;
+    }
+    NSString *readField =
+        @"document.readyState === 'complete' && document.getElementById('divider-form').value";
+    NSString *script = seed ? [NSString stringWithFormat:
+        @"document.getElementById('divider-form').value = '%s'; %@", FormValue, readField] : readField;
+    [web evaluateJavaScript:script completionHandler:^(id value, NSError *error) {
+        if (seed && (error || [value isEqual:@NO])) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+                VerifyForm(web, tries - 1, seed);
+            });
+            return;
+        }
+        assert(!error && [value isEqual:[NSString stringWithUTF8String:FormValue]]);
+        Trace(seed ? "webkit-form-seeded\n" : "webkit-state-preserved\n");
+    }];
+}
+
+static void NavigateToForm(WKWebView *web) {
+    assert([web.URL.path isEqualToString:@"/rex-lab-page"]);
+    [web evaluateJavaScript:@"document.getElementById('divider-link').click(); true"
+        completionHandler:^(id result, NSError *error) {
+        assert(!error && [result isEqual:@YES]);
+        VerifyForm(web, 80, YES);
+    }];
+}
+
 static void VerifyPage(WKWebView *web, unsigned tries) {
     if (!tries) return;
     [web evaluateJavaScript:@"document.readyState === 'complete' && !!document.getElementById('rex-lab-page')"
@@ -257,20 +301,52 @@ static void FixtureProven(MiloPreviewPanel *panel, SEL selector, BOOL proven) {
     assert(web);
     if (!checkedWeb) {
         checkedWeb = YES;
+        firstWeb = web;
         VerifyPage(web, 80);
+    } else {
+        assert(web == firstWeb);
+        if ([NSFileManager.defaultManager fileExistsAtPath:seedForm]) {
+            VerifyForm(web, 1, NO);
+        }
     }
 }
 
 @interface DismissalFixtureAnchor : MiloPreviewAnchor
 @end
 @implementation DismissalFixtureAnchor
+- (void)tick {
+    // Model only the Mac pointer and button sample, never the PTY or watcher.
+    NSString *state = [NSString stringWithContentsOfFile:pointerState encoding:NSUTF8StringEncoding error:NULL];
+    unsigned serial, pressed;
+    double x, y;
+    BOOL changed = state && sscanf(state.UTF8String, "%u %lf %lf %u", &serial, &x, &y, &pressed) == 4 &&
+        serial != pointerSerial;
+    if (changed) {
+        pointerSerial = serial;
+        pointer = NSMakePoint(x, y);
+        buttons = pressed;
+    }
+    static BOOL seeding;
+    if (!seeding && [NSFileManager.defaultManager fileExistsAtPath:seedForm]) {
+        assert(firstWeb);
+        seeding = YES;
+        NavigateToForm(firstWeb);
+    }
+    [super tick];
+    if (changed) {
+        char event[64];
+        snprintf(event, sizeof(event), "pointer %u\n", serial);
+        Trace(event);
+    }
+}
+
 - (void)applySample:(Geometry)geometry checkedPanel:(BOOL)checkedPanel lostPin:(BOOL)lostPin
     generation:(NSUInteger)generation started:(NSTimeInterval)started {
     BOOL checkInput = checkedPanel && [NSFileManager.defaultManager fileExistsAtPath:holdInput];
     NSString *gate = checkInput ? holdInput : holdProof;
     if (checkedPanel && [NSFileManager.defaultManager fileExistsAtPath:gate]) {
-        // The PTY already accepted show. Queue a dismissal *after* staging
-        // and after any tick that drained input to request this proof.
+        // This proof is already in flight. Give the test a chance to queue
+        // PTY dismissal or a real watcher revocation before it can reveal.
         Trace(checkInput ? "awaiting-input-dismissal\n" : "awaiting-dismissal-burst\n");
         NSTimeInterval deadline = LeaseNow() + 3;
         while ([NSFileManager.defaultManager fileExistsAtPath:gate]) {
@@ -292,6 +368,15 @@ static void FixtureProven(MiloPreviewPanel *panel, SEL selector, BOOL proven) {
     if (movedPointer) pointer = NSMakePoint(-100000, -100000);
     [super applySample:geometry checkedPanel:checkedPanel lostPin:lostPin generation:generation started:started];
     if (movedPointer) pointer = oldPointer;
+    static NSRect projected;
+    if (_candidate.windowID && !NSEqualRects(projected, _candidateFrame)) {
+        projected = _candidateFrame;
+        CGFloat divider = CGRectGetMinX(_candidate.window) + CGRectGetWidth(_candidate.window) * _lease.tile.origin.x;
+        char event[128];
+        snprintf(event, sizeof(event), "projected %.3f %.3f %.3f %.3f %.3f\n", NSMinX(projected), NSMinY(projected),
+            NSWidth(projected), NSHeight(projected), divider);
+        Trace(event);
+    }
 }
 @end
 
@@ -325,6 +410,8 @@ int main(int argc, const char **argv) {
         missCenter = [root stringByAppendingPathComponent:@"miss-center"];
         rexOverlay = [root stringByAppendingPathComponent:@"rex-overlay"];
         leavePointer = [root stringByAppendingPathComponent:@"leave-pointer"];
+        pointerState = [root stringByAppendingPathComponent:@"pointer-state"];
+        seedForm = [root stringByAppendingPathComponent:@"seed-form"];
         trace = open([root stringByAppendingPathComponent:@"native.log"].fileSystemRepresentation,
             O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
         assert(trace >= 0);
