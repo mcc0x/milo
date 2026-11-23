@@ -75,9 +75,14 @@ impl Preview {
             self.position().map(|position| matches.translate(position, &self.doc, &doc))
         };
         self.marks.update(&matches, &self.doc, &doc, now);
+        let was_trimmed = self.doc.trimmed || self.layout.trimmed;
         self.doc = doc;
         if self.layout.width != 0 {
             self.layout.reflow(&self.doc, self.layout.width);
+            if let Some(anchor) = &mut self.anchor {
+                // Only carry the notice across a save if both previews have one.
+                anchor.limit &= was_trimmed && (self.doc.trimmed || self.layout.trimmed);
+            }
             self.place();
         }
     }
@@ -1348,6 +1353,50 @@ mod tests {
             preview.draw(&mut narrow, 2);
             assert!(narrow.text()[1].starts_with(expected), "{edited}: {:?}", narrow.text());
         }
+    }
+
+    #[test]
+    fn a_save_anchors_the_passage_revealed_by_widening_past_the_row_cap() {
+        let paragraph = "x".repeat(MAX_ROWS - 1) + "M" + &"y".repeat(200);
+        let mut entries = lines(&[&paragraph]);
+        let mut preview = Preview::new(&entries);
+        let mut narrow = Screen::sized(1, 2);
+        preview.draw(&mut narrow, 1);
+        assert!(preview.scroll(isize::MAX));
+
+        let mut wide = Screen::sized(65, 2);
+        preview.draw(&mut wide, 1);
+        assert!(wide.text()[1].contains("xM"));
+        let extra = 2..=u32::try_from(MAX_LINES + 1).unwrap();
+        entries.extend(extra.map(|line| Line::new(LineKind::Same, line, "# More")));
+        preview.replace(&entries);
+        wide.clear();
+        preview.draw(&mut wide, 1);
+        assert!(wide.text()[1].contains("xM"));
+    }
+
+    #[test]
+    fn removing_the_trim_notice_anchors_later_appends_to_the_surviving_passage() {
+        let mut entries = lines(&["# First", "# Second", "# Third"]);
+        let extra = 4..=u32::try_from(MAX_LINES + 1).unwrap();
+        entries.extend(extra.map(|line| Line::new(LineKind::Same, line, "# More")));
+        let mut preview = Preview::new(&entries);
+        let mut screen = Screen::sized(64, 2);
+        preview.draw(&mut screen, 1);
+        assert!(preview.scroll(isize::MAX)); // End, not following.
+        screen.clear();
+        preview.draw(&mut screen, 1);
+        assert!(screen.text()[1].starts_with(TRIMMED));
+
+        preview.replace(&entries[..3]);
+        screen.clear();
+        preview.draw(&mut screen, 1);
+        assert!(screen.text()[1].starts_with("Third"));
+
+        preview.replace(&entries);
+        screen.clear();
+        preview.draw(&mut screen, 1);
+        assert!(screen.text()[1].starts_with("Third"));
     }
 
     #[test]
