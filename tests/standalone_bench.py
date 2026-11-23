@@ -25,7 +25,7 @@ def sample(binary, project):
                 tty.send(b'\r')
                 times.append(tty.frame(b'reader fixture line') - start)
                 tty.send(b'q')
-                tty.frame(ready)
+                tty.frame(b'file001.txt')
             tty.send(b'q')
             if not tty.await_exit(5) or tty.child.returncode != 0:
                 raise RuntimeError(f'{args} did not exit normally')

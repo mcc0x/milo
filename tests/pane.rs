@@ -1290,6 +1290,9 @@ fn a_late_split_terminal_reply_is_never_typed_into_the_reader() {
     tty.shows("Saved");
     assert_eq!(fs::read_to_string(file).unwrap(), "safe original\n");
     tty.master.write_all(b"\x03").unwrap();
+    tty.shows("e edit");
+    tty.master.write_all(b"q").unwrap();
+    tty.until("\x1b[?1049l");
     assert!(tty.wait_for_exit().success());
 }
 
