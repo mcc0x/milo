@@ -69,7 +69,14 @@ impl Target {
     pub fn current() -> Option<Self> {
         let session = inherited_id("REX_SESSION")?;
         let block = inherited_id("REX_BLOCK")?;
-        inherited_context().then_some(Self { session, block })
+        let known = match term::host() {
+            term::Host::Rex => true,
+            term::Host::Unknown if detached() => {
+                exact_id(&session, "session:").is_some() && exact_block(&block).is_some()
+            }
+            _ => false,
+        };
+        known.then_some(Self { session, block })
     }
 }
 
@@ -294,16 +301,19 @@ fn inherited_id(name: &str) -> Option<OsString> {
     std::env::var_os(name).filter(|id| !id.is_empty())
 }
 
-fn inherited_context() -> bool {
-    matches!(term::host(), term::Host::Rex | term::Host::Unknown)
+fn detached() -> bool {
+    !io::stdin().is_terminal() && !io::stdout().is_terminal()
 }
 
-/// Inherited context may identify a Rex pane. Ignore it under a different
-/// terminal or multiplexer. Detached processes can still name their session.
+/// Interactive panes need Rex's terminal identity as well as inherited IDs.
+/// Detached callers can carry a complete session ID without terminal metadata.
 pub fn inside() -> bool {
-    inherited_id("REX_SESSION").is_some()
-        && inherited_context()
-        && (!io::stdin().is_terminal() && !io::stdout().is_terminal() || inherited_id("REX_BLOCK").is_some())
+    let Some(session) = inherited_id("REX_SESSION") else { return false };
+    match term::host() {
+        term::Host::Rex => inherited_id("REX_BLOCK").is_some() || detached(),
+        term::Host::Unknown if detached() => exact_id(&session, "session:").is_some(),
+        _ => false,
+    }
 }
 
 /// Opens a floating reader in the caller's tab and returns its block ID.

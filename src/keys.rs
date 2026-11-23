@@ -106,8 +106,7 @@ pub struct Input {
     pending: Vec<u8>,
     /// An overlong sequence is ignored through its terminator, not decoded as keys.
     discard: Option<Sequence>,
-    /// The terminal has sent the last answer it was asked for. Until then an
-    /// unfinished control string may be one of its answers, still arriving.
+    /// The terminal's device report arrived, so exit need not drain replies.
     answered: bool,
     paste: Paste,
 }
@@ -176,11 +175,6 @@ impl Input {
         }
     }
 
-    pub fn end_answers(&mut self) {
-        self.answered = true;
-        self.drop_alt_prefix();
-    }
-
     pub fn receive(&mut self, keyboard: &mut File, keys: &mut Vec<Key>) {
         let mut buf = [0u8; READ_SIZE];
         let mut read_input = false;
@@ -218,7 +212,7 @@ impl Input {
     fn feed(&mut self, mut bytes: &[u8], keys: &mut Vec<Key>) {
         if let Some(sequence) = self.discard {
             // Keep at most one ESC across reads so a split string terminator still works.
-            if self.pending.pop().is_some() && bytes.starts_with(b"\\") {
+            if self.pending.pop().is_some() && bytes.first().copied().is_some_and(string_end_after_escape) {
                 self.discard = None;
                 bytes = &bytes[1..];
             } else if let Some((_, end)) = sequence.end(bytes) {
@@ -251,30 +245,15 @@ impl Input {
     }
 
     fn finish(&mut self, keys: &mut Vec<Key>) {
-        if self.discard.is_some() {
-            return;
-        }
-        match Sequence::of(self.pending.get(1..).unwrap_or_default()) {
-            None => {
-                if self.pending == [0x1b] {
-                    keys.push(Key::Esc);
-                }
-                self.pending.clear();
+        if self.discard.is_none() && Sequence::of(self.pending.get(1..).unwrap_or_default()).is_none() {
+            if self.pending == [0x1b] {
+                keys.push(Key::Esc);
             }
-            Some(_) => self.drop_alt_prefix(),
-        }
-    }
-
-    fn drop_alt_prefix(&mut self) {
-        // A bare Alt-] (or similar) sends the same opener as a control
-        // string. Once probing ends, drop the bare key, but keep a partial
-        // payload so a split or malformed reply cannot type commands.
-        if self.answered
-            && self.pending.len() == 2
-            && Sequence::of(&self.pending[1..]).is_some_and(|s| s != Sequence::Csi)
-        {
             self.pending.clear();
         }
+        // Keep an incomplete control string even when input pauses: an OSC
+        // or APC opener is identical to Alt-] or Alt-_. Never replay its
+        // bytes as keys. The next terminator, CAN/SUB or two Escapes ends it.
     }
 }
 
@@ -358,12 +337,18 @@ impl Sequence {
             match byte {
                 0x18 | 0x1a => return Some((i, i + 1)), // CAN or SUB cancel a control string.
                 7 if self == Self::Osc => return Some((i, i + 1)),
-                0x1b if body.get(i + 1) == Some(&b'\\') => return Some((i, i + 2)),
+                0x1b if body.get(i + 1).copied().is_some_and(string_end_after_escape) => return Some((i, i + 2)),
                 _ => {}
             }
         }
         None
     }
+}
+
+fn string_end_after_escape(next: u8) -> bool {
+    // ESC ESC cannot occur in a reply. Consume both as explicit
+    // recovery rather than treating either as the pane's Escape key.
+    matches!(next, b'\\' | 0x1b)
 }
 
 /// Decodes complete keys and returns any partial sequence at the end.
@@ -408,6 +393,7 @@ fn decode<'a>(mut bytes: &'a [u8], paste: &mut Paste, keys: &mut Vec<Key>) -> &'
                             }
                             (Sequence::Csi, fin @ 0x40..=0x7e) => csi(answer, fin),
                             (_, 0x18 | 0x1a) => None,
+                            (_, 0x1b) if body.get(end + 1) == Some(&0x1b) => None,
                             (Sequence::Osc, _) => background_reply(answer).map(Key::Background),
                             (Sequence::Apc, _) if answer.starts_with(b"Gi=31;") => {
                                 Some(Key::Pictures(answer == b"Gi=31;OK"))
@@ -665,47 +651,53 @@ mod tests {
     #[test]
     fn unknown_and_overlong_terminal_strings_do_not_type_commands() {
         assert_eq!(keys(b"\x1bPq\x03\x1b\\k"), [Key::Char('k')]);
-        let mut input = Input::default();
-        let mut keys = Vec::new();
-        input.feed(b"\x1b]", &mut keys);
-        input.feed(&[b'q'; READ_SIZE], &mut keys);
-        input.finish(&mut keys);
-        input.feed(b"q\x03\x1b", &mut keys);
-        input.finish(&mut keys);
-        input.feed(b"\\k", &mut keys);
-        assert_eq!(keys, [Key::Char('k')]);
+        for terminator in [b"\\k", b"\x1bk"] {
+            let mut input = Input::default();
+            let mut keys = Vec::new();
+            input.feed(b"\x1b]", &mut keys);
+            input.feed(&[b'q'; READ_SIZE], &mut keys);
+            input.finish(&mut keys);
+            input.feed(b"q\x03\x1b", &mut keys);
+            input.finish(&mut keys);
+            input.feed(terminator, &mut keys);
+            assert_eq!(keys, [Key::Char('k')]);
+        }
     }
 
     #[test]
-    fn an_alt_key_that_opens_a_control_string_does_not_take_the_keys_after_it() {
+    fn a_control_string_opener_can_be_cancelled_without_replaying_ambiguous_keys() {
         for opener in *b"]P_^X" {
+            let mut input = Input::default();
+            let mut keys = Vec::new();
+            input.feed(&[0x1b, opener, b'q', 0x03], &mut keys);
+            input.finish(&mut keys);
+            input.feed(b"q\x03\x1b", &mut keys);
+            input.finish(&mut keys);
+            assert!(keys.is_empty(), "Alt-{}", char::from(opener));
+            input.feed(b"\x1b\x03", &mut keys);
+            assert_eq!(keys, [Key::Ctrl(b'c')]);
+        }
+        assert_eq!(keys(b"\x1b]ambiguous\x18\x03"), [Key::Ctrl(b'c')]);
+        assert_eq!(keys(b"\x1b_Gambiguous\x1a\x03"), [Key::Ctrl(b'c')]);
+    }
+
+    #[test]
+    fn split_control_string_openers_and_terminators_are_never_replayed_as_keys() {
+        for (opener, reply, expected) in [
+            (b']', b"11;rgb:0/0/f".as_slice(), Key::Background([0, 0, 255])),
+            (b'_', b"Gi=31;q\x03", Key::Pictures(false)),
+        ] {
             let mut input = Input::default();
             let mut keys = Vec::new();
             input.feed(b"\x1b[?62;22c", &mut keys);
             input.feed(&[0x1b, opener], &mut keys);
             input.finish(&mut keys);
-            input.feed(b"q\x03", &mut keys);
-            assert_eq!(keys, [Key::Answered, Key::Char('q'), Key::Ctrl(b'c')], "Alt-{}", char::from(opener));
+            input.feed(reply, &mut keys);
+            input.feed(b"\x1b", &mut keys);
+            input.finish(&mut keys);
+            input.feed(b"\\k", &mut keys);
+            assert_eq!(keys, [Key::Answered, expected, Key::Char('k')]);
         }
-
-        // Before the last answer, a pause inside an answer still does not type its text.
-        let mut input = Input::default();
-        let mut keys = Vec::new();
-        input.feed(b"\x1b]", &mut keys);
-        input.finish(&mut keys);
-        input.feed(b"11;rgb:0/0/f\x1b\\\x1b[?62;22ck", &mut keys);
-        assert_eq!(keys, [Key::Background([0, 0, 255]), Key::Answered, Key::Char('k')]);
-    }
-
-    #[test]
-    fn ending_probe_wait_does_not_release_a_partial_reply_as_keys() {
-        let mut input = Input::default();
-        let mut keys = Vec::new();
-        input.feed(b"\x1b_Gi=31;", &mut keys);
-        input.end_answers();
-        input.finish(&mut keys);
-        input.feed(b"q\x03\x1b\\k", &mut keys);
-        assert_eq!(keys, [Key::Pictures(false), Key::Char('k')]);
     }
 
     #[test]

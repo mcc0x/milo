@@ -8,6 +8,8 @@ In standalone Home, use `↑`/`↓` and `Enter` to choose a pane; the mouse is o
 
 Pasting is distinct from typing only when the terminal supports bracketed paste and forwards its markers. Without it, pasted characters can act as shortcuts. Use the keyboard if your terminal or multiplexer intercepts mouse reports.
 
+If your terminal sends an unfinished reply, or an Alt key produces the same prefix as a reply, Milo drops the ambiguous input rather than typing it. Press `Esc` twice or `Ctrl-X` to end that sequence. Then carry on typing, or press `Ctrl-C` to quit.
+
 ## Moving around
 
 These keys work in the outline tree, history and reader. The reader and help page scroll instead of moving a selection.

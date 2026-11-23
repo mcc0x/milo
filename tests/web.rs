@@ -64,6 +64,7 @@ impl Editor {
             .env("XDG_STATE_HOME", root.join("state"))
             .env("XDG_RUNTIME_DIR", root.join("runtime"))
             .env("REX_CONFIG", root.join("init.lua"))
+            .env("TERM", "xterm-rex")
             .env("REX_SESSION", "session:test")
             .env("REX_BLOCK", "block:shell")
             .stdin(Stdio::null())

@@ -53,19 +53,12 @@ pub(crate) fn host() -> Host {
 
 fn host_with_term(term: &OsStr) -> Host {
     let program = std::env::var_os("TERM_PROGRAM").unwrap_or_default();
-    let host = identify(term, &program);
-    // These variables can outlive the mux. Use them only if the foreground
-    // terminal did not identify itself, not to override a branded Rex pane.
-    if host == Host::Unknown
-        && ["TMUX", "STY"].into_iter().any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
-    {
-        Host::Multiplexer
-    } else {
-        host
-    }
+    let in_mux = term != "xterm-rex"
+        && ["TMUX", "STY"].into_iter().any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
+    identify(term, &program, in_mux)
 }
 
-fn identify(term: &OsStr, program: &OsStr) -> Host {
+fn identify(term: &OsStr, program: &OsStr, in_mux: bool) -> Host {
     let name = term.as_bytes();
     if name == b"tmux"
         || name.starts_with(b"tmux-")
@@ -75,16 +68,27 @@ fn identify(term: &OsStr, program: &OsStr) -> Host {
     {
         return Host::Multiplexer;
     }
+    // A terminal assignment in tmux or screen can hide its usual TERM.
+    // Only a native Rex TERM outweighs an inherited TMUX or STY value.
+    if name == b"xterm-rex" {
+        return Host::Rex;
+    }
+    if in_mux {
+        return Host::Multiplexer;
+    }
     if matches!(name, b"xterm-kitty" | b"xterm-ghostty" | b"ghostty" | b"wezterm" | b"konsole" | b"konsole-256color") {
         return Host::Graphics;
     }
     match program.as_bytes() {
         b"rex" => Host::Rex,
         b"kitty" | b"ghostty" | b"WezTerm" | b"iTerm.app" | b"konsole" | b"WarpTerminal" => Host::Graphics,
-        b"" if name == b"xterm-rex" => Host::Rex,
         b"" => Host::Unknown,
         _ => Host::Other,
     }
+}
+
+fn supports_panes(term: &OsStr) -> bool {
+    !matches!(term.as_bytes(), b"dumb" | b"linux")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -220,10 +224,11 @@ impl Session {
             return Err(io::Error::other("standard input is not a terminal"));
         }
         let term = std::env::var_os("TERM").unwrap_or_default();
-        if term == "dumb" {
-            return Err(io::Error::other(
-                "TERM=dumb does not support panes; use an ANSI terminal, or try milo doctor or milo COMMAND --help",
-            ));
+        if !supports_panes(&term) {
+            return Err(io::Error::other(format!(
+                "TERM={} does not support panes; use an xterm-compatible UTF-8 terminal, or try milo doctor or milo COMMAND --help",
+                term.to_string_lossy()
+            )));
         }
         let output = terminal_output(stdout.as_raw_fd())?;
         let keyboard = File::from(io::stdin().as_fd().try_clone_to_owned()?);
@@ -325,7 +330,6 @@ impl Session {
     fn expire_replies(&mut self) -> bool {
         if self.answers_due.is_some_and(|due| Instant::now() >= due) {
             self.answers_due = None;
-            self.input.end_answers();
             self.keys.push(Key::Answered);
             true
         } else {
@@ -534,10 +538,11 @@ fn terminal_output(fd: RawFd) -> io::Result<File> {
 /// waiting on a stalled terminal. The setup screen carries the actual error.
 pub(crate) fn setup_status(failed: bool) {
     let stdout = io::stdout();
-    if host() == Host::Rex
+    let term = std::env::var_os("TERM").unwrap_or_default();
+    if stdout.is_terminal()
+        && supports_panes(&term)
+        && host_with_term(&term) == Host::Rex
         && crate::rex::inside()
-        && stdout.is_terminal()
-        && !std::env::var_os("TERM").is_some_and(|term| term == "dumb")
         && let Ok(mut out) = terminal_output(stdout.as_raw_fd())
     {
         let record: &[u8] = if failed {
@@ -664,13 +669,14 @@ mod tests {
 
     #[test]
     fn explicit_terminal_identity_beats_stale_rex_branding() {
-        let host = |term, program| identify(OsStr::new(term), OsStr::new(program));
-        assert!(host("tmux-256color", "rex") == Host::Multiplexer);
-        assert!(host("screen", "rex") == Host::Multiplexer);
-        assert!(host("xterm-kitty", "rex") == Host::Graphics);
-        assert!(host("xterm-256color", "Apple_Terminal") == Host::Other);
-        assert!(host("xterm-rex", "") == Host::Rex);
-        assert!(host("xterm-256color", "rex") == Host::Rex);
+        let host = |term, program, in_mux| identify(OsStr::new(term), OsStr::new(program), in_mux);
+        assert!(host("tmux-256color", "rex", false) == Host::Multiplexer);
+        assert!(host("screen", "rex", false) == Host::Multiplexer);
+        assert!(host("xterm-256color", "rex", true) == Host::Multiplexer);
+        assert!(host("xterm-kitty", "rex", false) == Host::Graphics);
+        assert!(host("xterm-256color", "Apple_Terminal", false) == Host::Other);
+        assert!(host("xterm-rex", "", true) == Host::Rex);
+        assert!(host("xterm-256color", "rex", false) == Host::Rex);
     }
 
     #[test]
@@ -682,7 +688,7 @@ mod tests {
                 OsStr::new(colorterm),
                 OsStr::new(no_color),
                 OsStr::new(graphics),
-                identify(term, OsStr::new(program)),
+                identify(term, OsStr::new(program), false),
             )
         };
         let generic = caps("xterm-256color", "", "", "", "");

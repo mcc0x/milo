@@ -25,8 +25,8 @@ def editor(binary, home, delay=None):
            "XDG_STATE_HOME": str(home / "state"), "XDG_RUNTIME_DIR": str(home / "run"),
            "PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
     if delay is not None:
-        env.update(REX_SESSION="session:test", REX_BLOCK="block:shell", REX_CONFIG=str(home / "init.lua"),
-                   REX_STUB_DELAY=delay, PATH=f"{home}/bin:" + env["PATH"])
+        env.update(TERM_PROGRAM="rex", REX_SESSION="session:test", REX_BLOCK="block:shell",
+                   REX_CONFIG=str(home / "init.lua"), REX_STUB_DELAY=delay, PATH=f"{home}/bin:" + env["PATH"])
     with subprocess.Popen([binary, "web", "--no-open", "--port", "0"], cwd=home, env=env,
                           stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True) as child:
         try:

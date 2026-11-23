@@ -54,6 +54,8 @@ impl Project {
             .env_remove("TERM_PROGRAM")
             .env_remove("TMUX")
             .env_remove("STY")
+            .env_remove("COLORTERM")
+            .env_remove("MILO_GRAPHICS")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("REX_SESSION")
             .env_remove("REX_BLOCK");
@@ -336,7 +338,11 @@ esac
     let mut paths = vec![project.0.clone()];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
-    command.env("PATH", std::env::join_paths(paths).unwrap()).env("REX_SESSION", "test").env("REX_BLOCK", "test");
+    command
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .env("TERM_PROGRAM", "rex")
+        .env("REX_SESSION", "test")
+        .env("REX_BLOCK", "test");
     let mut tty = Terminal::run(command.arg("outline"));
     tty.until("page.txt");
     tty.master.write_all(b"\r\r").unwrap();
@@ -799,6 +805,7 @@ fn history_cancels_and_reaps_listings_on_repeated_project_switches() {
     let mut command = first.command(env!("CARGO_BIN_EXE_milo"));
     command
         .args(["history", "--shell", "block:11111111-1111-1111-1111-111111111111"])
+        .env("TERM_PROGRAM", "rex")
         .env("REX_SESSION", "test")
         .env("REX_BLOCK", "block:22222222-2222-2222-2222-222222222222")
         .env_remove("CLOSE_LISTING_STDOUT");
@@ -927,6 +934,7 @@ fn follow_shell_promotion_applies_worktree_preferences_before_a_cwd_update() {
         command
             .args([pane, "--shell", anchor])
             .env("PATH", &path)
+            .env("TERM_PROGRAM", "rex")
             .env("REX_SESSION", "test")
             .env("REX_BLOCK", "block:22222222-2222-2222-2222-222222222222");
         let mut terminal = Terminal::run(&mut command);
@@ -1195,9 +1203,13 @@ fn a_pane_started_without_a_terminal_says_what_works_without_one() {
         assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
         assert_eq!(String::from_utf8(output.stderr).unwrap(), format!("{NEEDS}\n"), "{args:?}");
     }
-    // Inside Rex there is a way to open the pane from a shell that has no terminal.
-    let output =
-        project.command(env!("CARGO_BIN_EXE_milo")).env("REX_SESSION", "test").arg("outline").output().unwrap();
+    // A detached caller can carry a real Rex session ID without terminal metadata.
+    let output = project
+        .command(env!("CARGO_BIN_EXE_milo"))
+        .env("REX_SESSION", "session:00000000-0000-0000-0000-000000000001")
+        .arg("outline")
+        .output()
+        .unwrap();
     let in_rex = format!("{NEEDS}, and rex run -s \"$REX_SESSION\" -- milo COMMAND opens a pane in a Rex tab\n");
     assert_eq!((output.status.code(), String::from_utf8(output.stderr).unwrap()), (Some(1), in_rex));
     // A mistake in the command is still reported as that mistake.
@@ -1206,44 +1218,79 @@ fn a_pane_started_without_a_terminal_says_what_works_without_one() {
 }
 
 #[test]
-fn dumb_terminal_is_refused_before_entering_screen_modes() {
+fn unsupported_terminals_are_refused_before_entering_screen_modes() {
     let project = Project::new();
-    let mut tty = Terminal::run(project.standalone().env("TERM", "dumb").arg("outline"));
-    tty.until("TERM=dumb");
-    assert_eq!(tty.wait_for_exit().code(), Some(1));
-    assert!(!tty.bytes.contains(&0x1b));
-    assert!(tty.restored());
+    for term in ["dumb", "linux"] {
+        let mut tty = Terminal::run(project.standalone().env("TERM", term).arg("outline"));
+        tty.until(&format!("TERM={term}"));
+        assert_eq!(tty.wait_for_exit().code(), Some(1));
+        assert!(!tty.bytes.contains(&0x1b));
+        assert!(tty.restored());
+        let help = project.standalone().env("TERM", term).args(["outline", "--help"]).output().unwrap();
+        assert!(help.status.success() && help.stdout.starts_with(b"Usage: milo outline"));
+    }
 }
 
 #[test]
-fn a_nested_terminal_uses_plain_icons_and_opens_a_file_in_place_without_colour() {
+fn a_stale_rex_context_does_not_change_an_interactive_standalone_terminal() {
     let project = Project::new();
     fs::write(project.0.join("project/page.txt"), "a standalone terminal\n").unwrap();
-    let mut command = project.standalone();
-    command
-        .env("TERM", "tmux-256color")
-        .env("TERM_PROGRAM", "rex")
-        .env("REX_SESSION", "session:00000000-0000-0000-0000-000000000001")
-        .env("REX_BLOCK", "block:00000000-0000-0000-0000-000000000002")
-        .env("REX_SERVER", project.0.join("absent.sock"))
-        .env("NO_COLOR", "1");
-    let mut tty = Terminal::run(command.arg("outline"));
-    tty.shows("page.txt");
-    assert!(tty.output().contains('•'));
-    tty.master.write_all(b"\r").unwrap();
-    tty.shows("a standalone terminal");
-    tty.master.write_all(b"qq").unwrap();
-    tty.until("\x1b[?1049l");
-    assert!(tty.wait_for_exit().success());
-    let output = tty.output();
-    assert!(!output.contains("\x1b_G"));
-    for sgr in output.split("\x1b[") {
-        if let Some((parameters, _)) = sgr.split_once('m')
-            && parameters.bytes().all(|byte| byte.is_ascii_digit() || byte == b';')
-        {
-            assert!(parameters.split(';').all(|p| matches!(p, "0" | "1" | "2" | "3" | "4" | "7" | "9")), "{sgr:?}");
+    for (term, program, mux) in [
+        ("tmux-256color", Some("rex"), None),
+        ("xterm-256color", Some("rex"), Some("STY")),
+        ("xterm-256color", Some("rex"), Some("TMUX")),
+        ("xterm-256color", None, None),
+    ] {
+        let mut command = project.standalone();
+        command
+            .env("TERM", term)
+            .env("REX_SESSION", "session:00000000-0000-0000-0000-000000000001")
+            .env("REX_BLOCK", "block:00000000-0000-0000-0000-000000000002")
+            .env("REX_SERVER", project.0.join("absent.sock"))
+            .env("NO_COLOR", "1");
+        if let Some(program) = program {
+            command.env("TERM_PROGRAM", program);
+        }
+        if let Some(mux) = mux {
+            command.env(mux, "test-marker");
+        }
+        let mut tty = Terminal::run(command.arg("outline"));
+        tty.shows("page.txt");
+        assert!(tty.output().contains('•'));
+        tty.master.write_all(b"\r").unwrap();
+        tty.shows("a standalone terminal");
+        tty.master.write_all(b"qq").unwrap();
+        tty.until("\x1b[?1049l");
+        assert!(tty.wait_for_exit().success());
+        let output = tty.output();
+        assert!(!output.contains("\x1b_G"));
+        for sgr in output.split("\x1b[") {
+            if let Some((parameters, _)) = sgr.split_once('m')
+                && parameters.bytes().all(|byte| byte.is_ascii_digit() || byte == b';')
+            {
+                assert!(parameters.split(';').all(|p| matches!(p, "0" | "1" | "2" | "3" | "4" | "7" | "9")), "{sgr:?}");
+            }
         }
     }
+}
+
+#[test]
+fn a_late_split_terminal_reply_is_never_typed_into_the_reader() {
+    let project = Project::new();
+    let file = project.0.join("project/page.txt");
+    fs::write(&file, "original\n").unwrap();
+    let mut tty = Terminal::run(project.standalone().args(["view", "page.txt", "--edit"]));
+    tty.shows("^S save");
+    tty.master.write_all(b"\x1b_").unwrap();
+    // Leave the reply opener pending through both the sequence and probe waits.
+    std::thread::sleep(Duration::from_millis(350));
+    tty.master.write_all(b"Gi=31;q\x03\x1b").unwrap();
+    std::thread::sleep(Duration::from_millis(40));
+    tty.master.write_all(b"\\safe \x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read_to_string(file).unwrap(), "safe original\n");
+    tty.master.write_all(b"\x03").unwrap();
+    assert!(tty.wait_for_exit().success());
 }
 
 #[test]
@@ -1946,6 +1993,7 @@ fn the_outline_adds_a_tab_to_its_floating_reader_and_ctrl_c_there_asks_about_a_d
         let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
         command
             .env("PATH", std::env::join_paths(&paths).unwrap())
+            .env("TERM_PROGRAM", "rex")
             .env("REX_SESSION", "test")
             .env("REX_BLOCK", block)
             .args(args);
@@ -2009,7 +2057,7 @@ fn a_reader_ended_from_outside_says_which_tabs_drafts_it_kept() {
     }
     let block = "block:11111111-1111-1111-1111-111111111111";
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
-    command.env("REX_SESSION", "test").env("REX_BLOCK", block);
+    command.env("TERM_PROGRAM", "rex").env("REX_SESSION", "test").env("REX_BLOCK", block);
     let mut tty = Terminal::run(command.args(["view", "a.txt", "--edit"]));
     tty.shows("^S save");
     tty.master.write_all(b"one ").unwrap();

@@ -94,7 +94,7 @@ class Project:
         self.state = root / "state"
         self.env = {"HOME": str(root / "home"), "XDG_STATE_HOME": str(self.state),
                     "XDG_CONFIG_HOME": str(root / "config"), "PATH": os.defpath,
-                    "TERM": "xterm-256color", "LC_ALL": "C",
+                    "TERM": "xterm-256color", "TERM_PROGRAM": "rex", "LC_ALL": "C",
                     "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
                     "REX_SESSION": "synthetic-reader-profile", "REX_BLOCK": "synthetic-reader-profile"}
         self.git_bin = shutil.which("git", path=self.env["PATH"])
