@@ -289,7 +289,7 @@ local function cancel_staged(host, id)
   end
 end
 
-local function checked_stage(host, direction, id, pid, cli_pid)
+local function checked_stage(host, direction, id, pid, cli_pid, label)
   local before = direction[2] == "after" and a.main or id
   local after = direction[2] == "after" and id or a.main
   local view = current_view()
@@ -299,7 +299,7 @@ local function checked_stage(host, direction, id, pid, cli_pid)
   local block, place, layer = locate(view, id)
   if not (working_pair(host, main, window, tiled) and origin == window and caller_layer.kind == "tiled"
     and local_terminal(caller, host) and caller.owner == a.owner and not window.zoomed_block_id
-    and place == window and layer == tiled and local_terminal(block, host) and block.label == staging_label
+    and place == window and layer == tiled and local_terminal(block, host) and block.label == label
     and has_split(tiled.layout, direction[1], before, after)) then return end
   -- The kernel socket peer must be the same child attached to this exact
   -- terminal. A PID inferred from focus or claimed by the child is not proof.
@@ -317,10 +317,11 @@ local function startup(host, cli_pid)
     return "ok"
   end
   local direction = directions[a.placement]
-  if not direction or not valid_pid(a.anchor_pid) or not checked_stage(host, direction, id, a.anchor_pid, cli_pid) then
+  local label = a.mode == "published" and preview_label or staging_label
+  if not direction or not valid_pid(a.anchor_pid) or not checked_stage(host, direction, id, a.anchor_pid, cli_pid, label) then
     return "changed"
   end
-  if a.mode == "authorize" then return "ok" end
+  if a.mode ~= "publish" then return "ok" end
   return rex.session.set_block_label{ session_id = a.session, block_id = id, label = preview_label }
     and "ok" or "changed"
 end
@@ -362,7 +363,7 @@ local function open(host, view, caller, window, layer, owner_pid)
     direction = direction[1], side = direction[2], focus = false, layout = layout }
   local id = made and made.block_ids and #made.block_ids == 1 and made.block_ids[1]
   if not exact(id, "block:") then return "placement" end
-  if checked_stage(host, direction, id) then return id end
+  if checked_stage(host, direction, id, nil, nil, staging_label) then return id end
   cancel_staged(host, id)
   return "changed"
 end
@@ -445,7 +446,7 @@ if a.mode == "focus" then
 elseif a.mode == "identify" or a.mode == "open" then
   print(one_shot(local_host()))
   return
-elseif a.mode == "authorize" or a.mode == "publish" or a.mode == "cancel" then
+elseif a.mode == "authorize" or a.mode == "publish" or a.mode == "published" or a.mode == "cancel" then
   print(startup(local_host()))
   return
 elseif a.mode ~= "watch" then

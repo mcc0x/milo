@@ -5,6 +5,7 @@ use std::os::fd::RawFd;
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use crate::json::Value;
 use crate::preferences::{Preferences, PreviewPlacement};
@@ -13,6 +14,7 @@ use crate::preview::{Anchor, StartupSocket};
 use super::{CALL_WAIT, Target, exact_block, exact_id, json, program, scripted};
 
 const SCRIPT: &str = include_str!("preview.lua");
+const PUBLICATION_WAIT: Duration = Duration::from_secs(5);
 
 struct Connection {
     target: Target,
@@ -71,13 +73,35 @@ impl Connection {
     }
 
     fn request(&self, mode: &str, extra: &str) -> Result<String, String> {
-        scripted(self.command().args(["--args", "-"]), &self.args(mode, extra), CALL_WAIT)
+        self.request_within(mode, extra, CALL_WAIT)
+    }
+
+    fn request_within(&self, mode: &str, extra: &str, wait: Duration) -> Result<String, String> {
+        scripted(self.command().args(["--args", "-"]), &self.args(mode, extra), wait)
             .ok_or_else(|| "couldn't reach the terminal's local Rex server".into())
     }
 
     fn call(&self, mode: &str, extra: &str) -> Result<(), String> {
-        let reply = self.request(mode, extra)?;
-        if reply == "ok" { Ok(()) } else { Err(problem(&reply).into()) }
+        parse_status(self.request(mode, extra)?)
+    }
+
+    fn publish(&self, extra: &str) -> Result<(), String> {
+        publish_with_readback(|mode| self.request_within(mode, extra, PUBLICATION_WAIT))
+    }
+}
+
+fn parse_status(reply: String) -> Result<(), String> {
+    if reply == "ok" { Ok(()) } else { Err(problem(&reply).into()) }
+}
+
+fn publish_with_readback(mut request: impl FnMut(&str) -> Result<String, String>) -> Result<(), String> {
+    let published = request("publish").and_then(parse_status);
+    // A lost reply can follow a successful label change. Don't make another
+    // mutation: read back the exact, still-authenticated placement once.
+    if published.is_err() && request("published").and_then(parse_status).is_ok() {
+        Ok(())
+    } else {
+        published
     }
 }
 
@@ -210,9 +234,11 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
     let tile = exact_block(OsStr::new(&launched)).ok_or_else(|| problem(&launched).to_owned())?;
     let staged = format!(r#","tile":{},"placement":{}{anchor}"#, json(tile), json(placement.value()));
     let approve = |pid| format!(r#"{staged},"anchor_pid":{pid}"#);
-    let result = startup
-        .start(url, |pid| connection.call("authorize", &approve(pid)))
-        .and_then(|pid| connection.call("publish", &approve(pid)));
+    let result = startup.start(
+        url,
+        |pid| connection.call("authorize", &approve(pid)),
+        |pid| connection.publish(&approve(pid)),
+    );
     if let Err(error) = result {
         let _ = connection.call("cancel", &staged);
         return Err(error);
@@ -242,9 +268,31 @@ pub(crate) fn return_preview_focus(anchor: Anchor<'_>) -> Result<(), String> {
 mod tests {
     use std::path::Path;
 
-    use super::{resolve_placement, socket_path};
+    use super::{publish_with_readback, resolve_placement, socket_path};
     use crate::fixture::Fixture;
     use crate::preferences::{PreviewPlacement, layer_file};
+
+    #[test]
+    fn a_lost_publication_reply_requires_one_readback_and_never_republishes() {
+        for (publish, verified) in [(Ok("ok"), None), (Err("reply lost"), Some("ok")), (Err("reply lost"), Some("changed"))] {
+            let mut calls = Vec::new();
+            let result = publish_with_readback(|mode| {
+                calls.push(mode.to_owned());
+                match mode {
+                    "publish" => publish.map(str::to_owned).map_err(str::to_owned),
+                    "published" => Ok(verified.expect("readback only after a lost reply").into()),
+                    _ => unreachable!(),
+                }
+            });
+            if let Some(verified) = verified {
+                assert_eq!(calls, ["publish", "published"]);
+                assert_eq!(result, if verified == "ok" { Ok(()) } else { Err("reply lost".into()) });
+            } else {
+                assert_eq!(calls, ["publish"]);
+                assert_eq!(result, Ok(()));
+            }
+        }
+    }
 
     #[test]
     fn placement_uses_the_working_checkout_and_never_persists_the_override() {

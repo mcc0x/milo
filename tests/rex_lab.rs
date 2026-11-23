@@ -1012,6 +1012,13 @@ fn preview_layout_and_observer() {
                      return split(args)\n\
                  end\n\
              end\n\
+             if rex.args.drop_publish_reply then\n\
+                 assert(rex.args.mode == 'publish')\n\
+                 print = function(reply)\n\
+                     assert(reply == 'ok')\n\
+                     error('simulated lost Rex publish reply')\n\
+                 end\n\
+             end\n\
              dofile('{script}')\n"
         ),
     )
@@ -1023,7 +1030,7 @@ fn preview_layout_and_observer() {
             "read -r target < \"$1\"\n\
              payload=$(cat \"$1.json\")\n\
              payload=${{payload/PID_TOKEN/$$}}\n\
-             '{root}/bin/rex' do -s \"$REX_SESSION\" -b \"$target\" '{open_script}' --args \"$payload\" > \"$1.reply\"\n\
+             '{root}/bin/rex' do -s \"$REX_SESSION\" -b \"$target\" '{open_script}' --args \"$payload\" > \"$1.reply\" 2> \"$1.errors\"\n\
              mv \"$1.reply\" \"$1.done\"\n"
         ),
     )
@@ -1311,7 +1318,25 @@ fn preview_layout_and_observer() {
         let child = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
         fs::remove_file(&pid_file).unwrap();
         assert_eq!(stage("authorize", caller, block, placement, child).trim(), "ok");
-        assert_eq!(stage("publish", caller, block, placement, child).trim(), "ok");
+        if placement == "right" {
+            let extra = format!(
+                r#"{anchor_scope},"tile":"{block}","placement":"{placement}","anchor_pid":{child},"drop_publish_reply":true"#,
+            );
+            assert!(request("publish", caller, caller, &extra).trim().is_empty());
+            let errors = fs::read_to_string(request_file(&lab, caller).with_extension("errors")).unwrap();
+            assert!(errors.contains("simulated lost Rex publish reply"), "{errors}");
+            assert_eq!(lab.view().tab(&tab).pane("milo:preview").block, block);
+            assert_eq!(stage("published", caller, block, placement, child).trim(), "ok");
+            assert_eq!(stage("published", caller, block, placement, viewer_pid).trim(), "changed");
+            assert_eq!(stage("published", caller, block, "left", child).trim(), "changed");
+            lab.rex(&["focus", "-s", &session, &second_tab]);
+            assert_eq!(stage("published", caller, block, placement, child).trim(), "changed");
+            lab.rex(&["focus", "-s", &session, &tab]);
+            assert_eq!(stage("cancel", caller, block, placement, child).trim(), "ok");
+            assert_eq!(lab.view().tab(&tab).pane("milo:preview").block, block);
+        } else {
+            assert_eq!(stage("publish", caller, block, placement, child).trim(), "ok");
+        }
         blank(block);
         check_focus(caller);
         let found = scope(&format!(

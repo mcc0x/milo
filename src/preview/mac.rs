@@ -242,8 +242,11 @@ impl StartupSocket {
     }
 
     pub(crate) fn start(
-        mut self, url: &str, authorize: impl FnOnce(u32) -> Result<(), String>,
-    ) -> Result<u32, String> {
+        mut self,
+        url: &str,
+        authorize: impl FnOnce(u32) -> Result<(), String>,
+        publish: impl FnOnce(u32) -> Result<(), String>,
+    ) -> Result<(), String> {
         let listener = self.listener.take().expect("startup listener was initialized");
         let mut fds = [libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
         let mut peer = if crate::term::wait_ready(&mut fds, 3_000) > 0 {
@@ -262,7 +265,11 @@ impl StartupSocket {
             .and_then(|()| peer.read_exact(&mut reply))
             .map_err(|_| "the quiet preview didn't initialize; check the Rex window and run preview again")?;
         StartupStatus::from_reply(reply[0])?;
-        Ok(pid)
+        // Keep the peer on its startup lease until Rex confirms publication.
+        // An ambiguous failure drops the socket, so even a late label change
+        // cannot leave behind a running helper or observer.
+        publish(pid)?;
+        peer.write_all(b"P").map_err(|_| "the preview terminal closed during publication".into())
     }
 }
 
@@ -347,7 +354,11 @@ pub(crate) fn anchor(startup: &Path, anchor: Anchor<'_>) -> Result<(), String> {
         }
     };
     let (mut helper, mut watcher, reply) = processes;
-    if peer.write_all(&[StartupStatus::Ready as u8]).is_err() {
+    let mut published = [0];
+    if peer.write_all(&[StartupStatus::Ready as u8]).is_err()
+        || peer.read_exact(&mut published).is_err()
+        || published != *b"P"
+    {
         let _ = helper.kill();
         let _ = watcher.kill();
         let _ = helper.wait();
@@ -509,11 +520,17 @@ mod tests {
                 assert_eq!(&buf[..size], url.as_bytes());
                 peer.write_all(&[StartupStatus::ObserverScope as u8]).unwrap();
             });
-            let error = socket.start(url, |pid| {
-                assert_eq!(pid, std::process::id());
-                assert!(!path.exists(), "an accepted socket must not remain discoverable");
-                Ok(())
-            }).unwrap_err();
+            let error = socket
+                .start(
+                    url,
+                    |pid| {
+                        assert_eq!(pid, std::process::id());
+                        assert!(!path.exists(), "an accepted socket must not remain discoverable");
+                        Ok(())
+                    },
+                    |_| panic!("a failed helper cannot be published"),
+                )
+                .unwrap_err();
             assert!(error.contains("local working terminal") && !error.contains(url));
             child.join().unwrap();
         });
@@ -530,9 +547,42 @@ mod tests {
                 peer.set_read_timeout(Some(STARTUP_WAIT)).unwrap();
                 assert_eq!(peer.read(&mut [0]).unwrap(), 0);
             });
-            assert_eq!(socket.start("http://localhost/a", |_| Err("wrong terminal".into())).unwrap_err(), "wrong terminal");
+            assert_eq!(
+                socket.start("http://localhost/a", |_| Err("wrong terminal".into()), |_| unreachable!()).unwrap_err(),
+                "wrong terminal"
+            );
             peer.join().unwrap();
         });
+    }
+
+    #[test]
+    fn readiness_keeps_the_peer_until_publication_is_confirmed() {
+        for published in [true, false] {
+            let socket = StartupSocket::new().unwrap();
+            let path = PathBuf::from(socket.path());
+            std::thread::scope(|scope| {
+                let peer = scope.spawn(|| {
+                    let mut peer = UnixStream::connect(&path).unwrap();
+                    configure_peer(&peer).unwrap();
+                    read_address(&mut peer, &mut [0; super::super::URL_MAX]).unwrap();
+                    peer.write_all(&[StartupStatus::Ready as u8]).unwrap();
+                    let mut confirmation = [0];
+                    if published {
+                        peer.read_exact(&mut confirmation).unwrap();
+                        assert_eq!(confirmation, *b"P");
+                    } else {
+                        assert_eq!(peer.read(&mut confirmation).unwrap(), 0);
+                    }
+                });
+                let result = socket.start(
+                    "http://localhost/a",
+                    |_| Ok(()),
+                    |_| if published { Ok(()) } else { Err("publication unconfirmed".into()) },
+                );
+                assert_eq!(result.is_ok(), published);
+                peer.join().unwrap();
+            });
+        }
     }
 
     #[test]
