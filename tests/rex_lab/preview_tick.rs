@@ -338,6 +338,15 @@ fn preview_confirmation_uses_rex_pty() {
         tile.count("not shown: post-order: ordered helper panel missing from Quartz") == 1
     });
     assert_eq!(tile.event("quartz-panel-absent"), 3, "only one missing snapshot may be retried");
+    let leave = lab.root.join("leave-pointer");
+    fs::write(&leave, "").unwrap();
+    tile.samples(4);
+    tile.show();
+    tile.wait("a missing Quartz row masked pointer departure", || {
+        tile.count("not shown: keep the pointer inside the preview tile") == 1
+    });
+    assert_eq!(tile.event("quartz-panel-absent"), 4);
+    fs::remove_file(leave).unwrap();
     fs::remove_file(absent).unwrap();
     tile.samples(4);
     let miss = lab.root.join("miss-center");

@@ -115,7 +115,7 @@ static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned
     Geometry geometry = {0};
     if (!windows) return RejectedGeometry("Quartz window list unavailable");
     NSUInteger match = NSNotFound, panel = NSNotFound;
-    BOOL sawTransparentHelper = NO;
+    BOOL sawTransparentHelper = NO, sawOtherRex = NO;
     int normal = CGWindowLevelForKey(kCGNormalWindowLevelKey);
     for (NSUInteger i = 0; i < windows.count; ++i) {
         NSDictionary *window = windows[i];
@@ -148,7 +148,11 @@ static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned
         if (!WindowAlpha(window, &alpha)) return RejectedGeometry("Rex window opacity unavailable");
         if (alpha == 0 && number != pinned) continue;
         if (alpha == 0) return RejectedGeometry("pinned Rex window transparent");
-        if ((pinned && number != pinned) || match != NSNotFound)
+        if (pinned && number != pinned) {
+            sawOtherRex = YES;
+            continue;
+        }
+        if (match != NSNotFound)
             return RejectedGeometry("additional normal Rex window; one visible Rex window is supported");
         CGRect bounds = WindowBounds(window);
         if (CGRectIsNull(bounds)) return RejectedGeometry("Rex window bounds unavailable");
@@ -156,6 +160,7 @@ static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned
         match = i;
     }
     if (match == NSNotFound) return RejectedGeometry("pinned Rex window not onscreen");
+    if (sawOtherRex) return RejectedGeometry("additional normal Rex window; one visible Rex window is supported");
     if (panel != NSNotFound && panel >= match) return RejectedGeometry("helper panel is behind the pinned Rex window");
     if (normalized && !MiloApproximatePane(geometry.window, *normalized, &geometry.pane))
         return RejectedGeometry("Rex chrome and tile layout do not yield a usable pane");
@@ -668,7 +673,8 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
     [_peekTimer invalidate];
     _peekTimer = nil;
     ++_generation;
-    [self clearGeometry:failure];
+    // Never tell a new command it failed during an earlier panel's order.
+    [self clearGeometry:previous != PeekIdle ? PeekStale : failure];
     if (previous != PeekIdle) {
         // Close the old input epoch before telling the user they can retry.
         if (!resetTTY && [self eligibilityFailure] == PeekOK) ArmPeekTTY(&_peek, _tty);
@@ -926,15 +932,21 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
     if (checkedPanel) _firstOrderedSample = NO;
     if (failure == PeekOK) {
         if (!SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) failure = PeekStale;
-        else if (firstOrdered && geometry.rejection == PanelNotListed &&
-            _panel.visible && !_panel.placementProven && _panel.onActiveSpace &&
-            NSEqualRects(_panel.frame, _candidateFrame) &&
-            CGRectEqualToRect(geometry.window, _candidate.window) && CGRectEqualToRect(geometry.pane, _candidate.pane) &&
-            [self proofFailureAt:started] == PeekOK) {
-            // AppKit can report visible one sample before Quartz lists the
-            // panel. Leave it clear and click-through until the next tick;
-            // do not renew consent, update freshness, reorder, or reveal.
-            return;
+        else if (firstOrdered && geometry.rejection == PanelNotListed) {
+            failure = [self proofFailureAt:started];
+            if (failure == PeekOK) {
+                if (!_panel.visible || _panel.placementProven)
+                    failure = [self stackFailureAt:"post-order" reason:"clear staging panel changed before verification"];
+                else if (!_panel.onActiveSpace)
+                    failure = [self stackFailureAt:"post-order" reason:"helper panel is not on the active Space"];
+                else if (!NSEqualRects(_panel.frame, _candidateFrame) || !CGRectEqualToRect(geometry.window, _candidate.window) ||
+                    !CGRectEqualToRect(geometry.pane, _candidate.pane)) failure = PeekStale;
+                else {
+                    // AppKit can report visible one sample before Quartz lists
+                    // the panel. Stay clear; do not renew, reorder or reveal.
+                    return;
+                }
+            }
         } else if (!geometry.windowID) failure = [self stackFailureAt:checkedPanel ? "post-order" : "pre-order"
             reason:geometry.rejection];
     }

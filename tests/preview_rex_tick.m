@@ -53,6 +53,7 @@ static NSString *delaySamples;
 static NSString *holdProof;
 static NSString *holdInput;
 static NSString *absentPanel, *missCenter, *rexOverlay;
+static NSString *leavePointer;
 static int trace;
 static os_unfair_lock sampleLock = OS_UNFAIR_LOCK_INIT;
 static BOOL staged;
@@ -285,7 +286,12 @@ static void FixtureProven(MiloPreviewPanel *panel, SEL selector, BOOL proven) {
             Trace("denied-input-after-dismissal\n");
         }
     }
+    NSPoint oldPointer = pointer;
+    BOOL movedPointer = checkedPanel && geometry.rejection == PanelNotListed &&
+        [NSFileManager.defaultManager fileExistsAtPath:leavePointer];
+    if (movedPointer) pointer = NSMakePoint(-100000, -100000);
     [super applySample:geometry checkedPanel:checkedPanel lostPin:lostPin generation:generation started:started];
+    if (movedPointer) pointer = oldPointer;
 }
 @end
 
@@ -318,6 +324,7 @@ int main(int argc, const char **argv) {
         absentPanel = [root stringByAppendingPathComponent:@"absent-panel"];
         missCenter = [root stringByAppendingPathComponent:@"miss-center"];
         rexOverlay = [root stringByAppendingPathComponent:@"rex-overlay"];
+        leavePointer = [root stringByAppendingPathComponent:@"leave-pointer"];
         trace = open([root stringByAppendingPathComponent:@"native.log"].fileSystemRepresentation,
             O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
         assert(trace >= 0);
