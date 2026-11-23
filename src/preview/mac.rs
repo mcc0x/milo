@@ -94,7 +94,7 @@ fn matches_build(path: &Path) -> io::Result<bool> {
 
 /// Keep the lock through spawn: two Milo versions must each launch the helper
 /// they built. Publish a fresh inode rather than modifying a running executable.
-fn spawn(first: &str, second: &str, state: Stdio, focus: Option<io::PipeReader>) -> io::Result<Child> {
+fn spawn(args: &[&str], state: Stdio, focus: Option<io::PipeReader>) -> io::Result<Child> {
     let dir = cache()?;
     let lock = fs_ops::open_dir(&dir)?;
     lock.lock()?;
@@ -108,7 +108,7 @@ fn spawn(first: &str, second: &str, state: Stdio, focus: Option<io::PipeReader>)
     }
     // Only fixed protocol records belong on stdout; do not relay page diagnostics to the shell.
     let mut command = Command::new(path);
-    command.args([first, second]).stdin(state).stdout(Stdio::piped()).stderr(Stdio::null());
+    command.args(args).stdin(state).stdout(Stdio::piped()).stderr(Stdio::null());
     if let Some(reader) = focus {
         inherit_focus_reader(&mut command, reader);
     }
@@ -116,7 +116,7 @@ fn spawn(first: &str, second: &str, state: Stdio, focus: Option<io::PipeReader>)
 }
 
 pub(crate) fn pin_window(owner_pid: u32) -> Result<std::num::NonZeroU32, String> {
-    let check = spawn("--pin-window", &owner_pid.to_string(), Stdio::null(), None)
+    let check = spawn(&["--pin-window", &owner_pid.to_string()], Stdio::null(), None)
         .and_then(Child::wait_with_output)
         .map_err(|e| format!("could not run the preview window check: {e}"))?;
     if !check.status.success() {
@@ -179,20 +179,27 @@ fn run_anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
 fn run(url: &str, anchor: Anchor<'_>, watcher: &mut Child) -> Result<(), String> {
     let state = watcher.stdout.take().ok_or("missing preview observer pipe")?;
     let (reader, reply) = focus_pipe().map_err(|_| "could not open the preview focus acknowledgment pipe")?;
-    let helper = spawn(url, &anchor.native_window_id.to_string(), state.into(), Some(reader))
+    let mode = if anchor.confirm { "confirm" } else { "auto" };
+    let helper = spawn(&[url, &anchor.native_window_id.to_string(), mode], state.into(), Some(reader))
         .map_err(|_| "could not launch the local WebKit helper")?;
-    serve_actions(helper, reply, || crate::rex::return_preview_focus(anchor).is_ok())
+    serve_actions(helper, reply, |guarded| {
+        crate::rex::return_preview_focus(Anchor { confirm: anchor.confirm || guarded, ..anchor }).is_ok()
+    })
 }
 
-fn serve_actions(mut helper: Child, mut reply: io::PipeWriter, mut return_focus: impl FnMut() -> bool) -> Result<(), String> {
+fn serve_actions(
+    mut helper: Child,
+    mut reply: io::PipeWriter,
+    mut return_focus: impl FnMut(bool) -> bool,
+) -> Result<(), String> {
     let mut actions = io::BufReader::new(helper.stdout.take().expect("helper stdout is piped"));
     let mut action = String::new();
     loop {
         action.clear();
         match actions.read_line(&mut action) {
             Ok(0) => break,
-            Ok(_) if action == "focus\n" => {
-                if !return_focus() {
+            Ok(_) if matches!(action.as_str(), "focus\n" | "focus-confirm\n") => {
+                if !return_focus(action == "focus-confirm\n") {
                     // Don't raise another window or silently redisplay the panel
                     // when the original terminal no longer accepts focus.
                     let _ = helper.kill();
@@ -235,7 +242,8 @@ mod tests {
         let helper = command.spawn().unwrap();
         drop(command);
         let mut attempts = 0;
-        serve_actions(helper, reply, || {
+        serve_actions(helper, reply, |guarded| {
+            assert!(!guarded);
             attempts += 1;
             let mut fds = [libc::pollfd { fd: monitor.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
             // Simulate a Rex RPC that takes long enough for the child to wait on the pipe.
@@ -249,14 +257,15 @@ mod tests {
     #[test]
     fn rejected_focus_ends_the_panel_without_retrying() {
         let helper = Command::new("/bin/sh")
-            .args(["-c", "printf 'focus\\n'; exec /bin/sleep 30"])
+            .args(["-c", "printf 'focus-confirm\\n'; exec /bin/sleep 30"])
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
         let pid = libc::pid_t::try_from(helper.id()).unwrap();
         let (mut reader, reply) = focus_pipe().unwrap();
         let mut attempts = 0;
-        let error = serve_actions(helper, reply, || {
+        let error = serve_actions(helper, reply, |guarded| {
+            assert!(guarded);
             attempts += 1;
             false
         })
@@ -274,6 +283,6 @@ mod tests {
         let helper = Command::new("/bin/sh").args(["-c", "printf 'focus\\n'"]).stdout(Stdio::piped()).spawn().unwrap();
         let (reader, reply) = focus_pipe().unwrap();
         drop(reader);
-        serve_actions(helper, reply, || true).unwrap();
+        serve_actions(helper, reply, |_| true).unwrap();
     }
 }

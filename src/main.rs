@@ -434,8 +434,8 @@ fn command<'a>(
             Command::Preview { url, placement }
         }
         (Some("preview-anchor"), _) => {
-            let [main, window, owner, owner_pid, native] = rest else {
-                return Err("missing preview terminal, viewer or native window".into());
+            let [main, window, owner, owner_pid, native, mode] = rest else {
+                return Err("missing preview terminal, viewer, native window or presentation mode".into());
             };
             let url = preview::url(option.ok_or(preview::EXPECTED)?)?;
             let main = rex::exact_id(main, "block:").ok_or("invalid preview terminal")?;
@@ -447,7 +447,15 @@ fn command<'a>(
                 .filter(|pid| (2..=2_147_483_647).contains(pid))
                 .ok_or("invalid preview viewer PID")?;
             let native_window_id = native.to_str().and_then(|id| id.parse().ok()).ok_or("invalid native window ID")?;
-            Command::PreviewAnchor { url, anchor: preview::Anchor { main, window, owner, owner_pid, native_window_id } }
+            let confirm = match mode.to_str() {
+                Some("auto") => false,
+                Some("confirm") => true,
+                _ => return Err("invalid preview presentation mode".into()),
+            };
+            Command::PreviewAnchor {
+                url,
+                anchor: preview::Anchor { main, window, owner, owner_pid, native_window_id, confirm },
+            }
         }
         (Some("web"), first_flag) => {
             const EXPECTED: &str = "expected milo web [--host HOST [--project DIR]] [--port PORT] [--no-open]";

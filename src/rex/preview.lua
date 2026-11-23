@@ -3,6 +3,7 @@
 local a = rex.args
 local terminal = "com.superlogical.terminal"
 local preview_label, staging_label = "milo:preview", "milo:preview:starting"
+local confirm_label = "milo:preview:confirm"
 local session = { session_id = a.session }
 local function exact(id, kind)
   if type(id) ~= "string" or id:sub(1, #kind) ~= kind then return false end
@@ -93,16 +94,20 @@ local function local_owner(owner)
     end
   end
   if not pid then return end
-  if elsewhere then return pid, true end
+  local valid = true
   for _, client in ipairs(clients) do
     if client.client_id ~= owner and exact(client.client_id, "client:") and mac_pid(client) == pid
       and client.session_ids ~= nil then
       local here, other = attachments(client.session_ids)
-      if here == nil then return end
-      if other then return pid, true end
+      if here == nil then valid = false
+      elseif other then elsewhere = true end
     end
   end
-  return pid, false
+  return pid, elsewhere, valid
+end
+
+local function published_anchor(block)
+  return block.label == preview_label or block.label == confirm_label
 end
 
 local function process(block)
@@ -309,10 +314,9 @@ local function cancel_staged(host, id)
   end
 end
 
-local function publish(host, id, direction, side)
+local function publish(host, id, direction, side, confirm)
   local before = side == "after" and a.main or id
   local after = side == "after" and id or a.main
-  local result = "changed"
   local view = current_view()
   if view and view.active_window_id == a.window then
     local main, window, tiled = locate(view, a.main)
@@ -322,18 +326,20 @@ local function publish(host, id, direction, side)
       and local_terminal(caller, host) and caller.owner == a.owner and not window.zoomed_block_id
       and place == window and layer == tiled and local_terminal(block, host) and block.label == staging_label
       and has_split(tiled.layout, direction, before, after) then
-      local pid, multiple_sessions = local_owner(a.owner)
-      if pid == a.owner_pid then
-        if multiple_sessions then
-          result = "sessions"
-        elseif rex.session.set_block_label{ session_id = a.session, block_id = id, label = preview_label } then
+      local pid, multiple_sessions, valid = local_owner(a.owner)
+      if valid and pid == a.owner_pid then
+        -- Attaching another session during new_split cannot change the
+        -- child's argv. Publish the guard latch with the label, so there is
+        -- no interval in which that child can emit an automatic show.
+        local label = multiple_sessions and not confirm and confirm_label or preview_label
+        if rex.session.set_block_label{ session_id = a.session, block_id = id, label = label } then
           return "ok"
         end
       end
     end
   end
   cancel_staged(host, id)
-  return result
+  return "changed"
 end
 
 local function open(host, view, caller, window, layer, owner_pid, multiple_sessions)
@@ -343,10 +349,9 @@ local function open(host, view, caller, window, layer, owner_pid, multiple_sessi
   if not main then return cwd end
   if main.owner ~= caller.owner then return "client" end
   if not unchanged(view) then return "tab" end
-  if multiple_sessions then return "sessions" end
   if a.mode == "identify" then
     return rex.json.encode({ main = main.block_id, window = window.window_id, cwd = cwd,
-      owner = caller.owner, owner_pid = owner_pid })
+      owner = caller.owner, owner_pid = owner_pid, confirm = multiple_sessions })
   end
   if window.window_id ~= a.window or main.block_id ~= a.main or cwd ~= a.cwd
     or owner_pid ~= a.owner_pid then return "changed" end
@@ -357,9 +362,10 @@ local function open(host, view, caller, window, layer, owner_pid, multiple_sessi
   end
   local direction = directions[a.placement]
   if not direction then return "placement" end
+  local confirm = a.confirm == true or multiple_sessions
   local layout = { block = { flavor = terminal .. ".shell", label = staging_label, options = {
     command = { a.exe, "preview-anchor", a.url, a.main, a.window, a.owner, tostring(a.owner_pid),
-      string.format("%.0f", native_window_id) },
+      string.format("%.0f", native_window_id), confirm and "confirm" or "auto" },
     shell = "none", cwd = cwd,
     -- Rex also keeps quick successful exits. Milo displays failures itself
     -- for a bounded time; Rex should close the anchor whenever Milo exits.
@@ -372,13 +378,15 @@ local function open(host, view, caller, window, layer, owner_pid, multiple_sessi
   local made = rex.session.new_split{ session_id = a.session, anchor_id = main.block_id,
     direction = direction[1], side = direction[2], focus = false, layout = layout }
   local id = made and made.block_ids and #made.block_ids == 1 and made.block_ids[1]
-  return exact(id, "block:") and publish(host, id, direction[1], direction[2]) or "placement"
+  return exact(id, "block:") and publish(host, id, direction[1], direction[2], confirm) or "placement"
 end
 
-local function focus(host, view, caller, window, cli_pid)
+local function focus(host, view, caller, window, cli_pid, multiple_sessions)
   local main, place, layer = locate(view, a.main)
   if a.main == a.block or place ~= window or not working_pair(host, main, place, layer)
-    or caller.label ~= preview_label or not request_from_milo(cli_pid) or not own_anchor(caller) then return "focus" end
+    or not published_anchor(caller) or not request_from_milo(cli_pid) or not own_anchor(caller) then return "focus" end
+  if (multiple_sessions or a.confirm == true or caller.label == confirm_label)
+    and window.focused_block_id ~= a.block then return "focus" end
   if window.zoomed_block_id and window.zoomed_block_id ~= a.main then return "focus" end
   if not unchanged(view) then return "tab" end
   -- Rex doesn't offer a conditional focus RPC either; the view check above
@@ -395,12 +403,11 @@ local function one_shot(host, cli_pid)
   if not local_terminal(caller, host) then return "remote" end
   if a.mode == "focus" and (layer.kind ~= "tiled" or caller.owner ~= a.owner) then return "focus" end
   if a.mode == "open" and caller.owner ~= a.owner then return "changed" end
-  local owner_pid, multiple_sessions = local_owner(caller.owner)
-  if not owner_pid then return "client" end
+  local owner_pid, multiple_sessions, valid = local_owner(caller.owner)
+  if not valid then return "client" end
   if a.mode == "focus" then
     if owner_pid ~= a.owner_pid then return "focus" end
-    if multiple_sessions then return "sessions" end
-    return focus(host, view, caller, window, cli_pid)
+    return focus(host, view, caller, window, cli_pid, multiple_sessions)
   end
   local belongs, remote = own_caller(caller, cli_pid)
   if not belongs then return remote and "remote" or "caller" end
@@ -426,7 +433,7 @@ local function leaf_rect(node)
   if split == nil and node.block_id == a.block then return node.rect end
 end
 
-local function tile_state(pid, rect)
+local function tile_state(action, pid, rect)
   if type(rect) ~= "table" or rect[5] ~= nil then return end
   local x, y, w, h = rect[1], rect[2], rect[3], rect[4]
   if type(x) ~= "number" or type(y) ~= "number" or type(w) ~= "number" or type(h) ~= "number" then return end
@@ -436,7 +443,9 @@ local function tile_state(pid, rect)
   local left, top = math.floor(x * 1000000 + 0.5), math.floor(y * 1000000 + 0.5)
   local width = math.floor((x + w) * 1000000 + 0.5) - left
   local height = math.floor((y + h) * 1000000 + 0.5) - top
-  if width > 0 and height > 0 then return string.format("show %d tile %d %d %d %d", pid, left, top, width, height) end
+  if width > 0 and height > 0 then
+    return string.format("%s %d tile %d %d %d %d", action, pid, left, top, width, height)
+  end
 end
 
 if a.mode ~= "watch" then
@@ -447,12 +456,24 @@ end
 local host, cli_pid = local_host()
 local last, verified, published, claimed, last_revision, owner_allowed
 local last_poll
+local confirm = a.confirm == true
+local announced_confirm = confirm
 local function write(record)
   io.stdout:write(record, "\n")
   io.stdout:flush()
 end
 local function emit(state)
   state = state or "hide"
+  if confirm and not announced_confirm then
+    announced_confirm = true
+    if state == "hide" then
+      -- An automatic preview can enter guarded mode while ineligible. Tell
+      -- the native helper to conceal and prompt, without granting eligibility.
+      last = state
+      write("guard-hide")
+      return
+    end
+  end
   if last ~= state then
     last = state
     write(state)
@@ -473,22 +494,26 @@ end
 
 local function track_anchor(block)
   if not local_terminal(block, host) or block.block_id ~= a.block
-    or (block.label ~= preview_label and block.label ~= staging_label) then return false end
+    or (not published_anchor(block) and block.label ~= staging_label) then return false end
   if not verified then
     if not own_anchor(block) then return false end
     verified = true
   end
   if block.owner == a.owner then claimed = true end
-  if block.label == preview_label then published = true end
+  if block.label == confirm_label then confirm = true end
+  if published_anchor(block) then published = true end
   return true
 end
 
 local function owner_permitted()
-  local pid, multiple_sessions = local_owner(a.owner)
-  return pid == a.owner_pid and not multiple_sessions
+  local pid, multiple_sessions, valid = local_owner(a.owner)
+  if pid ~= a.owner_pid then return false end
+  if multiple_sessions then confirm = true end
+  return valid
 end
 
 local function refresh(owner_checked)
+  if not owner_checked then owner_allowed = owner_permitted() end
   local view = current_view()
   if not view then return stop(1) end
   last_revision = view.revision
@@ -521,11 +546,10 @@ local function refresh(owner_checked)
   end
   if window.window_id ~= a.window or place ~= window then return stop() end
   if not local_terminal(main, host) or tiled.kind ~= "tiled" or not track_anchor(block) then return stop(1) end
-  if block.label ~= preview_label then return emit() end
+  if not published_anchor(block) or not owner_allowed then return emit() end
   if not visible(view, window, layer, index) or block.owner ~= a.owner or main.owner ~= a.owner then return emit() end
-  if not owner_checked then owner_allowed = owner_permitted() end
-  if not owner_allowed then return emit() end
-  emit(tile_state(a.owner_pid, leaf_rect(layer.layout)))
+  if confirm and window.focused_block_id ~= a.block then return emit() end
+  emit(tile_state(confirm and "guard" or "show", a.owner_pid, leaf_rect(layer.layout)))
 end
 
 local function poll_owner()
@@ -538,9 +562,10 @@ local function poll_owner()
   local now = os.time()
   local delayed = last_poll and (now < last_poll or now - last_poll >= 3)
   last_poll = now
-  if previous == nil or (owner_allowed and (not previous or delayed)) then
+  -- Eligibility in guarded mode must not be renewed from cached focus.
+  if previous == nil or (owner_allowed and (confirm or not previous or delayed)) then
     refresh(true)
-  elseif previous and not owner_allowed then
+  elseif not owner_allowed then
     emit()
   end
   if owner_allowed and last ~= "hide" and last == previous_state then
@@ -596,10 +621,10 @@ rex.after(28, function()
   if not view then return end
   local block, window, layer = locate(view, a.block)
   if not block or window.window_id ~= a.window or layer.kind ~= "tiled"
-    or block.label ~= preview_label or not track_anchor(block) or claimed then return end
+    or not published_anchor(block) or not track_anchor(block) or claimed then return end
   local described = rex.session.describe_block{ session_id = a.session, block_id = a.block }
   block = described and described.block
-  if track_anchor(block) and block.label == preview_label and not claimed then
+  if track_anchor(block) and published_anchor(block) and not claimed then
     write("unclaimed")
     stop(1)
   end

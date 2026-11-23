@@ -1040,8 +1040,34 @@ fn preview_layout_and_observer() {
         peer_out.read_line(&mut reply).unwrap();
         assert!(reply.contains(r#""type":"response""#), "{method}: {reply}");
     };
-    // Another attachment makes the simulated owner's presented session ambiguous.
-    let background = lab.rex(&["new", "also-attached", "-c", root, "--shell=none", "--json", "--", "/bin/sleep", "120"]);
+    let transfer = |block: &str| {
+        let mut other = lab
+            .command("python3")
+            .arg(viewer)
+            .arg(lab.root.join("s.sock"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = other.stdin.take().unwrap();
+        let mut output = BufReader::new(other.stdout.take().unwrap());
+        let mut other_id = String::new();
+        output.read_line(&mut other_id).unwrap();
+        assert!(other_id.starts_with("client:"), "{other_id}");
+        let mut reply = String::new();
+        for (method, payload) in [
+            ("session.attach", format!(r#"{{"session_id":"{session}"}}"#)),
+            ("session.own_block", format!(r#"{{"session_id":"{session}","block_ids":["{block}"]}}"#)),
+        ] {
+            writeln!(input, r#"["{method}",{payload}]"#).unwrap();
+            reply.clear();
+            output.read_line(&mut reply).unwrap();
+            assert!(reply.contains(r#""type":"response""#), "{method}: {reply}");
+        }
+        (other, input, output, other_id.trim().to_owned())
+    };
+    // An attachment outside the current session can change during a preview.
+    let background = lab.rex(&["new", "also-attached", "-c", root, "--shell=none", "--json", "--", "/bin/sleep", "300"]);
     let background = id(&background, "session_id");
     viewer_session("session.attach", &session);
     viewer_session("session.own_block", &session);
@@ -1085,29 +1111,34 @@ fn preview_layout_and_observer() {
     let identify = |origin: &str, target: &str| {
         request("identify", origin, target, r#","exe":"/bin/bash""#)
     };
-    let open = |origin: &str, target: &str, placement: &str, expected: &str, cwd: &str| {
+    let open = |origin: &str, target: &str, placement: &str, expected: &str, cwd: &str, confirm: bool| {
         let extra = format!(
-            r#","exe":"/bin/bash","url":"{url}","placement":"{placement}","main":"{expected}","cwd":"{cwd}"{owner}"#,
+            r#","exe":"/bin/bash","url":"{url}","placement":"{placement}","main":"{expected}","cwd":"{cwd}","confirm":{confirm}{owner}"#,
         );
         request("open", origin, target, &extra)
     };
-    let launch = |caller: &str, placement: &str| {
+    let launch = |caller: &str, placement: &str, confirm: bool| {
         let plan = identify(caller, caller);
         assert_eq!(id(&plan, "main"), main);
         let cwd = id(&plan, "cwd");
         assert_eq!(Path::new(&cwd), nested.canonicalize().unwrap());
         assert_eq!(id(&plan, "owner"), client);
         assert_eq!(id(&plan, "window"), tab);
-        open(caller, caller, placement, &main, &cwd)
+        let reported = plan.split_once(r#""confirm""#).unwrap().1.trim_start();
+        assert!(
+            reported.strip_prefix(':').unwrap().trim_start().starts_with(if confirm { "true" } else { "false" }),
+            "{plan}"
+        );
+        open(caller, caller, placement, &main, &cwd, confirm)
     };
     let close = |block: &str| lab.rex(&["block", "close", "-s", &session, block]);
     assert_eq!(identify(&stale, &stale).trim(), "stale");
     assert_eq!(identify(&usage, &usage).trim(), "shell");
     assert_eq!(identify(&main, &another_shell).trim(), "caller");
     assert_eq!(identify(&another_shell, &main).trim(), "caller");
-    assert_eq!(open(&main, &another_shell, "right", &another_shell, root).trim(), "caller");
-    assert_eq!(open(&another_shell, &main, "right", &main, root).trim(), "caller");
-    assert_eq!(open(&rail, &rail, "right", &main, "/wrong/directory").trim(), "changed");
+    assert_eq!(open(&main, &another_shell, "right", &another_shell, root, false).trim(), "caller");
+    assert_eq!(open(&another_shell, &main, "right", &main, root, false).trim(), "caller");
+    assert_eq!(open(&rail, &rail, "right", &main, "/wrong/directory", false).trim(), "changed");
     lab.rex(&["zoom", "-s", &session, &main, "--on"]);
     assert_eq!(identify(&main, &main).trim(), "zoom");
     lab.rex(&["zoom", "-s", &session, &main, "--off"]);
@@ -1157,14 +1188,9 @@ fn preview_layout_and_observer() {
     };
     let plan = identify(&main, &main);
     let planned_cwd = id(&plan, "cwd");
-    viewer_session("session.attach", &background);
-    assert_eq!(identify(&main, &main).trim(), "sessions");
-    assert_eq!(open(&main, &main, "right", &main, &planned_cwd).trim(), "sessions");
-    assert!(!lab.view().tab(&tab).labels().iter().any(|label| label.starts_with("milo:preview")));
-    viewer_session("session.detach", &background);
     move_block(&main, &second_shell);
     lab.rex(&["focus", "-s", &session, &second_tab]);
-    assert_eq!(open(&main, &main, "right", &main, &planned_cwd).trim(), "changed");
+    assert_eq!(open(&main, &main, "right", &main, &planned_cwd, false).trim(), "changed");
     move_block(&main, &rail);
     lab.rex(&["focus", "-s", &session, &tab]);
     lab.rex(&["focus", "-s", &session, &main]);
@@ -1175,7 +1201,7 @@ fn preview_layout_and_observer() {
     assert!(lab.view().tabs.values().all(|tab| !tab.labels().iter().any(|label| label.starts_with("milo:preview"))));
     let _ = fs::remove_file(&pid_file);
     lab.rex(&["focus", "-s", &session, &tab]);
-    assert_eq!(launch(&rail, "floating").trim(), "placement");
+    assert_eq!(launch(&rail, "floating", false).trim(), "placement");
     assert!(!lab.view().tab(&tab).labels().iter().any(|label| label.starts_with("milo:preview")));
 
     let start_watch = |block: &str, child: u32| {
@@ -1204,9 +1230,9 @@ fn preview_layout_and_observer() {
     ] {
         // A launch from the focused sidebar must not steal keyboard focus either.
         lab.rex(&["focus", "-s", &session, caller]);
-        assert_eq!(launch(caller, placement).trim(), "ok", "{placement}");
+        assert_eq!(launch(caller, placement, false).trim(), "ok", "{placement}");
         check_focus(caller);
-        let literal = format!("\n{url}\n{main}\n{tab}\n{client}\n{viewer_pid}\n{native_window_id}\n");
+        let literal = format!("\n{url}\n{main}\n{tab}\n{client}\n{viewer_pid}\n{native_window_id}\nauto\n");
         assert!(soon(|| lab.read("preview-arguments").ends_with(&literal)));
         let child = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
         fs::remove_file(&pid_file).unwrap();
@@ -1229,33 +1255,12 @@ fn preview_layout_and_observer() {
         } else {
             viewer_session("session.own_block", &session);
         }
-        let mut transferred = None;
-        if placement == "right" {
+        let transferred = if placement == "right" {
             lab.rex(&["focus", "-s", &session, &second_tab]);
-            let mut other = lab
-                .command("python3")
-                .arg(viewer)
-                .arg(lab.root.join("s.sock"))
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn()
-                .unwrap();
-            let mut input = other.stdin.take().unwrap();
-            let mut output = BufReader::new(other.stdout.take().unwrap());
-            let mut reply = String::new();
-            output.read_line(&mut reply).unwrap();
-            assert!(reply.starts_with("client:"), "{reply}");
-            for (method, payload) in [
-                ("session.attach", format!(r#"{{"session_id":"{session}"}}"#)),
-                ("session.own_block", format!(r#"{{"session_id":"{session}","block_ids":["{block}"]}}"#)),
-            ] {
-                writeln!(input, r#"["{method}",{payload}]"#).unwrap();
-                reply.clear();
-                output.read_line(&mut reply).unwrap();
-                assert!(reply.contains(r#""type":"response""#), "{method}: {reply}");
-            }
-            transferred = Some((other, input, output));
-        }
+            Some(transfer(block))
+        } else {
+            None
+        };
 
         if placement == "left" {
             let extra = format!(r#","main":"{main}"{owner}"#);
@@ -1269,7 +1274,7 @@ fn preview_layout_and_observer() {
         let watch = start_watch(block, child);
         let records = || fs::read_to_string(watch.with_extension("watch.log")).unwrap_or_default();
         let cursor = std::cell::Cell::new(0);
-        let visible = std::cell::Cell::new(false);
+        let lease_active = std::cell::Cell::new(false);
         let next_record = |deadline| {
             let index = cursor.get();
             loop {
@@ -1287,11 +1292,11 @@ fn preview_layout_and_observer() {
             loop {
                 let line = next_record(deadline);
                 if line == "renew" {
-                    assert!(visible.get() && Instant::now() < deadline, "{placement}: unexpected or excessive renewals");
+                    assert!(lease_active.get() && Instant::now() < deadline, "{placement}: unexpected or excessive renewals");
                     continue;
                 }
                 assert_eq!(line, state, "{placement}: {}", records());
-                visible.set(state.starts_with("show "));
+                lease_active.set(state.starts_with("show ") || state.starts_with("guard "));
                 break;
             }
         };
@@ -1302,7 +1307,7 @@ fn preview_layout_and_observer() {
         };
         let mut show = show_for(block);
         expect("hide");
-        if let Some((mut other, input, output)) = transferred.take() {
+        if let Some((mut other, input, output, _)) = transferred {
             lab.rex(&["focus", "-s", &session, &tab]);
             std::thread::sleep(Duration::from_millis(250));
             assert_eq!(records(), "hide\n", "preview appeared for a foreign owner before its first show");
@@ -1317,14 +1322,6 @@ fn preview_layout_and_observer() {
         }
         expect(&show);
         if placement == "right" {
-            let revision = || scope("print(assert(rex.session.view{}).revision)");
-            let before = revision();
-            viewer_session("session.attach", &background);
-            expect("hide");
-            assert_eq!(revision(), before, "other-session attachment changed the scoped layout");
-            viewer_session("session.detach", &background);
-            expect(&show);
-            assert_eq!(revision(), before, "other-session detachment changed the scoped layout");
             scope(&format!("assert(rex.session.detach_block{{block_id='{main}'}})"));
             expect("hide");
             move_block(&main, &rail);
@@ -1410,6 +1407,24 @@ fn preview_layout_and_observer() {
         expect("hide");
         lab.rex(&["focus", "-s", &session, &tab]);
         expect(&show);
+        if placement == "right" {
+            let revision = || scope("print(assert(rex.session.view{}).revision)");
+            let before = revision();
+            viewer_session("session.attach", &background);
+            expect("guard-hide");
+            assert_eq!(revision(), before, "other-session attachment changed the scoped layout");
+            lab.rex(&["focus", "-s", &session, block]);
+            let guard = show.replacen("show ", "guard ", 1);
+            expect(&guard);
+            let before = revision();
+            viewer_session("session.detach", &background);
+            assert_eq!(next_record(Instant::now() + PATIENCE), "renew");
+            assert_eq!(revision(), before, "other-session detachment changed the scoped layout");
+            lab.rex(&["focus", "-s", &session, &main]);
+            expect("hide");
+            lab.rex(&["focus", "-s", &session, block]);
+            expect(&guard);
+        }
         let watcher = watch_pid();
         if placement == "left" {
             move_block(block, &second_shell);
@@ -1499,21 +1514,56 @@ fn preview_layout_and_observer() {
     assert!(soon(|| lab.read("preview-quick-exit") == "done"));
     assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview")));
 
-    assert_eq!(launch(&main, "right").trim(), "ok");
-    assert!(soon(|| lab.read("preview-arguments").contains("localhost:4321")));
+    // Like one Mac app, one connection can retain four session attachments.
+    // The anchor stays hidden at launch, then supplies only guarded geometry.
+    for name in ["guarded-a", "guarded-b", "guarded-c"] {
+        let created = lab.rex(&["new", name, "-c", root, "--shell=none", "--json", "--", "/bin/sleep", "300"]);
+        viewer_session("session.attach", &id(&created, "session_id"));
+    }
+    scope(&format!(
+        "for _,c in ipairs(assert(rex.call('client.list',{{kinds={{'app'}}}})).clients) do \
+         if c.client_id=='{client}' then assert(#c.session_ids==4 and c.principal.pid=={viewer_pid}); return end end; \
+         error('missing lab viewer')"
+    ));
+    lab.rex(&["focus", "-s", &session, &main]);
+    assert_eq!(launch(&main, "right", true).trim(), "ok");
+    check_focus(&main);
+    assert!(soon(|| lab.read("preview-arguments").ends_with(&format!("\n{native_window_id}\nconfirm\n"))));
     let anchor_pid = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
     let anchor_block = lab.view().tab(&tab).pane("milo:preview").block.clone();
     viewer_session("session.own_block", &session);
     let owned_watch = start_watch(&anchor_block, anchor_pid);
     let records = || fs::read_to_string(owned_watch.with_extension("watch.log")).unwrap_or_default();
-    let show = show_for(&anchor_block);
-    assert!(soon(|| watch_records(&records()).filter(|line| *line != "renew").eq(["hide", &show])), "{}", records());
+    let expect_states = |expected: &[&str]| {
+        assert!(
+            soon(|| watch_records(&records()).filter(|line| *line != "renew").eq(expected.iter().copied())),
+            "{}",
+            records()
+        );
+    };
+    assert!(soon(|| records() == "hide\n"), "{}", records());
+    let (mut other, input, output, other_id) = transfer(&anchor_block);
+    scope(&format!(
+        "local b=assert(rex.session.describe_block{{block_id='{anchor_block}'}}).block; assert(b.owner=='{other_id}')"
+    ));
+    lab.rex(&["focus", "-s", &session, &anchor_block]);
+    check_focus(&anchor_block);
+    let focus = format!(r#","main":"{main}","confirm":true{owner}"#);
+    assert_eq!(request("focus", &anchor_block, &anchor_block, &focus).trim(), "focus");
+    std::thread::sleep(Duration::from_millis(1250));
+    assert_eq!(records(), "hide\n", "a foreign owner cannot make the focused anchor eligible");
+    viewer_session("session.own_block", &session);
+    drop((input, output));
+    assert!(other.wait().unwrap().success());
+    let guard = show_for(&anchor_block).replacen("show ", "guard ", 1);
+    expect_states(&["hide", &guard]);
+    lab.rex(&["focus", "-s", &session, &second_tab]);
+    expect_states(&["hide", &guard, "hide"]);
+    lab.rex(&["focus", "-s", &session, &anchor_block]);
+    check_focus(&anchor_block);
+    expect_states(&["hide", &guard, "hide", &guard]);
     close(&main);
-    assert!(soon(|| {
-        let log = records();
-        watch_records(&log).filter(|line| *line != "renew").eq(["hide", &show, "hide"])
-            && watch_records(&log).last() == Some("hide")
-    }), "{}", records());
+    expect_states(&["hide", &guard, "hide", &guard, "hide"]);
     assert!(soon(|| fs::read_to_string(owned_watch.with_extension("watch.exit")).is_ok_and(|code| code.trim() == "0")));
     close(&anchor_block);
 }

@@ -88,7 +88,6 @@ fn problem(reply: &str) -> &'static str {
         "floating_caller" => "run preview from the tiled working terminal or Milo sidebar, not a floating pane",
         "caller" => "the running Milo process is not in the specified Rex terminal",
         "client" => "the terminal isn't owned by a connected Rex app on this Mac",
-        "sessions" => "the Mac viewer is attached to more than one session or cannot confirm this session; preview needs one unambiguous local Rex session",
         "shell" => "couldn't identify one interactive local working terminal in this Rex tab",
         "stale" => "the sidebar's working terminal is stale or is not in this Rex tab",
         "remote" => "preview is not available for a remote Rex terminal",
@@ -150,12 +149,13 @@ fn resolve_placement(
 
 fn anchor_args(anchor: Anchor<'_>) -> String {
     format!(
-        r#","main":{},"window":{},"owner":{},"owner_pid":{},"native_window_id":{}"#,
+        r#","main":{},"window":{},"owner":{},"owner_pid":{},"native_window_id":{},"confirm":{}"#,
         json(anchor.main),
         json(anchor.window),
         json(anchor.owner),
         anchor.owner_pid,
         anchor.native_window_id,
+        anchor.confirm,
     )
 }
 
@@ -168,9 +168,9 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
         .filter(|path| Path::new(path).is_absolute())
         .ok_or("Milo needs an absolute UTF-8 executable path")?;
     let reply = connection.request("identify", &format!(r#","exe":{}"#, json(exe)))?;
-    let [main, window, cwd, owner, owner_pid] = Value::parse(reply.as_bytes())
+    let [main, window, cwd, owner, owner_pid, confirm] = Value::parse(reply.as_bytes())
         .ok_or_else(|| problem(&reply).to_owned())?
-        .fields(["main", "window", "cwd", "owner", "owner_pid"]);
+        .fields(["main", "window", "cwd", "owner", "owner_pid", "confirm"]);
     let main = main
         .and_then(|value| value.string(42))
         .filter(|id| exact_block(OsStr::new(id.as_ref())).is_some())
@@ -192,9 +192,10 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
         .and_then(|pid| u32::try_from(pid).ok())
         .filter(|pid| (2..=2_147_483_647).contains(pid))
         .ok_or("Rex did not identify the working terminal's viewer PID")?;
+    let confirm = confirm.and_then(Value::boolean).ok_or("Rex did not identify the preview presentation mode")?;
     let native_window_id = crate::preview::pin_window(owner_pid)?;
     let placement = resolve_placement(Path::new(cwd.as_ref()), override_placement, crate::paths::config_dir);
-    let anchor = anchor_args(Anchor { main: &main, window: &window, owner: &owner, owner_pid, native_window_id });
+    let anchor = anchor_args(Anchor { main: &main, window: &window, owner: &owner, owner_pid, native_window_id, confirm });
     let extra = format!(
         r#","exe":{},"url":{},"placement":{},"cwd":{}{anchor}"#,
         json(exe),

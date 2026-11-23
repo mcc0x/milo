@@ -7,6 +7,7 @@ local session, window, inactive = id("session", 1), id("window", 1), id("window"
 local main, sidebar, preview, other = id("block", 1), id("block", 2), id("block", 3), id("block", 4)
 local app, other_app = id("client", 1), id("client", 2)
 local another_session = id("session", 2)
+local four_sessions = { session, another_session, id("session", 3), id("session", 4) }
 local host = "00000000-0000-0000-0000-000000000001"
 local term = "com.superlogical.terminal"
 local exe, url = "/with spaces/milo", "http://localhost:3400/hello?who=$HOME&next=%2Fhere#section"
@@ -14,6 +15,8 @@ local uid, helper, cli, gui = 501, 20, 30, 40
 local native_window = 4294967295
 local show = "show 40 tile 625000 0 375000 1000000"
 local shown = "hide\n" .. show .. "\n"
+local guard = "guard 40 tile 625000 0 375000 1000000"
+local guarded = "hide\n" .. guard .. "\n"
 local server = "unix:///tmp/rex%20preview.sock"
 local function peer(pid) return { kind = "peer", transport = "unix", uid = uid, pid = pid } end
 local function second_viewer(pid, sessions, platform, state)
@@ -112,6 +115,7 @@ local function fixture(mode, block)
     args = { mode = mode, server = server, uid = uid, pid = helper, session = session, block = block,
       exe = exe, url = url, placement = "right", main = main, window = window, cwd = "/work/project",
       owner = app, owner_pid = gui, native_window_id = native_window },
+    json = { encode = function(plan) f.plan = plan; return "plan" end },
     call = function(method, a)
       if method == "server.whoami" then return { principal = f.cli } end
       if method == "server.status" then return f.status end
@@ -189,9 +193,10 @@ for _, p in ipairs{ { "right", "horizontal", "after" }, { "left", "horizontal", 
   local launch = a.layout.block.options
   assert(launch.shell == "none" and launch.cwd == "/work/project")
   assert(launch.exit.on_completion == true and launch.exit.quick_exit_threshold_ms == 0)
-  assert(#launch.command == 8 and launch.command[1] == exe and launch.command[2] == "preview-anchor"
+  assert(#launch.command == 9 and launch.command[1] == exe and launch.command[2] == "preview-anchor"
     and launch.command[3] == url and launch.command[4] == main and launch.command[5] == window
-    and launch.command[6] == app and launch.command[7] == tostring(gui) and launch.command[8] == "4294967295")
+    and launch.command[6] == app and launch.command[7] == tostring(gui) and launch.command[8] == "4294967295"
+    and launch.command[9] == "auto")
   assert(f.placed.api == "split" and a.anchor_id == main and a.direction == p[2] and a.side == p[3])
 end
 
@@ -200,14 +205,25 @@ local function denied(mode, block, change, status)
   change(f)
   assert(call(f)() == status .. "\n" and not f.placed)
 end
-for _, mode in ipairs{ "identify", "open", "focus" } do
-  denied(mode, mode == "focus" and preview or main,
-    function(f) f.gui.session_ids = { session, another_session } end, "sessions")
+for _, change in ipairs{
+  function(f) f.gui.session_ids = four_sessions end,
+  function(f) f.second_viewer = second_viewer(gui, { another_session }) end,
+} do
+  local plan = fixture("identify", main)
+  change(plan)
+  assert(call(plan)() == "plan\n" and plan.plan.confirm == true)
+  local open = fixture("open", main)
+  open.rex.args.confirm = false
+  change(open)
+  assert(call(open)() == "ok\n" and open.published and open.placed.args.layout.block.options.command[9] == "confirm")
+  denied("focus", preview, change, "focus")
 end
-for _, mode in ipairs{ "identify", "open", "focus" } do
-  denied(mode, mode == "focus" and preview or main,
-    function(f) f.second_viewer = second_viewer(gui, { another_session }) end, "sessions")
-end
+local single_plan = fixture("identify", main)
+assert(call(single_plan)() == "plan\n" and single_plan.plan.confirm == false)
+local detached_after_identify = fixture("open", main)
+detached_after_identify.rex.args.confirm = true
+assert(call(detached_after_identify)() == "ok\n" and detached_after_identify.published
+  and detached_after_identify.placed.args.layout.block.options.command[9] == "confirm")
 for _, companion in ipairs{
   second_viewer(gui + 1, { another_session }),
   second_viewer(gui, { another_session }, "ios"),
@@ -221,6 +237,10 @@ for _, companion in ipairs{
   assert(call(f)() == "ok\n")
 end
 denied("open", main, function(f) f.second_viewer = second_viewer(gui, false) end, "client")
+denied("open", main, function(f)
+  f.gui.session_ids = four_sessions
+  f.second_viewer = second_viewer(gui, false)
+end, "client")
 for _, invalid in ipairs{ false, {}, { another_session }, { session, false }, { current = session } } do
   denied("open", main, function(f) f.gui.session_ids = invalid end, "client")
 end
@@ -230,8 +250,9 @@ duplicates.gui.session_ids = { session, session }
 assert(call(duplicates)() == "ok\n")
 local attached_during_open = fixture("open", main)
 attached_during_open.after_create = function() attached_during_open.gui.session_ids = { session, another_session } end
-assert(call(attached_during_open)() == "sessions\n" and attached_during_open.placed
-  and attached_during_open.canceled and not attached_during_open.published)
+assert(call(attached_during_open)() == "ok\n" and attached_during_open.published and not attached_during_open.canceled
+  and attached_during_open.anchor.label == "milo:preview:confirm"
+  and attached_during_open.placed.args.layout.block.options.command[9] == "auto")
 for _, invalid in ipairs{ false, "7", 0, -1, 0.5, 4294967296, math.huge, 0/0 } do
   denied("open", main, function(f) f.rex.args.native_window_id = invalid end, "changed")
 end
@@ -319,6 +340,11 @@ end, "shell")
 
 local focused = fixture("focus", preview)
 assert(call(focused)() == "ok\n" and focused.placed.api == "focus" and focused.placed.args.block_id == main)
+local guarded_focus = fixture("focus", preview)
+guarded_focus.gui.session_ids, guarded_focus.window.focused_block_id = four_sessions, preview
+assert(call(guarded_focus)() == "ok\n" and guarded_focus.placed.args.block_id == main)
+denied("focus", preview, function(f) f.rex.args.confirm = true end, "focus")
+denied("focus", preview, function(f) f.anchor.label = "milo:preview:confirm" end, "focus")
 denied("focus", preview, function(f) f.rex.args.main = other end, "focus")
 denied("focus", preview, function(f) f.view.active_window_id = inactive end, "tab")
 denied("focus", preview, function(f) f.window.zoomed_block_id = preview end, "focus")
@@ -474,27 +500,83 @@ local renewed = shown .. "renew\n"
 assert(poll("attachment_poll") == renewed and reads_for_attachment == 1 and multimode.inspections == 2)
 renewed = renewed .. "renew\n"
 assert(poll("attachment_poll") == renewed and reads_for_attachment == 1 and multimode.inspections == 3)
--- The client can switch sessions without changing a single field in our view.
-multimode.gui.session_ids = { session, another_session }
-local concealed = renewed .. "hide\n"
-assert(poll("attachment_poll") == concealed and reads_for_attachment == 1)
-assert(poll("attachment_poll") == concealed and reads_for_attachment == 1 and not multimode.stopped)
+-- Other attachments can change without a single field in the scoped view.
+multimode.gui.session_ids = four_sessions
+local concealed = renewed .. "guard-hide\n"
+assert(poll("attachment_poll") == concealed and reads_for_attachment == 2)
+multimode.window.focused_block_id = preview
+local eligible = concealed .. guard .. "\n"
+assert(poll("attachment_poll") == eligible and reads_for_attachment == 3)
+-- A guarded heartbeat takes a fresh view even without a focus event.
+eligible = eligible .. "renew\n"
+assert(poll("attachment_poll") == eligible and reads_for_attachment == 4)
 multimode.gui.session_ids = { session }
-local recovered = renewed .. shown
-assert(poll("attachment_poll") == recovered and reads_for_attachment == 2)
-assert(poll("attachment_poll") == recovered .. "renew\n" and reads_for_attachment == 2)
-multimode.view.active_window_id = inactive
-local hidden_after_recovery = recovered .. "renew\nhide\n"
-assert(poll("active_window_changed") == hidden_after_recovery and reads_for_attachment == 3)
-assert(poll("attachment_poll") == hidden_after_recovery and reads_for_attachment == 3)
+eligible = eligible .. "renew\n"
+assert(poll("attachment_poll") == eligible and reads_for_attachment == 5)
+multimode.window.focused_block_id = main
+local unfocused = eligible .. "hide\n"
+assert(poll("attachment_poll") == unfocused and reads_for_attachment == 6)
+multimode.window.focused_block_id = preview
+local recovered = unfocused .. guard .. "\n"
+assert(poll("session_view_changed") == recovered)
+multimode.gui.session_ids = { another_session }
+assert(poll("attachment_poll") == recovered .. "hide\n" and not multimode.stopped)
+multimode.gui.session_ids = { session }
+recovered = recovered .. guarded
+assert(poll("attachment_poll") == recovered)
+multimode.gui.connection_state = "lost"
+assert(poll("attachment_poll") == recovered .. "hide\n")
+multimode.gui.connection_state = "connected"
+assert(poll("attachment_poll") == recovered .. guarded)
 
 local same_process = fixture("watch", preview)
 local watch_same_process = call(same_process)
 assert(watch_same_process() == shown)
 same_process.second_viewer = second_viewer(gui, { another_session })
-assert(watch_same_process("attachment_poll") == shown .. "hide\n")
+local same_process_hidden = shown .. "guard-hide\n"
+assert(watch_same_process("attachment_poll") == same_process_hidden)
 same_process.second_viewer.session_ids = {}
-assert(watch_same_process("attachment_poll") == shown .. shown)
+same_process.window.focused_block_id = preview
+assert(watch_same_process("attachment_poll") == same_process_hidden .. guard .. "\n")
+
+local malformed_peer = fixture("watch", preview)
+malformed_peer.second_viewer = second_viewer(gui, false)
+malformed_peer.window.focused_block_id = preview
+local watch_malformed = call(malformed_peer)
+assert(watch_malformed() == "hide\n")
+malformed_peer.gui.session_ids = four_sessions
+assert(watch_malformed("attachment_poll") == "hide\nguard-hide\n")
+malformed_peer.gui.session_ids, malformed_peer.second_viewer = { session }, nil
+assert(watch_malformed("attachment_poll") == "hide\nguard-hide\n" .. guard .. "\n")
+
+local ready = fixture("watch", preview)
+ready.gui.session_ids, ready.window.focused_block_id = four_sessions, preview
+assert(call(ready)() == guarded)
+
+-- All three startup paths retain the latch if the viewer is down to one
+-- attachment before the initial placement becomes eligible.
+for _, initial in ipairs{
+  function(f) f.rex.args.confirm = true end,
+  function(f) f.gui.session_ids = four_sessions end,
+  function(f) f.anchor.label = "milo:preview:confirm" end,
+} do
+  local startup = fixture("watch", preview)
+  initial(startup)
+  local watch = call(startup)
+  local first_hide = startup.rex.args.confirm and "hide\n" or "hide\nguard-hide\n"
+  assert(watch() == first_hide)
+  startup.gui.session_ids = { session }
+  startup.window.focused_block_id = preview
+  local first_guard = first_hide .. guard .. "\n"
+  assert(watch("session_view_changed") == first_guard)
+  startup.view.active_window_id = inactive
+  assert(watch("active_window_changed") == first_guard .. "hide\n")
+  startup.view.active_window_id = window
+  startup.anchor.owner = other_app
+  assert(watch("active_window_changed") == first_guard .. "hide\n")
+  startup.anchor.owner = app
+  assert(watch("block_owner_changed") == first_guard .. guarded)
+end
 
 local delayed = fixture("watch", preview)
 local delayed_view = delayed.rex.session.view

@@ -13,12 +13,14 @@
 #import <string.h>
 #import <math.h>
 #import <sys/stat.h>
+#import <termios.h>
 #import <time.h>
 #import <unistd.h>
 
 static const NSTimeInterval SampleInterval = 0.25;
 static const NSTimeInterval SampleLifetime = 0.60;
 static const NSTimeInterval LeaseLifetime = 3.0;
+static const NSTimeInterval PeekLifetime = 12.0;
 // Rex's synchronous RPC is bounded at 15 seconds (src/rex.rs).
 static const NSTimeInterval FocusReplyLifetime = 16.0;
 enum { FractionScale = 1000000 };
@@ -179,10 +181,18 @@ static BOOL ReadDecimal(const char **cursor, const char *end, uint32_t limit, ui
     return YES;
 }
 
-static BOOL ReadShow(const char *line, size_t length, pid_t *pid, CGRect *normalized) {
+static BOOL ReadTile(const char *line, size_t length, pid_t *pid, CGRect *normalized, BOOL *guarded) {
     const char *end = line + length;
-    if (length < 5 || memcmp(line, "show ", 5)) return NO;
-    const char *p = line + 5;
+    if (length >= 6 && !memcmp(line, "guard ", 6)) {
+        *guarded = YES;
+        line += 6;
+    } else if (length >= 5 && !memcmp(line, "show ", 5)) {
+        *guarded = NO;
+        line += 5;
+    } else {
+        return NO;
+    }
+    const char *p = line;
     uint32_t process, parts[4];
     if (!ReadDecimal(&p, end, INT_MAX, &process) || process < 2 ||
         end - p < 6 || memcmp(p, " tile ", 6)) return NO;
@@ -202,7 +212,22 @@ static BOOL ReadShow(const char *line, size_t length, pid_t *pid, CGRect *normal
 typedef struct {
     CGRect tile;
     NSTimeInterval checked;
+    BOOL guarded;
 } VisibilityLease;
+
+typedef struct {
+    NSTimeInterval deadline;
+    BOOL armed, discarding;
+} GuardedPeek;
+
+static BOOL PeekActive(const GuardedPeek *peek, NSTimeInterval now) {
+    return peek->deadline && now < peek->deadline;
+}
+
+static BOOL ConsentAllowsReveal(const VisibilityLease *lease, const GuardedPeek *peek, NSTimeInterval now,
+    BOOL pointerInside) {
+    return !lease->guarded || (PeekActive(peek, now) && pointerInside);
+}
 
 static NSTimeInterval LeaseNow(void) {
     // Unlike uptime, this clock also counts time spent asleep.
@@ -236,23 +261,31 @@ typedef enum {
 
 static VisibilityUpdate UpdateVisibility(VisibilityLease *lease, NSTimeInterval now, pid_t expected,
     const char *line, size_t length) {
-    if (length == 4 && !memcmp(line, "hide", 4)) {
+    BOOL guardHide = length == 10 && !memcmp(line, "guard-hide", 10);
+    if (guardHide || (length == 4 && !memcmp(line, "hide", 4))) {
+        if (guardHide) lease->guarded = YES;
         lease->checked = 0;
         return VisibilityChanged;
     }
     if (length == 9 && !memcmp(line, "unclaimed", 9)) return VisibilityUnclaimed;
     CGRect tile;
+    BOOL guarded = lease->guarded;
     if (length == 5 && !memcmp(line, "renew", 5)) {
-        // A renewal may recover an expired show, but only another show can undo a hide.
+        // A renewal may recover expired eligibility, but cannot undo a hide or grant consent.
         if (!lease->checked) return VisibilityUnchanged;
         tile = lease->tile;
     } else {
         pid_t pid;
-        if (!ReadShow(line, length, &pid, &tile)) return VisibilityInvalid;
+        if (!ReadTile(line, length, &pid, &tile, &guarded)) return VisibilityInvalid;
         if (pid != expected) return VisibilityWrongOwner;
+        if (lease->guarded && !guarded) {
+            // Never turn stale auto-placement records into guarded eligibility.
+            lease->checked = 0;
+            return VisibilityChanged;
+        }
     }
-    BOOL unchanged = LeaseFresh(lease, now) && CGRectEqualToRect(tile, lease->tile);
-    *lease = (VisibilityLease){tile, now};
+    BOOL unchanged = LeaseFresh(lease, now) && guarded == lease->guarded && CGRectEqualToRect(tile, lease->tile);
+    *lease = (VisibilityLease){tile, now, guarded};
     return unchanged ? VisibilityUnchanged : VisibilityChanged;
 }
 
@@ -356,8 +389,55 @@ static BOOL WriteAll(int fd, const char *bytes, size_t length) {
     return YES;
 }
 
-static int OpenTTYOutput(const char *path) {
-    return open(path, O_WRONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
+static int OpenTTY(const char *path) {
+    return open(path, O_RDWR | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
+}
+
+static const char PeekInstructions[] =
+    "Click this tile, type show and press Return for a 12-second preview.\n"
+    "Keep the pointer inside the tile. Hide before switching sessions (type hide here or return focus from the preview).\n";
+
+static void WritePeekHint(int tty) {
+    static const char hint[] =
+        "With several Rex sessions attached, this preview needs confirmation in this tile.\n"
+        "Click this tile and wait for the ready message.\n";
+    WriteAll(tty, hint, sizeof(hint) - 1);
+    WriteAll(tty, PeekInstructions, sizeof(PeekInstructions) - 1);
+}
+
+static BOOL ForegroundCanonicalTTY(int tty) {
+    struct termios mode;
+    return tcgetpgrp(tty) == getpgrp() && tcgetattr(tty, &mode) == 0 && (mode.c_lflag & ICANON);
+}
+
+static BOOL ArmPeek(GuardedPeek *peek, int tty) {
+    // A canonical read alone cannot discard a partial line typed while hidden.
+    // Flush both complete and partial input at the start of each eligibility
+    // epoch, without changing the terminal's line discipline.
+    static const char ready[] = "Milo Preview: ready to confirm.\n";
+    if (!ForegroundCanonicalTTY(tty) || tcflush(tty, TCIFLUSH) < 0 ||
+        !WriteAll(tty, ready, sizeof(ready) - 1) ||
+        !WriteAll(tty, PeekInstructions, sizeof(PeekInstructions) - 1)) return NO;
+    *peek = (GuardedPeek){.armed = YES};
+    return YES;
+}
+
+typedef NS_ENUM(NSUInteger, PeekUpdate) { PeekUnchanged, PeekOpened, PeekRevoked };
+
+static PeekUpdate PollPeek(GuardedPeek *peek, int tty, NSTimeInterval now) {
+    if (!peek->armed) return PeekUnchanged;
+    if ((peek->deadline && !PeekActive(peek, now)) || !ForegroundCanonicalTTY(tty)) return PeekRevoked;
+    char line[64];
+    ssize_t count = read(tty, line, sizeof(line));
+    if (count < 0) return errno == EINTR || errno == EAGAIN ? PeekUnchanged : PeekRevoked;
+    // Never accept the tail of a long canonical line as a new command.
+    BOOL discarding = peek->discarding;
+    peek->discarding = count == (ssize_t)sizeof(line) && line[sizeof(line) - 1] != '\n';
+    if (discarding || count != 5) return PeekUnchanged;
+    if (!memcmp(line, "hide\n", 5)) return PeekRevoked;
+    if (peek->deadline || memcmp(line, "show\n", 5)) return PeekUnchanged;
+    peek->deadline = now + PeekLifetime;
+    return PeekOpened;
 }
 
 static int PrepareFocusInput(int stateFD) {
@@ -391,13 +471,14 @@ static void WriteDiagnostic(int fd, const char *reason) {
     int _stateFD, _focusFD, _tty;
     pid_t _parent;
     MiloPreviewPanel *_panel;
-    NSTimer *_timer;
+    NSTimer *_timer, *_peekTimer;
     NSMutableArray *_notificationTokens;
     id _keyMonitor;
     dispatch_queue_t _sampleQueue;
     dispatch_source_t _stateSource, _parentSource;
     NSMutableArray<dispatch_source_t> *_signalSources;
     VisibilityLease _lease;
+    GuardedPeek _peek;
     Geometry _candidate;
     NSRect _candidateFrame;
     CGRect _orderedPanelFrame;
@@ -412,14 +493,14 @@ static void WriteDiagnostic(int fd, const char *reason) {
     int _status;
 }
 - (instancetype)initWithURL:(NSURL *)url rex:(NSRunningApplication *)rex pinned:(CGWindowID)pinned
-    stateFD:(int)stateFD focusFD:(int)focusFD parent:(pid_t)parent tty:(int)tty;
+    stateFD:(int)stateFD focusFD:(int)focusFD parent:(pid_t)parent tty:(int)tty confirm:(BOOL)confirm;
 - (int)run;
 - (void)tick;
 @end
 
 @implementation MiloPreviewAnchor
 - (instancetype)initWithURL:(NSURL *)url rex:(NSRunningApplication *)rex pinned:(CGWindowID)pinned
-    stateFD:(int)stateFD focusFD:(int)focusFD parent:(pid_t)parent tty:(int)tty {
+    stateFD:(int)stateFD focusFD:(int)focusFD parent:(pid_t)parent tty:(int)tty confirm:(BOOL)confirm {
     if ((self = [super init])) {
         _url = url;
         _rex = rex;
@@ -428,6 +509,7 @@ static void WriteDiagnostic(int fd, const char *reason) {
         _focusFD = focusFD;
         _parent = parent;
         _tty = tty;
+        _lease.guarded = confirm;
         _sampleQueue = dispatch_queue_create("milo.preview.window", DISPATCH_QUEUE_SERIAL);
         _notificationTokens = [NSMutableArray array];
         _signalSources = [NSMutableArray array];
@@ -436,6 +518,9 @@ static void WriteDiagnostic(int fd, const char *reason) {
 }
 
 - (void)conceal {
+    _peek = (GuardedPeek){0};
+    [_peekTimer invalidate];
+    _peekTimer = nil;
     _candidate = (Geometry){0};
     _lastSample = 0;
     if (_panel.placementProven) _panel.placementProven = NO;
@@ -445,6 +530,15 @@ static void WriteDiagnostic(int fd, const char *reason) {
 - (void)invalidate {
     ++_generation;
     [self conceal];
+}
+
+- (void)schedulePeekExpiry {
+    __weak MiloPreviewAnchor *weakSelf = self;
+    _peekTimer = [NSTimer timerWithTimeInterval:MAX(0, _peek.deadline - LeaseNow()) repeats:NO block:^(NSTimer *timer) {
+        (void)timer;
+        [weakSelf invalidate];
+    }];
+    [NSRunLoop.mainRunLoop addTimer:_peekTimer forMode:NSRunLoopCommonModes];
 }
 
 - (void)finish:(const char *)reason {
@@ -467,13 +561,24 @@ static void WriteDiagnostic(int fd, const char *reason) {
         FrontmostRex(_rex);
 }
 
+- (BOOL)pointerInsideTile {
+    return NSPointInRect(NSEvent.mouseLocation, _candidateFrame);
+}
+
+- (BOOL)canReveal {
+    return [self canSample] && ConsentAllowsReveal(&_lease, &_peek, LeaseNow(),
+        _lease.guarded && [self pointerInsideTile]);
+}
+
 - (BOOL)acceptsPanelInput {
-    return _panel.visible && _panel.placementProven && _panel.onActiveSpace && [self canSample] &&
+    return _panel.visible && _panel.placementProven && _panel.onActiveSpace && [self canReveal] &&
         NSEqualRects(_panel.frame, _candidateFrame) && SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample);
 }
 
 - (void)handleLine {
-    switch (UpdateVisibility(&_lease, LeaseNow(), _rex.processIdentifier, _line, _lineLength)) {
+    BOOL wasGuarded = _lease.guarded;
+    VisibilityUpdate update = UpdateVisibility(&_lease, LeaseNow(), _rex.processIdentifier, _line, _lineLength);
+    switch (update) {
         case VisibilityUnchanged: break;
         case VisibilityChanged: [self invalidate]; break;
         case VisibilityInvalid: [self finish:"invalid Rex visibility message"]; break;
@@ -482,6 +587,7 @@ static void WriteDiagnostic(int fd, const char *reason) {
             [self finish:"the Mac viewer did not claim this preview tile. Close it and retry from a Mac-created working terminal; no permissions are needed."];
             break;
     }
+    if (!wasGuarded && _lease.guarded) WritePeekHint(_tty);
 }
 
 - (void)readState {
@@ -514,7 +620,10 @@ static void WriteDiagnostic(int fd, const char *reason) {
     _focusDeadline = LeaseNow() + FocusReplyLifetime;
     [self invalidate];
     static const char focus[] = "focus\n";
-    if (!WriteAll(STDOUT_FILENO, focus, sizeof(focus) - 1)) [self finish:"could not return focus to the Rex terminal"];
+    static const char guardedFocus[] = "focus-confirm\n";
+    BOOL sent = _lease.guarded ? WriteAll(STDOUT_FILENO, guardedFocus, sizeof(guardedFocus) - 1)
+        : WriteAll(STDOUT_FILENO, focus, sizeof(focus) - 1);
+    if (!sent) [self finish:"could not return focus to the Rex terminal"];
 }
 
 - (void)applySample:(Geometry)geometry checkedPanel:(BOOL)checkedPanel lostPin:(BOOL)lostPin
@@ -522,6 +631,10 @@ static void WriteDiagnostic(int fd, const char *reason) {
     _samplePending = NO;
     if (_finished) return;
     if (lostPin) { [self finish:NULL]; return; }
+    // Prefer observer revocation already on the pipe over accepting a line
+    // from the tile or revealing a staged panel on this sample.
+    if (_lease.guarded) [self readState];
+    if (_finished) return;
     if (generation != _generation) return;
     NSRect frame;
     CGDirectDisplayID display;
@@ -541,6 +654,23 @@ static void WriteDiagnostic(int fd, const char *reason) {
         return;
     }
     _lastSample = started;
+    if (_lease.guarded) {
+        if (![self pointerInsideTile]) {
+            if (_peek.armed) [self invalidate];
+            return;
+        }
+        if (!_peek.armed) {
+            ArmPeek(&_peek, _tty);
+            return;
+        }
+        PeekUpdate update = PollPeek(&_peek, _tty, LeaseNow());
+        if (update == PeekRevoked) { [self invalidate]; return; }
+        if (update == PeekOpened) [self schedulePeekExpiry];
+        if (![self canReveal]) {
+            if (_peek.deadline) [self invalidate];
+            return;
+        }
+    }
     if (!_panel) {
         __weak MiloPreviewAnchor *weakSelf = self;
         NSView *browser = MiloPreviewContent(_url, ^BOOL{ return [weakSelf acceptsPanelInput]; },
@@ -589,7 +719,7 @@ static void WriteDiagnostic(int fd, const char *reason) {
         return;
     }
     NSInteger relativeWindow = [NSWindow windowNumberAtPoint:center belowWindowWithWindowNumber:0];
-    if (relativeWindow <= 0 || generation != _generation || ![self canSample] ||
+    if (relativeWindow <= 0 || generation != _generation || ![self canReveal] ||
         !NSEqualRects(_panel.frame, frame) || !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) {
         [self invalidate];
         return;
@@ -598,7 +728,7 @@ static void WriteDiagnostic(int fd, const char *reason) {
         NSWidth(frame), NSHeight(frame));
     if (_panel.placementProven) _panel.placementProven = NO;
     [_panel orderWindow:NSWindowAbove relativeTo:relativeWindow];
-    if (!_panel.visible || generation != _generation || ![self canSample] ||
+    if (!_panel.visible || generation != _generation || ![self canReveal] ||
         !NSEqualRects(_panel.frame, frame) || !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) {
         [self invalidate];
         return;
@@ -618,8 +748,11 @@ static void WriteDiagnostic(int fd, const char *reason) {
     }
     BOOL canSample = [self canSample];
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-    if (!canSample && (_candidate.windowID || _panel.visible)) [self invalidate];
-    if ((_lastSample && !SampleFresh(now, _lastSample)) || (_panel.visible && !_panel.onActiveSpace)) [self conceal];
+    if ((!canSample && (_candidate.windowID || _panel.visible)) ||
+        (_peek.armed && ![self pointerInsideTile]) ||
+        (_peek.deadline && !PeekActive(&_peek, LeaseNow())) ||
+        (_lastSample && !SampleFresh(now, _lastSample)) ||
+        (_panel.visible && !_panel.onActiveSpace)) [self invalidate];
     if (_samplePending) return;
     BOOL checkPin = !_sessionInactive && !_screensAsleep && now >= _nextPinCheck;
     if (!canSample && !checkPin) return;
@@ -655,6 +788,11 @@ static void WriteDiagnostic(int fd, const char *reason) {
 - (void)windowWillClose:(NSNotification *)notification {
     (void)notification;
     [self finish:NULL];
+}
+
+- (void)windowDidResignKey:(NSNotification *)notification {
+    (void)notification;
+    if (_lease.guarded && _peek.deadline) [self invalidate];
 }
 
 - (void)observe:(NSNotificationName)name center:(NSNotificationCenter *)center {
@@ -758,7 +896,7 @@ static void WriteDiagnostic(int fd, const char *reason) {
 }
 @end
 
-int milo_preview_run(const char *url, CGWindowID pinned_window, int state_fd) {
+int milo_preview_run(const char *url, CGWindowID pinned_window, int state_fd, bool confirm) {
     @autoreleasepool {
         if (!NSThread.isMainThread || !url || !pinned_window || state_fd < 0) {
             fprintf(stderr, "milo preview: invalid native anchor arguments\n");
@@ -772,7 +910,7 @@ int milo_preview_run(const char *url, CGWindowID pinned_window, int state_fd) {
             fprintf(stderr, "milo preview: invalid URL or missing Rex watcher\n");
             return 1;
         }
-        int tty = OpenTTYOutput("/dev/tty");
+        int tty = OpenTTY("/dev/tty");
         if (tty < 0) {
             fprintf(stderr, "milo preview: no controlling Rex terminal\n");
             return 1;
@@ -794,9 +932,12 @@ int milo_preview_run(const char *url, CGWindowID pinned_window, int state_fd) {
             return 1;
         }
         // The Rust launcher may disappear before a focus message. Treat that as an I/O error, not SIGPIPE.
+        // A foreground-group race on TTY read or flush must not stop the
+        // helper (or the launcher's process group).
         int outputFlags = fcntl(STDOUT_FILENO, F_GETFL);
         if (outputFlags < 0 || fcntl(STDOUT_FILENO, F_SETFL, outputFlags | O_NONBLOCK) < 0 ||
             fcntl(STDOUT_FILENO, F_SETNOSIGPIPE, 1) < 0 ||
+            signal(SIGTTIN, SIG_IGN) == SIG_ERR || signal(SIGTTOU, SIG_IGN) == SIG_ERR ||
             ![[NSApplication sharedApplication] setActivationPolicy:NSApplicationActivationPolicyAccessory]) {
             WriteDiagnostic(tty, "could not initialize the nonactivating panel");
             close(focusFD);
@@ -805,8 +946,9 @@ int milo_preview_run(const char *url, CGWindowID pinned_window, int state_fd) {
         }
         static const char waiting[] = "Milo Preview: approximate placement. Waiting for a supported, visible Rex tile.\n";
         WriteAll(tty, waiting, sizeof(waiting) - 1);
+        if (confirm) WritePeekHint(tty);
         MiloPreviewAnchor *anchor = [[MiloPreviewAnchor alloc] initWithURL:location rex:rex pinned:pinned_window
-            stateFD:state_fd focusFD:focusFD parent:parent tty:tty];
+            stateFD:state_fd focusFD:focusFD parent:parent tty:tty confirm:confirm];
         int status = [anchor run];
         close(focusFD);
         close(tty);

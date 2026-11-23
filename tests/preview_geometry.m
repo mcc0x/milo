@@ -4,6 +4,9 @@
 // /tmp/preview-geometry
 // /tmp/preview-geometry --panel-staging additionally checks Quartz in a logged-in GUI session.
 #import <assert.h>
+#import <sys/socket.h>
+#import <sys/wait.h>
+#import <util.h>
 #import "../macos/Preview/Chrome.h"
 
 // Exercise production remapping with deterministic chrome, not the user's settings.
@@ -221,8 +224,12 @@ static void RemapPinnedWindow(void) {
 static void WatcherProtocol(void) {
     pid_t pid;
     CGRect rect;
+    BOOL guarded;
     const char tile[] = "show 123 tile 500000 250000 500000 750000";
-    assert(ReadShow(tile, sizeof(tile) - 1, &pid, &rect));
+    assert(ReadTile(tile, sizeof(tile) - 1, &pid, &rect, &guarded) && !guarded);
+    assert(pid == 123 && CGRectEqualToRect(rect, CGRectMake(0.5, 0.25, 0.5, 0.75)));
+    const char guard[] = "guard 123 tile 500000 250000 500000 750000";
+    assert(ReadTile(guard, sizeof(guard) - 1, &pid, &rect, &guarded) && guarded);
     assert(pid == 123 && CGRectEqualToRect(rect, CGRectMake(0.5, 0.25, 0.5, 0.75)));
     const char *invalid[] = {
         "show 123 tile", "show 123 float 0 0 1000000 1000000",
@@ -231,12 +238,13 @@ static void WatcherProtocol(void) {
         "show 123 tile 900000 0 100001 1", "show 123 tile 0 900000 1 100001",
         "show 123 tile 0.5 0 10 10", "show 123 tile -1 0 10 10", "show 123 tile 0  0 10 10",
         "show 123 tile 0 0 10 10 ", "show 123 tile 0 0 10 10\r", "show 123 tile 0 0 10 10 10",
+        "guard", "guard 1 tile 0 0 10 10", "guard 123 tile 0 0 0 10", "guarded 123 tile 0 0 10 10",
     };
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
-        assert(!ReadShow(invalid[i], strlen(invalid[i]), &pid, &rect));
+        assert(!ReadTile(invalid[i], strlen(invalid[i]), &pid, &rect, &guarded));
     }
     const char embedded[] = "show 123 tile 0 0 10 10\0hide";
-    assert(!ReadShow(embedded, sizeof(embedded) - 1, &pid, &rect));
+    assert(!ReadTile(embedded, sizeof(embedded) - 1, &pid, &rect, &guarded));
     assert(SampleFresh(1.5, 1) && !SampleFresh(1.75, 1) && !SampleFresh(1, 1.01));
 }
 
@@ -305,6 +313,123 @@ static void FocusAcknowledgment(void) {
     close(pipeFD[0]);
 }
 
+static void GuardedLease(void) {
+    int pipeFD[2];
+    assert(pipe(pipeFD) == 0);
+    const char show[] = "show 123 tile 0 0 500000 500000\n";
+    const char guard[] = "guard 123 tile 0 0 500000 500000\n";
+    VisibilityLease lease = {0};
+    GuardedPeek peek = {0};
+    assert(PipeRecord(pipeFD, &lease, 10, show) == VisibilityChanged);
+    assert(ConsentAllowsReveal(&lease, &peek, 10, NO));
+    assert(PipeRecord(pipeFD, &lease, 11, guard) == VisibilityChanged); // Same geometry, different mode.
+    assert(LeaseAllowsSampling(&lease, 11, 0) && !ConsentAllowsReveal(&lease, &peek, 11, YES));
+    assert(PipeRecord(pipeFD, &lease, 12, "renew\n") == VisibilityUnchanged);
+    assert(PipeRecord(pipeFD, &lease, 13, guard) == VisibilityUnchanged);
+    assert(!ConsentAllowsReveal(&lease, &peek, 13, YES)); // Neither record can reveal.
+    assert(PipeRecord(pipeFD, &lease, 14, "guard 124 tile 0 0 500000 500000\n") == VisibilityWrongOwner);
+    assert(PipeRecord(pipeFD, &lease, 15, "hide\n") == VisibilityChanged && lease.guarded);
+    assert(PipeRecord(pipeFD, &lease, 16, "renew\n") == VisibilityUnchanged && !LeaseFresh(&lease, 16));
+    assert(PipeRecord(pipeFD, &lease, 17, show) == VisibilityChanged && lease.guarded && !LeaseFresh(&lease, 17));
+    assert(PipeRecord(pipeFD, &lease, 18, guard) == VisibilityChanged && LeaseFresh(&lease, 18));
+
+    VisibilityLease hidden = {0}, initialConfirm = {.guarded = YES};
+    assert(PipeRecord(pipeFD, &hidden, 20, "guard-hide\n") == VisibilityChanged && hidden.guarded);
+    assert(!LeaseFresh(&hidden, 20));
+    assert(PipeRecord(pipeFD, &hidden, 21, show) == VisibilityChanged && !LeaseFresh(&hidden, 21));
+    assert(PipeRecord(pipeFD, &initialConfirm, 20, show) == VisibilityChanged);
+    assert(!LeaseFresh(&initialConfirm, 20) && !ConsentAllowsReveal(&initialConfirm, &peek, 20, YES));
+    close(pipeFD[1]);
+    close(pipeFD[0]);
+}
+
+static void TTYStep(int wire) {
+    char ready;
+    assert(WriteAll(wire, "?", 1));
+    assert(read(wire, &ready, 1) == 1 && ready == '!');
+}
+
+static void GuardedTTYChild(int wire) {
+    int tty = OpenTTY("/dev/tty");
+    assert(tty >= 0);
+    struct termios mode, before, after;
+    assert(tcgetattr(tty, &mode) == 0);
+    mode.c_lflag = (mode.c_lflag | ICANON) & ~(ECHO | ECHONL);
+    mode.c_iflag = (mode.c_iflag | ICRNL) & ~(IGNCR | INLCR);
+    assert(tcsetattr(tty, TCSANOW, &mode) == 0 && tcgetattr(tty, &before) == 0);
+    GuardedPeek peek = {0};
+    VisibilityLease lease = {.guarded = YES};
+    TTYStep(wire); // Complete and partial lines entered before eligibility.
+    assert(PollPeek(&peek, tty, 9) == PeekUnchanged && !PeekActive(&peek, 9));
+    assert(ArmPeek(&peek, tty) && PollPeek(&peek, tty, 9) == PeekUnchanged);
+    TTYStep(wire); // Return during eligibility cannot complete the stale partial line.
+    assert(PollPeek(&peek, tty, 9) == PeekUnchanged);
+    TTYStep(wire); // Fresh input without Return still does not suffice.
+    assert(PollPeek(&peek, tty, 9) == PeekUnchanged && !PeekActive(&peek, 9));
+    TTYStep(wire);
+    assert(PollPeek(&peek, tty, 10) == PeekOpened && peek.deadline == 22);
+    assert(ConsentAllowsReveal(&lease, &peek, 10, YES) && !ConsentAllowsReveal(&lease, &peek, 10, NO));
+    TTYStep(wire); // A second show while open does not extend this peek.
+    assert(PollPeek(&peek, tty, 21) == PeekUnchanged && peek.deadline == 22);
+    assert(ConsentAllowsReveal(&lease, &peek, 21.99, YES));
+    TTYStep(wire); // Buffered input at expiry cannot renew or reopen it.
+    assert(PollPeek(&peek, tty, 22) == PeekRevoked && !ConsentAllowsReveal(&lease, &peek, 22, YES));
+    peek = (GuardedPeek){0};
+    assert(ArmPeek(&peek, tty) && PollPeek(&peek, tty, 23) == PeekUnchanged);
+    TTYStep(wire); // The tail of a long line is not a command.
+    assert(PollPeek(&peek, tty, 23) == PeekUnchanged && peek.discarding);
+    assert(PollPeek(&peek, tty, 23) == PeekUnchanged && !peek.discarding);
+    TTYStep(wire);
+    assert(PollPeek(&peek, tty, 24) == PeekOpened);
+    TTYStep(wire); // Closing a peek invalidates both complete and pending subsequent input.
+    assert(PollPeek(&peek, tty, 25) == PeekRevoked);
+    peek = (GuardedPeek){0};
+    assert(!ConsentAllowsReveal(&lease, &peek, 25, YES));
+    assert(ArmPeek(&peek, tty) && PollPeek(&peek, tty, 26) == PeekUnchanged);
+    TTYStep(wire);
+    assert(PollPeek(&peek, tty, 26) == PeekUnchanged);
+    TTYStep(wire);
+    assert(PollPeek(&peek, tty, 27) == PeekOpened && peek.deadline == 39);
+
+    assert(tcgetattr(tty, &after) == 0);
+    assert(before.c_iflag == after.c_iflag && before.c_oflag == after.c_oflag &&
+        before.c_cflag == after.c_cflag && before.c_lflag == after.c_lflag &&
+        !memcmp(before.c_cc, after.c_cc, sizeof(before.c_cc)) &&
+        cfgetispeed(&before) == cfgetispeed(&after) && cfgetospeed(&before) == cfgetospeed(&after));
+    close(tty);
+}
+
+static void GuardedTTY(void) {
+    int wire[2], master;
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, wire) == 0);
+    pid_t child = forkpty(&master, NULL, NULL, NULL);
+    assert(child >= 0);
+    if (!child) {
+        close(wire[0]);
+        GuardedTTYChild(wire[1]);
+        _exit(0);
+    }
+    close(wire[1]);
+    const char *input[] = {
+        "show\rshow", "\r", "show", "\r", "show\r", "show\r",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "show\r", "show\r",
+        "hide\rshow\rshow", "\r", "show\r",
+    };
+    for (size_t i = 0; i < sizeof(input) / sizeof(input[0]); ++i) {
+        char step;
+        assert(read(wire[0], &step, 1) == 1 && step == '?');
+        assert(WriteAll(master, input[i], strlen(input[i])) && WriteAll(wire[0], "!", 1));
+    }
+    // Drain the ready prompts like a terminal viewer. Darwin waits for a
+    // session leader's pending PTY output when it exits.
+    char output[512];
+    while (read(master, output, sizeof(output)) > 0) {}
+    int status;
+    assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    close(master);
+    close(wire[0]);
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc == 2 && strcmp(argv[1], "--panel-staging") == 0) {
@@ -321,6 +446,8 @@ int main(int argc, const char *argv[]) {
         WatcherProtocol();
         WatcherLease();
         FocusAcknowledgment();
+        GuardedLease();
+        GuardedTTY();
         puts("preview geometry tests passed");
     }
     return 0;
