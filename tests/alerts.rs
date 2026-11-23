@@ -17,7 +17,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 const TOKEN: &str = "123456:SYNTHETICsyntheticSYNTHETIC00";
@@ -47,6 +47,7 @@ struct Reply {
     path_prefix: &'static str,
     status: u16,
     body: &'static str,
+    gate: Option<mpsc::Receiver<()>>,
 }
 
 /// Stands in for Telegram and Discord. It answers with the first queued
@@ -74,6 +75,9 @@ impl Destination {
                     index.and_then(|index| queued.remove(index))
                 };
                 seen.lock().unwrap().push(request);
+                if let Some(gate) = reply.as_ref().and_then(|reply| reply.gate.as_ref()) {
+                    let _ = gate.recv_timeout(Duration::from_secs(30));
+                }
                 let (code, body) = reply.map_or((200, "{\"ok\":true}"), |reply| (reply.status, reply.body));
                 let _ = write!(
                     stream,
@@ -91,7 +95,15 @@ impl Destination {
     }
 
     fn answer_at(&self, path_prefix: &'static str, answers: &[(u16, &'static str)]) {
-        self.answers.lock().unwrap().extend(answers.iter().map(|&(status, body)| Reply { path_prefix, status, body }));
+        let replies = answers.iter().map(|&(status, body)| Reply { path_prefix, status, body, gate: None });
+        self.answers.lock().unwrap().extend(replies);
+    }
+
+    /// Hold the next reply until the caller drops the returned gate.
+    fn hold_reply(&self, status: u16, body: &'static str) -> mpsc::Sender<()> {
+        let (release, gate) = mpsc::channel();
+        self.answers.lock().unwrap().push_back(Reply { path_prefix: "", status, body, gate: Some(gate) });
+        release
     }
 
     fn requests(&self) -> Vec<Request> {
@@ -546,8 +558,8 @@ fn a_destination_that_refuses_the_secret_is_not_asked_again() {
     assert_eq!(home.destination.requests_at("/bot").len(), 1);
     // Saving the destination again starts afresh.
     home.save_telegram();
-    home.blocked("d", "SYNTHETIC approve?");
-    assert!(soon(|| home.destination.requests_at("/bot").len() > 1));
+    home.status("d", "done", "", "SYNTHETIC done");
+    assert!(soon(|| home.destination.requests_at("/bot").iter().any(|r| text_of(&r.body).contains("finished"))));
 }
 
 #[test]
@@ -602,17 +614,32 @@ fn a_connection_no_relay_can_revoke_is_forgotten_only_on_this_machine_and_only_w
 fn a_change_that_cannot_be_saved_leaves_mirroring_running() {
     let Some(home) = Home::new() else { return };
     home.save_telegram();
+    // A real stream never replays an old event to a replacement mirror.
+    fs::write(home.root.join("ends-once"), "").unwrap();
+    home.blocked("a", "SYNTHETIC approve?");
+    let release = home.destination.hold_reply(429, "{\"parameters\":{\"retry_after\":1}}");
     home.run(&["alerts", "on"]);
-    assert!(soon(|| home.starts() == 1));
+    assert!(home.received(1));
     // The settings file may be kept read-only, as by a dotfile manager.
     let settings = home.root.join(".config/milo/alerts.conf");
     fs::set_permissions(&settings, fs::Permissions::from_mode(0o400)).unwrap();
     let (saved, why) = home.run_with(&["alerts", "events", "blocked"], "");
-    assert!(!saved && why.contains("Could not save"), "{why}");
+    let (resaved, resave_error) = home.run_with(&["alerts", "telegram", "-1001234567890"], &format!("{TOKEN}\n"));
     fs::set_permissions(&settings, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(!saved && why.contains("Could not save"), "{why}");
+    assert!(!resaved && resave_error.contains("Could not save"), "{resave_error}");
+    // The first alert is still in flight when the save is rejected.
+    drop(release);
 
     let status = home.run(&["alerts"]);
     assert!(status.contains("Rex alert mirroring: on\n"), "{status}");
-    home.blocked("a", "SYNTHETIC approve?");
-    assert!(home.received(1));
+    home.status("b", "done", "", "SYNTHETIC done");
+    assert!(home.received(2));
+    assert_eq!(
+        home.destination.texts()[1],
+        "Rex: <code>synthetic</code> is waiting for permission",
+        "the failed re-save lost the pending alert even though the mirror reports running",
+    );
+    assert!(home.received(3));
+    assert_eq!(home.destination.texts()[2], "Rex: <code>synthetic</code> finished");
 }
