@@ -11,7 +11,7 @@ Apple M5 Pro, arm64 macOS 27.2.1, Rust 1.100.0, Apple Git 2.54.0, `/usr/bin/sqli
 
 Two runs per build in base/changed/changed/base order. Each entry is the median of 21 batches of 512 copies of the actual refresh inputs (`Repo` and `Option<HistoryVersion>`), including their destruction. The fixture reads a real dirty checkout, one commit ahead of its upstream, and checks the selected tip and dirty count. This isolates the cost of copying saved status, **not** thread creation, Git I/O, painting, or key latency. Other small fields of `Repo` still get copied.
 
-A separate History PTY exercise observed the dirty count through saves, staging, and a commit, then the new commit subject. The 24-save burst on the large ahead fixture still ran six sets of config/status/upstream checks on each build. Sharing the prior sample does not substitute it for a new Git read.
+A separate History PTY exercise observed the dirty count through saves, staging, and a commit, then the new commit subject. The burst modified an already-dirty file 24 times and created 24 new paths. On the large ahead fixture both builds ran six sets of config/status/upstream checks. Sharing the prior sample does not substitute it for a new Git read.
 
 ## Settings: Git processes per CLI operation
 
@@ -23,8 +23,11 @@ A separate History PTY exercise observed the dirty count through saves, staging,
 | Undo the import | 2 | 0 |
 | Preview a matching project | 5 | 4 |
 | Preview from a different checkout, match via home-relative path | 8 | 7 |
+| Explicitly mapped project, CLI preview or apply | 3 | 2 |
 
 Counts include the once-per-process `git --exec-path` lookup. The driver checks that preview leaves a real preferences file unchanged, apply changes only the chosen setting, undo restores the original bytes, and both project previews find the checkout by repository identity. The browser editor's tab anchoring and write transaction are not changed.
+
+Unlike a one-shot CLI mapping, a browser mapping spans two requests. Its review token binds the worktree directory, Git administration directory and locally visible history root. Normal commits on the same history do not invalidate review. Replacing the checkout, even an unborn repository at the same path, requires a fresh preview. A shallow checkout can be selected explicitly; its local boundary is not used for cross-host matches.
 
 ## Usage: one OpenCode sampler result with a WAL writer connected
 
@@ -39,6 +42,8 @@ Counts include the once-per-process `git --exec-path` lookup. The driver checks 
 Each entry covers 12 completed reads after one warm-up. A writer commits one more assistant step every simulated 20 seconds. The fixture verifies the resulting step count at each look. The archives start with 1,500 assistant steps from today; the dense control has 30,000. The migrated archive has two copies of its 200,000 logical messages but must count only one. The writer uses one additional session. Timings include the SQLite CLI processes and taking their result into Milo, not setup or rendering. The fixture has a longer deadline than production; none of these reads took one second. Base and candidate ran separately with warm caches, not on reserved cores. With 12 observations the p95 is the slowest sample, not a reliable tail estimate.
 
 The improvement targets repeated archive scans, not the volume of today's JSON to aggregate. A full, binary-collated index starting with session ID and timestamp permits range seeks. Missing, session-only, partial and incompatible indexes retain the original scan. Fresh 2.x has no legacy table to optimize. No new database index, write, permission or provider call. A separate regression checks that a future-dated migrated row does not turn incomplete current totals into a number.
+
+**Short-session tradeoff:** A separate 1.x PTY fixture kept today's display identical (20 steps) and varied archive shape. Over 12 launches per binary, median time from process start to that display was 42.58 → 30.23 ms for 200,000 messages / 128 sessions, but **38.68 → 41.77 ms** for 40,000 / 8,000. The indexed query trades a sequential scan for per-session seeks; fewer VM instructions do not ensure lower latency when most sessions are short.
 
 ## Alerts: when a completed transaction releases its credential lock
 
