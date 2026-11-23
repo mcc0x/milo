@@ -149,13 +149,12 @@ fn resolve_placement(
 
 fn anchor_args(anchor: Anchor<'_>) -> String {
     format!(
-        r#","main":{},"window":{},"owner":{},"owner_pid":{},"native_window_id":{},"confirm":{}"#,
+        r#","main":{},"window":{},"owner":{},"owner_pid":{},"native_window_id":{}"#,
         json(anchor.main),
         json(anchor.window),
         json(anchor.owner),
         anchor.owner_pid,
         anchor.native_window_id,
-        anchor.confirm,
     )
 }
 
@@ -168,9 +167,9 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
         .filter(|path| Path::new(path).is_absolute())
         .ok_or("Milo needs an absolute UTF-8 executable path")?;
     let reply = connection.request("identify", &format!(r#","exe":{}"#, json(exe)))?;
-    let [main, window, cwd, owner, owner_pid, confirm] = Value::parse(reply.as_bytes())
+    let [main, window, cwd, owner, owner_pid] = Value::parse(reply.as_bytes())
         .ok_or_else(|| problem(&reply).to_owned())?
-        .fields(["main", "window", "cwd", "owner", "owner_pid", "confirm"]);
+        .fields(["main", "window", "cwd", "owner", "owner_pid"]);
     let main = main
         .and_then(|value| value.string(42))
         .filter(|id| exact_block(OsStr::new(id.as_ref())).is_some())
@@ -192,10 +191,9 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
         .and_then(|pid| u32::try_from(pid).ok())
         .filter(|pid| (2..=2_147_483_647).contains(pid))
         .ok_or("Rex did not identify the working terminal's viewer PID")?;
-    let confirm = confirm.and_then(Value::boolean).ok_or("Rex did not identify the preview presentation mode")?;
     let native_window_id = crate::preview::pin_window(owner_pid)?;
     let placement = resolve_placement(Path::new(cwd.as_ref()), override_placement, crate::paths::config_dir);
-    let anchor = anchor_args(Anchor { main: &main, window: &window, owner: &owner, owner_pid, native_window_id, confirm });
+    let anchor = anchor_args(Anchor { main: &main, window: &window, owner: &owner, owner_pid, native_window_id });
     let extra = format!(
         r#","exe":{},"url":{},"placement":{},"cwd":{}{anchor}"#,
         json(exe),
@@ -204,7 +202,11 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
         json(&cwd),
     );
     // Arguments go through stdin. The URL is never in Rex CLI argv or an error.
-    connection.call("open", &extra)
+    connection.call("open", &extra)?;
+    eprintln!(
+        "Preview tile opened. Close it before switching sessions or hosts in this Mac window; Rex may not report that switch."
+    );
+    Ok(())
 }
 
 pub(crate) fn preview_watch(anchor: Anchor<'_>) -> Result<Child, String> {

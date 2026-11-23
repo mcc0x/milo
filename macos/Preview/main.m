@@ -18,10 +18,9 @@ static unsigned long Decimal(const char *argument, unsigned long limit) {
 }
 
 int main(int argc, const char *argv[]) {
-    if (argc < 3) return EXIT_FAILURE;
+    if (argc != 3) return EXIT_FAILURE;
     @autoreleasepool {
         if (strcmp(argv[1], "--pin-window") == 0) {
-            if (argc != 3) return EXIT_FAILURE;
             pid_t pid = (pid_t)Decimal(argv[2], INT_MAX);
             const char *reason = NULL;
             CGWindowID pinned = milo_preview_pin_window(pid, &reason);
@@ -32,10 +31,7 @@ int main(int argc, const char *argv[]) {
             if (printf("%u\n", pinned) < 0 || fflush(stdout) != 0) return EXIT_FAILURE;
             return EXIT_SUCCESS;
         }
-        if (argc != 4) return EXIT_FAILURE;
-        bool confirm = strcmp(argv[3], "confirm") == 0;
-        if (!confirm && strcmp(argv[3], "auto") != 0) return EXIT_FAILURE;
         CGWindowID pinned = (CGWindowID)Decimal(argv[2], UINT32_MAX);
-        return milo_preview_run(argv[1], pinned, STDIN_FILENO, confirm);
+        return milo_preview_run(argv[1], pinned, STDIN_FILENO);
     }
 }

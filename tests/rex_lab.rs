@@ -26,9 +26,9 @@
 //! place of one that did not. Besides the tabs it opens one at a time, the
 //! test opens several back to back, with no pause between them, more than once.
 //!
-//! The guarded native coordinator regression additionally needs a macOS GUI
-//! login and Xcode's tools. Its nonactivating panel is never ordered onscreen:
-//! `cargo test --test rex_lab preview_confirmation_uses_rex_pty -- --ignored --nocapture`.
+//! The native overlay regression additionally needs a macOS GUI login and
+//! Xcode's tools. Only the accessory fixture's windows are ordered onscreen:
+//! `cargo test --test rex_lab persistent_preview_coexists_with_shell -- --ignored --nocapture`.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -1119,34 +1119,29 @@ fn preview_layout_and_observer() {
     let identify = |origin: &str, target: &str| {
         request("identify", origin, target, r#","exe":"/bin/bash""#)
     };
-    let open = |origin: &str, target: &str, placement: &str, expected: &str, cwd: &str, confirm: bool| {
+    let open = |origin: &str, target: &str, placement: &str, expected: &str, cwd: &str| {
         let extra = format!(
-            r#","exe":"/bin/bash","url":"{url}","placement":"{placement}","main":"{expected}","cwd":"{cwd}","confirm":{confirm}{owner}"#,
+            r#","exe":"/bin/bash","url":"{url}","placement":"{placement}","main":"{expected}","cwd":"{cwd}"{owner}"#,
         );
         request("open", origin, target, &extra)
     };
-    let launch = |caller: &str, placement: &str, confirm: bool| {
+    let launch = |caller: &str, placement: &str| {
         let plan = identify(caller, caller);
         assert_eq!(id(&plan, "main"), main);
         let cwd = id(&plan, "cwd");
         assert_eq!(Path::new(&cwd), nested.canonicalize().unwrap());
         assert_eq!(id(&plan, "owner"), client);
         assert_eq!(id(&plan, "window"), tab);
-        let reported = plan.split_once(r#""confirm""#).unwrap().1.trim_start();
-        assert!(
-            reported.strip_prefix(':').unwrap().trim_start().starts_with(if confirm { "true" } else { "false" }),
-            "{plan}"
-        );
-        open(caller, caller, placement, &main, &cwd, confirm)
+        open(caller, caller, placement, &main, &cwd)
     };
     let close = |block: &str| lab.rex(&["block", "close", "-s", &session, block]);
     assert_eq!(identify(&stale, &stale).trim(), "stale");
     assert_eq!(identify(&usage, &usage).trim(), "shell");
     assert_eq!(identify(&main, &another_shell).trim(), "caller");
     assert_eq!(identify(&another_shell, &main).trim(), "caller");
-    assert_eq!(open(&main, &another_shell, "right", &another_shell, root, false).trim(), "caller");
-    assert_eq!(open(&another_shell, &main, "right", &main, root, false).trim(), "caller");
-    assert_eq!(open(&rail, &rail, "right", &main, "/wrong/directory", false).trim(), "changed");
+    assert_eq!(open(&main, &another_shell, "right", &another_shell, root).trim(), "caller");
+    assert_eq!(open(&another_shell, &main, "right", &main, root).trim(), "caller");
+    assert_eq!(open(&rail, &rail, "right", &main, "/wrong/directory").trim(), "changed");
     lab.rex(&["zoom", "-s", &session, &main, "--on"]);
     assert_eq!(identify(&main, &main).trim(), "zoom");
     lab.rex(&["zoom", "-s", &session, &main, "--off"]);
@@ -1198,7 +1193,7 @@ fn preview_layout_and_observer() {
     let planned_cwd = id(&plan, "cwd");
     move_block(&main, &second_shell);
     lab.rex(&["focus", "-s", &session, &second_tab]);
-    assert_eq!(open(&main, &main, "right", &main, &planned_cwd, false).trim(), "changed");
+    assert_eq!(open(&main, &main, "right", &main, &planned_cwd).trim(), "changed");
     move_block(&main, &rail);
     lab.rex(&["focus", "-s", &session, &tab]);
     lab.rex(&["focus", "-s", &session, &main]);
@@ -1209,7 +1204,7 @@ fn preview_layout_and_observer() {
     assert!(lab.view().tabs.values().all(|tab| !tab.labels().iter().any(|label| label.starts_with("milo:preview"))));
     let _ = fs::remove_file(&pid_file);
     lab.rex(&["focus", "-s", &session, &tab]);
-    assert_eq!(launch(&rail, "floating", false).trim(), "placement");
+    assert_eq!(launch(&rail, "floating").trim(), "placement");
     assert!(!lab.view().tab(&tab).labels().iter().any(|label| label.starts_with("milo:preview")));
 
     let start_watch = |block: &str, child: u32| {
@@ -1238,9 +1233,9 @@ fn preview_layout_and_observer() {
     ] {
         // A launch from the focused sidebar must not steal keyboard focus either.
         lab.rex(&["focus", "-s", &session, caller]);
-        assert_eq!(launch(caller, placement, false).trim(), "ok", "{placement}");
+        assert_eq!(launch(caller, placement).trim(), "ok", "{placement}");
         check_focus(caller);
-        let literal = format!("\n{url}\n{main}\n{tab}\n{client}\n{viewer_pid}\n{native_window_id}\nauto\n");
+        let literal = format!("\n{url}\n{main}\n{tab}\n{client}\n{viewer_pid}\n{native_window_id}\n");
         assert!(soon(|| lab.read("preview-arguments").ends_with(&literal)));
         let child = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
         fs::remove_file(&pid_file).unwrap();
@@ -1276,8 +1271,6 @@ fn preview_layout_and_observer() {
             let output = lab.rex_output(&["do", "-s", &session, "-b", block, script, "--args", &payload]).unwrap();
             assert_eq!(output.status.code(), Some(1));
             assert_eq!(output.stdout, b"hide\n");
-            let focus = args("focus", block, &child.to_string(), &extra);
-            assert_eq!(lab.rex(&["do", "-s", &session, "-b", block, script, "--args", &focus]).trim(), "focus");
         }
         let watch = start_watch(block, child);
         let records = || fs::read_to_string(watch.with_extension("watch.log")).unwrap_or_default();
@@ -1304,7 +1297,7 @@ fn preview_layout_and_observer() {
                     continue;
                 }
                 assert_eq!(line, state, "{placement}: {}", records());
-                lease_active.set(state.starts_with("show ") || state.starts_with("guard "));
+                lease_active.set(state.starts_with("show "));
                 break;
             }
         };
@@ -1352,8 +1345,7 @@ fn preview_layout_and_observer() {
         expect(&show);
         if placement == "right" {
             lab.rex(&["focus", "-s", &session, block]);
-            let extra = format!(r#","main":"{main}"{owner}"#);
-            assert_eq!(request("focus", block, block, &extra).trim(), "ok");
+            lab.rex(&["focus", "-s", &session, &main]);
             check_focus(&main);
             // Observe regular renewals with unchanged geometry beyond the CLI timeout.
             let deadline = Instant::now() + PATIENCE;
@@ -1419,19 +1411,13 @@ fn preview_layout_and_observer() {
             let revision = || scope("print(assert(rex.session.view{}).revision)");
             let before = revision();
             viewer_session("session.attach", &background);
-            expect("guard-hide");
+            assert_eq!(next_record(Instant::now() + PATIENCE), "renew");
             assert_eq!(revision(), before, "other-session attachment changed the scoped layout");
-            lab.rex(&["focus", "-s", &session, block]);
-            let guard = show.replacen("show ", "guard ", 1);
-            expect(&guard);
             let before = revision();
             viewer_session("session.detach", &background);
             assert_eq!(next_record(Instant::now() + PATIENCE), "renew");
             assert_eq!(revision(), before, "other-session detachment changed the scoped layout");
-            lab.rex(&["focus", "-s", &session, &main]);
-            expect("hide");
-            lab.rex(&["focus", "-s", &session, block]);
-            expect(&guard);
+            check_focus(&main);
         }
         let watcher = watch_pid();
         if placement == "left" {
@@ -1522,9 +1508,9 @@ fn preview_layout_and_observer() {
     assert!(soon(|| lab.read("preview-quick-exit") == "done"));
     assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview")));
 
-    // Like one Mac app, one connection can retain four session attachments.
-    // The anchor stays hidden at launch, then supplies only guarded geometry.
-    for name in ["guarded-a", "guarded-b", "guarded-c"] {
+    // One Mac app can retain four session attachments. Keep the working
+    // shell focused and the published preview visible through a resize.
+    for name in ["also-attached-a", "also-attached-b", "also-attached-c"] {
         let created = lab.rex(&["new", name, "-c", root, "--shell=none", "--json", "--", "/bin/sleep", "300"]);
         viewer_session("session.attach", &id(&created, "session_id"));
     }
@@ -1534,9 +1520,9 @@ fn preview_layout_and_observer() {
          error('missing lab viewer')"
     ));
     lab.rex(&["focus", "-s", &session, &main]);
-    assert_eq!(launch(&main, "right", true).trim(), "ok");
+    assert_eq!(launch(&main, "right").trim(), "ok");
     check_focus(&main);
-    assert!(soon(|| lab.read("preview-arguments").ends_with(&format!("\n{native_window_id}\nconfirm\n"))));
+    assert!(soon(|| lab.read("preview-arguments").ends_with(&format!("\n{native_window_id}\n"))));
     let anchor_pid = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
     let anchor_block = lab.view().tab(&tab).pane("milo:preview").block.clone();
     viewer_session("session.own_block", &session);
@@ -1549,29 +1535,45 @@ fn preview_layout_and_observer() {
             records()
         );
     };
-    assert!(soon(|| records() == "hide\n"), "{}", records());
+    let first = show_for(&anchor_block);
+    expect_states(&["hide", &first]);
+    scope(&format!(
+        "assert(rex.session.resize_pane{{direction='horizontal', before_block_id='{main}', \
+         after_block_id='{anchor_block}', ratio=0.65}})"
+    ));
+    let resized = show_for(&anchor_block);
+    assert_ne!(resized, first);
+    let visible = ["hide", first.as_str(), resized.as_str()];
+    expect_states(&visible);
+    let started = Instant::now();
+    let mut renewals = 0;
+    while started.elapsed() < Duration::from_secs(13) {
+        let log = records();
+        assert!(watch_records(&log).filter(|line| *line != "renew").eq(visible), "{log}");
+        renewals = watch_records(&log).filter(|line| *line == "renew").count();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(renewals >= 10, "missing sustained heartbeats: {}", records());
+    check_focus(&main);
     let (mut other, input, output, other_id) = transfer(&anchor_block);
     scope(&format!(
         "local b=assert(rex.session.describe_block{{block_id='{anchor_block}'}}).block; assert(b.owner=='{other_id}')"
     ));
-    lab.rex(&["focus", "-s", &session, &anchor_block]);
-    check_focus(&anchor_block);
-    let focus = format!(r#","main":"{main}","confirm":true{owner}"#);
-    assert_eq!(request("focus", &anchor_block, &anchor_block, &focus).trim(), "focus");
-    std::thread::sleep(Duration::from_millis(1250));
-    assert_eq!(records(), "hide\n", "a foreign owner cannot make the focused anchor eligible");
+    expect_states(&["hide", &first, &resized, "hide"]);
     viewer_session("session.own_block", &session);
     drop((input, output));
     assert!(other.wait().unwrap().success());
-    let guard = show_for(&anchor_block).replacen("show ", "guard ", 1);
-    expect_states(&["hide", &guard]);
-    lab.rex(&["focus", "-s", &session, &second_tab]);
-    expect_states(&["hide", &guard, "hide"]);
-    lab.rex(&["focus", "-s", &session, &anchor_block]);
-    check_focus(&anchor_block);
-    expect_states(&["hide", &guard, "hide", &guard]);
+    expect_states(&["hide", &first, &resized, "hide", &resized]);
+    // The departure must conceal the pane even if the observer's first
+    // snapshot after these calls already sees the original tab again.
+    scope(&format!(
+        "assert(rex.session.focus_window{{window_id='{second_tab}'}}); \
+         assert(rex.session.focus_window{{window_id='{tab}'}})"
+    ));
+    expect_states(&["hide", &first, &resized, "hide", &resized, "hide", &resized]);
+    check_focus(&main);
     close(&main);
-    expect_states(&["hide", &guard, "hide", &guard, "hide"]);
+    expect_states(&["hide", &first, &resized, "hide", &resized, "hide", &resized, "hide"]);
     assert!(soon(|| fs::read_to_string(owned_watch.with_extension("watch.exit")).is_ok_and(|code| code.trim() == "0")));
     close(&anchor_block);
 }

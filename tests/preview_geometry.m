@@ -4,11 +4,7 @@
 // /tmp/preview-geometry
 // /tmp/preview-geometry --panel-staging additionally checks Quartz in a logged-in GUI session.
 #import <assert.h>
-#import <sys/socket.h>
-#import <sys/wait.h>
-#import <util.h>
 #import "../macos/Preview/Chrome.h"
-#import "../macos/Preview/ResizeInput.h"
 
 // Exercise production remapping with deterministic chrome, not the user's settings.
 static BOOL FixturePane(CGRect window, CGRect normalized, CGRect *pane) {
@@ -231,12 +227,8 @@ static void RemapPinnedWindow(void) {
 static void WatcherProtocol(void) {
     pid_t pid;
     CGRect rect;
-    BOOL guarded;
     const char tile[] = "show 123 tile 500000 250000 500000 750000";
-    assert(ReadTile(tile, sizeof(tile) - 1, &pid, &rect, &guarded) && !guarded);
-    assert(pid == 123 && CGRectEqualToRect(rect, CGRectMake(0.5, 0.25, 0.5, 0.75)));
-    const char guard[] = "guard 123 tile 500000 250000 500000 750000";
-    assert(ReadTile(guard, sizeof(guard) - 1, &pid, &rect, &guarded) && guarded);
+    assert(ReadTile(tile, sizeof(tile) - 1, &pid, &rect));
     assert(pid == 123 && CGRectEqualToRect(rect, CGRectMake(0.5, 0.25, 0.5, 0.75)));
     const char *invalid[] = {
         "show 123 tile", "show 123 float 0 0 1000000 1000000",
@@ -245,13 +237,13 @@ static void WatcherProtocol(void) {
         "show 123 tile 900000 0 100001 1", "show 123 tile 0 900000 1 100001",
         "show 123 tile 0.5 0 10 10", "show 123 tile -1 0 10 10", "show 123 tile 0  0 10 10",
         "show 123 tile 0 0 10 10 ", "show 123 tile 0 0 10 10\r", "show 123 tile 0 0 10 10 10",
-        "guard", "guard 1 tile 0 0 10 10", "guard 123 tile 0 0 0 10", "guarded 123 tile 0 0 10 10",
+        "guard", "guard 123 tile 0 0 10 10", "guard-hide",
     };
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
-        assert(!ReadTile(invalid[i], strlen(invalid[i]), &pid, &rect, &guarded));
+        assert(!ReadTile(invalid[i], strlen(invalid[i]), &pid, &rect));
     }
     const char embedded[] = "show 123 tile 0 0 10 10\0hide";
-    assert(!ReadTile(embedded, sizeof(embedded) - 1, &pid, &rect, &guarded));
+    assert(!ReadTile(embedded, sizeof(embedded) - 1, &pid, &rect));
     assert(SampleFresh(1.5, 1) && !SampleFresh(1.75, 1) && !SampleFresh(1, 1.01));
 }
 
@@ -280,11 +272,20 @@ static void WatcherLease(void) {
     assert(SampleFresh(14, 13.875) && !LeaseFresh(&lease, 14));
     assert(PipeRecord(pipeFD, &lease, 15, "renew\n") == VisibilityChanged && LeaseFresh(&lease, 15));
     assert(CGRectEqualToRect(lease.tile, CGRectMake(0.5, 0.25, 0.5, 0.75)));
+    assert(PipeRecord(pipeFD, &lease, 15.1, show) == VisibilityUnchanged);
+    const char resized[] = "show 123 tile 400000 0 600000 1000000\n";
+    assert(PipeRecord(pipeFD, &lease, 15.2, resized) == VisibilityChanged && LeaseFresh(&lease, 15.2));
+    assert(CGRectEqualToRect(lease.tile, CGRectMake(0.4, 0, 0.6, 1)));
+    assert(PipeRecord(pipeFD, &lease, 15.5, "renew\n") == VisibilityUnchanged);
+    assert(CGRectEqualToRect(lease.tile, CGRectMake(0.4, 0, 0.6, 1)));
     assert(PipeRecord(pipeFD, &lease, 16, "hide\n") == VisibilityChanged);
     assert(PipeRecord(pipeFD, &lease, 17, "renew\n") == VisibilityUnchanged && !LeaseFresh(&lease, 17));
     assert(PipeRecord(pipeFD, &lease, 18, "show 124 tile 0 0 1 1\n") == VisibilityWrongOwner && !LeaseFresh(&lease, 18));
     assert(PipeRecord(pipeFD, &lease, 19, show) == VisibilityChanged && LeaseFresh(&lease, 19));
     assert(PipeRecord(pipeFD, &lease, 20, "renew 123\n") == VisibilityInvalid);
+    assert(PipeRecord(pipeFD, &lease, 20.1, "guard-hide\n") == VisibilityInvalid);
+    assert(PipeRecord(pipeFD, &lease, 20.2, "resize-gap\n") == VisibilityInvalid);
+    assert(PipeRecord(pipeFD, &lease, 20.3, "shared-input\n") == VisibilityInvalid);
     assert(PipeRecord(pipeFD, &lease, 21, "unclaimed\n") == VisibilityUnclaimed);
     close(pipeFD[1]);
     close(pipeFD[0]);
@@ -295,18 +296,22 @@ static void FocusAcknowledgment(void) {
     assert(pipe(pipeFD) == 0 && fcntl(pipeFD[0], F_SETFL, O_NONBLOCK) == 0);
     VisibilityLease lease = {0};
     assert(PipeRecord(pipeFD, &lease, 10, "show 123 tile 0 0 1000000 1000000\n") == VisibilityChanged);
-    assert(LeaseAllowsSampling(&lease, 10, 0));
 
     NSTimeInterval deadline = 10 + FocusReplyLifetime;
     assert(ReadFocusReply(pipeFD[0], 11, &deadline) == FocusWaiting);
     assert(PipeRecord(pipeFD, &lease, 23, "renew\n") == VisibilityChanged);
-    assert(LeaseFresh(&lease, 23) && !LeaseAllowsSampling(&lease, 23, deadline));
+    assert(LeaseFresh(&lease, 23) && deadline > 23);
     assert(ReadFocusReply(pipeFD[0], 23, &deadline) == FocusWaiting);
 
     assert(WriteAll(pipeFD[1], "1", 1));
     assert(ReadFocusReply(pipeFD[0], 24, &deadline) == FocusApproved && deadline == 0);
-    assert(LeaseAllowsSampling(&lease, 24, deadline));
-    assert(!LeaseAllowsSampling(&lease, 26, deadline)); // Approval doesn't extend the visibility lease.
+    assert(LeaseFresh(&lease, 24));
+    assert(!LeaseFresh(&lease, 26)); // Approval doesn't extend the visibility lease.
+
+    deadline = 27 + FocusReplyLifetime;
+    assert(WriteAll(pipeFD[1], "0", 1));
+    assert(ReadFocusReply(pipeFD[0], 28, &deadline) == FocusRefused && deadline == 0);
+    assert(!LeaseFresh(&lease, 28));
 
     deadline = 30 + FocusReplyLifetime;
     assert(WriteAll(pipeFD[1], "!", 1));
@@ -320,362 +325,56 @@ static void FocusAcknowledgment(void) {
     close(pipeFD[0]);
 }
 
-static void GuardedLease(void) {
-    int pipeFD[2];
-    assert(pipe(pipeFD) == 0);
-    const char show[] = "show 123 tile 0 0 500000 500000\n";
-    const char guard[] = "guard 123 tile 0 0 500000 500000\n";
-    VisibilityLease lease = {0};
-    GuardedPeek peek = {0};
-    assert(PipeRecord(pipeFD, &lease, 10, show) == VisibilityChanged);
-    assert(ConsentAllowsReveal(&lease, &peek, 10, NO));
-    assert(PipeRecord(pipeFD, &lease, 11, guard) == VisibilityChanged); // Same geometry, different mode.
-    assert(LeaseAllowsSampling(&lease, 11, 0) && !ConsentAllowsReveal(&lease, &peek, 11, YES));
-    assert(PipeRecord(pipeFD, &lease, 12, "renew\n") == VisibilityUnchanged);
-    assert(PipeRecord(pipeFD, &lease, 13, guard) == VisibilityUnchanged);
-    assert(!ConsentAllowsReveal(&lease, &peek, 13, YES)); // Neither record can reveal.
-    assert(PipeRecord(pipeFD, &lease, 14, "guard 124 tile 0 0 500000 500000\n") == VisibilityWrongOwner);
-    assert(PipeRecord(pipeFD, &lease, 15, "hide\n") == VisibilityChanged && lease.guarded);
-    assert(PipeRecord(pipeFD, &lease, 16, "renew\n") == VisibilityUnchanged && !LeaseFresh(&lease, 16));
-    assert(PipeRecord(pipeFD, &lease, 17, show) == VisibilityChanged && lease.guarded && !LeaseFresh(&lease, 17));
-    assert(PipeRecord(pipeFD, &lease, 18, guard) == VisibilityChanged && LeaseFresh(&lease, 18));
+@interface WatcherFixtureOwner : NSObject
+- (pid_t)processIdentifier;
+@end
 
-    VisibilityLease hidden = {0}, initialConfirm = {.guarded = YES};
-    assert(PipeRecord(pipeFD, &hidden, 20, "guard-hide\n") == VisibilityChanged && hidden.guarded);
-    assert(!LeaseFresh(&hidden, 20));
-    assert(PipeRecord(pipeFD, &hidden, 21, show) == VisibilityChanged && !LeaseFresh(&hidden, 21));
-    assert(PipeRecord(pipeFD, &initialConfirm, 20, show) == VisibilityChanged);
-    assert(!LeaseFresh(&initialConfirm, 20) && !ConsentAllowsReveal(&initialConfirm, &peek, 20, YES));
+@implementation WatcherFixtureOwner
+- (pid_t)processIdentifier { return 123; }
+@end
+
+@interface WatcherFixtureAnchor : MiloPreviewAnchor
+- (void)exerciseDrain:(int)writer;
+@end
+
+@implementation WatcherFixtureAnchor
+- (void)exerciseDrain:(int)writer {
+    static const char show[] = "show 123 tile 500000 0 500000 1000000\n";
+    assert(WriteAll(writer, show, sizeof(show) - 1));
+    [self readState];
+    assert(LeaseFresh(&_lease, LeaseNow()));
+
+    NSUInteger generation = _generation;
+    Geometry stale = {.windowID = _pinned};
+    // Even an incomplete record can become a revocation. It must invalidate
+    // proof immediately, before the rest of the pipe record arrives.
+    assert(WriteAll(writer, "hi", 2));
+    [self readState];
+    assert(_lineLength == 2 && _generation != generation);
+    assert(WriteAll(writer, "de\nrenew\n", 9));
+    [self applySample:stale checkedPanel:NO lostPin:NO generation:generation
+        started:NSProcessInfo.processInfo.systemUptime];
+    assert(!_lineLength && !LeaseFresh(&_lease, LeaseNow()) && !_candidate.windowID);
+
+    // A full show can re-establish the lease, but its new geometry cannot
+    // reuse an in-flight result from the previous generation.
+    static const char resized[] = "show 123 tile 600000 0 400000 1000000\nrenew\n";
+    assert(WriteAll(writer, resized, sizeof(resized) - 1));
+    [self applySample:stale checkedPanel:NO lostPin:NO generation:generation
+        started:NSProcessInfo.processInfo.systemUptime];
+    assert(LeaseFresh(&_lease, LeaseNow()) && !_candidate.windowID);
+    assert(CGRectEqualToRect(_lease.tile, CGRectMake(0.6, 0, 0.4, 1)));
+}
+@end
+
+static void WatcherDrain(void) {
+    int pipeFD[2];
+    assert(pipe(pipeFD) == 0 && fcntl(pipeFD[0], F_SETFL, O_NONBLOCK) == 0);
+    WatcherFixtureAnchor *anchor = [[WatcherFixtureAnchor alloc] initWithURL:nil
+        rex:(NSRunningApplication *)[WatcherFixtureOwner new] pinned:1 stateFD:pipeFD[0] focusFD:-1 parent:getppid()];
+    [anchor exerciseDrain:pipeFD[1]];
     close(pipeFD[1]);
     close(pipeFD[0]);
-}
-
-static void GuardedPresentation(void) {
-    VisibilityLease lease = {.guarded = YES};
-    GuardedPeek peek = {.ttyReady = YES, .announced = YES};
-    StartPeek(&peek, 10);
-    assert(peek.phase == PeekStarting && peek.deadline == 18);
-    assert(ConsentAllowsReveal(&lease, &peek, 17, YES) && !ConsentAllowsReveal(&lease, &peek, 17, NO));
-    assert(ShowPeek(&peek, 17.5));
-    assert(peek.phase == PeekVisible && peek.deadline == 22);
-    assert(PeekActive(&peek, 21.99) && !PeekActive(&peek, 22));
-    assert(!ShowPeek(&peek, 21)); // A later verification cannot extend a visible peek.
-    EndPeek(&peek, NO);
-    assert(!peek.ttyReady && peek.announced && !ConsentAllowsReveal(&lease, &peek, 21, YES));
-    StartPeek(&peek, 30);
-    assert(!ShowPeek(&peek, 38) && !ConsentAllowsReveal(&lease, &peek, 38, YES));
-    assert(!ShowPeek(&peek, 42));
-}
-
-static void TTYStep(int wire) {
-    char ready;
-    assert(WriteAll(wire, "?", 1));
-    assert(read(wire, &ready, 1) == 1 && ready == '!');
-}
-
-static void GuardedTTYChild(int wire) {
-    int tty = OpenTTY("/dev/tty");
-    assert(tty >= 0);
-    struct termios mode, before, after;
-    assert(tcgetattr(tty, &mode) == 0);
-    mode.c_lflag = (mode.c_lflag | ICANON) & ~(ECHO | ECHONL);
-    mode.c_iflag = (mode.c_iflag | ICRNL) & ~(IGNCR | INLCR);
-    assert(tcsetattr(tty, TCSANOW, &mode) == 0 && tcgetattr(tty, &before) == 0);
-    GuardedPeek peek = {0};
-    TTYStep(wire); // A complete and partial command typed before readiness.
-    assert(ArmPeekTTY(&peek, tty) && ReadPeekInput(&peek, tty) == PeekNoInput);
-    TTYStep(wire); // Return cannot complete the pretyped partial line.
-    assert(ReadPeekInput(&peek, tty) == PeekIgnored);
-    TTYStep(wire);
-    assert(ReadPeekInput(&peek, tty) == PeekNoInput); // "sh" without Return.
-    EndPeek(&peek, NO); // Losing only a geometry sample while idle doesn't rearm the TTY.
-    assert(peek.ttyReady && peek.announced);
-    TTYStep(wire);
-    assert(ReadPeekInput(&peek, tty) == PeekShow); // "ow" and Return complete that line.
-    StartPeek(&peek, 10);
-    TTYStep(wire);
-    assert(ReadPeekInput(&peek, tty) == PeekShow && peek.phase == PeekStarting && peek.deadline == 18);
-    assert(ShowPeek(&peek, 13) && peek.deadline == 22);
-
-    TTYStep(wire); // Hard revocation must discard both queued and partial stale commands.
-    EndPeek(&peek, YES);
-    assert(!peek.ttyReady && !PeekActive(&peek, 22));
-    assert(ArmPeekTTY(&peek, tty) && ReadPeekInput(&peek, tty) == PeekNoInput);
-    TTYStep(wire);
-    assert(ReadPeekInput(&peek, tty) == PeekIgnored);
-    TTYStep(wire); // The tail of a long canonical line is not a command.
-    assert(ReadPeekInput(&peek, tty) == PeekIgnored && peek.discarding);
-    assert(ReadPeekInput(&peek, tty) == PeekIgnored && !peek.discarding);
-    TTYStep(wire);
-    assert(ReadPeekInput(&peek, tty) == PeekShow);
-    StartPeek(&peek, 40);
-    TTYStep(wire);
-    assert(ReadPeekInput(&peek, tty) == PeekHide);
-    EndPeek(&peek, YES);
-    assert(ArmPeekTTY(&peek, tty) && ReadPeekInput(&peek, tty) == PeekNoInput);
-    TTYStep(wire);
-    assert(ReadPeekInput(&peek, tty) == PeekIgnored);
-
-    // Do not consume from a noncanonical or wrongly configured terminal.
-    mode.c_lflag &= ~ICANON;
-    assert(tcsetattr(tty, TCSANOW, &mode) == 0);
-    assert(!ArmPeekTTY(&peek, tty) && ReadPeekInput(&peek, tty) == PeekBadTTY);
-    mode = before;
-    mode.c_iflag &= ~ICRNL;
-    assert(tcsetattr(tty, TCSANOW, &mode) == 0);
-    assert(!ArmPeekTTY(&peek, tty) && ReadPeekInput(&peek, tty) == PeekBadTTY);
-    assert(tcsetattr(tty, TCSANOW, &before) == 0);
-    int wrong[2];
-    assert(pipe(wrong) == 0 && WriteAll(wrong[1], "show\n", 5));
-    assert(!ArmPeekTTY(&peek, wrong[0]) && ReadPeekInput(&peek, wrong[0]) == PeekBadTTY);
-    char unread[5];
-    assert(read(wrong[0], unread, sizeof(unread)) == (ssize_t)sizeof(unread) && !memcmp(unread, "show\n", sizeof(unread)));
-    close(wrong[0]);
-    close(wrong[1]);
-    TTYStep(wire);
-    assert(ReadPeekInput(&peek, tty) == PeekShow);
-
-    assert(tcgetattr(tty, &after) == 0);
-    assert(before.c_iflag == after.c_iflag && before.c_oflag == after.c_oflag &&
-        before.c_cflag == after.c_cflag && before.c_lflag == after.c_lflag &&
-        !memcmp(before.c_cc, after.c_cc, sizeof(before.c_cc)) &&
-        cfgetispeed(&before) == cfgetispeed(&after) && cfgetospeed(&before) == cfgetospeed(&after));
-    close(tty);
-}
-
-static void GuardedTTY(void) {
-    int wire[2], master;
-    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, wire) == 0);
-    pid_t child = forkpty(&master, NULL, NULL, NULL);
-    assert(child >= 0);
-    if (!child) {
-        close(wire[0]);
-        GuardedTTYChild(wire[1]);
-        _exit(0);
-    }
-    close(wire[1]);
-    const char *input[] = {
-        "show\rshow", "\r", "sh", "ow\r", "show\r", "show\rshow", "\r",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "show\r", "show\r",
-        "hide\rshow\rshow", "\r", "show\r",
-    };
-    for (size_t i = 0; i < sizeof(input) / sizeof(input[0]); ++i) {
-        char step;
-        assert(read(wire[0], &step, 1) == 1 && step == '?');
-        assert(WriteAll(master, input[i], strlen(input[i])) && WriteAll(wire[0], "!", 1));
-    }
-    // Drain the one-shot readiness notice like a terminal viewer. Darwin waits for a
-    // session leader's pending PTY output when it exits.
-    char output[512] = {0};
-    size_t used = 0;
-    ssize_t count;
-    while ((count = read(master, output + used, sizeof(output) - 1 - used)) > 0) {
-        used += (size_t)count;
-        assert(used < sizeof(output) - 1);
-    }
-    const char *ready = strstr(output, "Milo Preview: ready to confirm.");
-    assert(ready && !strstr(ready + 1, "Milo Preview: ready to confirm."));
-    int status;
-    assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
-    close(master);
-    close(wire[0]);
-}
-
-static void ResizeExpectAt(int wire, ResizeInput *input, int tty, ResizeInputResult expected, int line) {
-    TTYStep(wire);
-    ResizeInputResult got = ReadResizeInput(input, tty);
-    if (got != expected) fprintf(stderr, "resize fixture line %d: expected %d, got %d\n", line, expected, got);
-    assert(got == expected);
-}
-#define ResizeExpect(wire, input, tty, expected) ResizeExpectAt(wire, input, tty, expected, __LINE__)
-
-static void ResizeTTYRestored(int tty, const struct termios *before, int flags) {
-    struct termios after;
-    assert(tcgetattr(tty, &after) == 0);
-    int restoredFlags = fcntl(tty, F_GETFL);
-    // Check the public open modes, not private status bits Darwin sets
-    // after the first write to a freshly opened /dev/tty descriptor.
-    const int openModes = O_ACCMODE | O_NONBLOCK | O_APPEND | O_ASYNC;
-    assert(restoredFlags >= 0 && (restoredFlags & openModes) == (flags & openModes));
-    assert(before->c_iflag == after.c_iflag && before->c_oflag == after.c_oflag &&
-        before->c_cflag == after.c_cflag && before->c_lflag == after.c_lflag &&
-        !memcmp(before->c_cc, after.c_cc, sizeof(after.c_cc)) &&
-        cfgetispeed(before) == cfgetispeed(&after) && cfgetospeed(before) == cfgetospeed(&after));
-}
-
-static void ResizeTTYChild(int wire) {
-    int tty = OpenTTY("/dev/tty");
-    assert(tty >= 0);
-    int flags = fcntl(tty, F_GETFL);
-    struct termios mode, before;
-    assert(tcgetattr(tty, &mode) == 0);
-    mode.c_lflag = (mode.c_lflag | ICANON) & ~(ECHO | ECHONL | PENDIN);
-    mode.c_iflag = (mode.c_iflag | ICRNL) & ~(IGNCR | INLCR);
-    assert(tcsetattr(tty, TCSANOW, &mode) == 0 && tcflush(tty, TCIFLUSH) == 0);
-    ResizeInput input = {0};
-    TTYStep(wire); // Drop complete lines and partial packets from before the new scope.
-    mode.c_lflag |= ECHO;
-    assert(tcsetattr(tty, TCSANOW, &mode) == 0 && tcgetattr(tty, &before) == 0);
-    assert(!BeginResizeInput(&input, tty, 99999) && !BeginResizeInput(&input, tty, 1000000));
-    ResizeTTYRestored(tty, &before, flags);
-    assert(BeginResizeInput(&input, tty, 123456) && !ResizeInputReady(&input));
-    int queued;
-    assert(ioctl(tty, FIONREAD, &queued) == 0 && queued == 0);
-    assert(ReadResizeInput(&input, tty) == ResizeInputWaiting);
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Queued code, replies and a partial paste.
-    assert(!ResizeInputReady(&input));
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Paste trailer and a pre-arm code prefix.
-    assert(ResizeInputReady(&input) && input.mode == ResizeMouse);
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Code suffix cannot cross negotiation.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Split a valid motion packet.
-    ResizeExpect(wire, &input, tty, ResizeInputMotion);
-    assert(input.motionX == 2.5 / 80 && input.motionY == 3.5 / 24);
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Release, drag, wheel and off-grid reports.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Fresh left press is not consent.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Typed show and bare Return.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // DCS containing fake code and BEL.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Malformed CSI taints the code line.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Split a code candidate across reads.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Motion breaks the same candidate.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Code prefix before a multiline paste.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Suffix after a split paste trailer.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Even an empty paste taints its whole line.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Extra or missing digits/whitespace.
-    ResizeExpect(wire, &input, tty, ResizeInputDismiss); // Queued hide wins over the exact code.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Dismissal consumed the challenge.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Leave an unfinished packet in the parser.
-    TTYStep(wire); // Leave the next epoch's exact code queued through restoration.
-    assert(EndResizeInput(&input, tty) && EndResizeInput(&input, tty));
-    ResizeTTYRestored(tty, &before, flags);
-    char pending;
-    assert(read(tty, &pending, sizeof(pending)) < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
-
-    TTYStep(wire); // Discard old packet tail and queued Return.
-    assert(BeginResizeInput(&input, tty, 654321) && ReadResizeInput(&input, tty) == ResizeInputWaiting);
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // 2004 supported, 1003 unsupported.
-    assert(ResizeInputReady(&input) && input.mode == ResizeCanonical);
-    assert(tcgetattr(tty, &mode) == 0 && (mode.c_lflag & ICANON));
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Code inside/after canonical bracketed paste.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // No bare Return or show in fallback.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // The code from the old epoch is wrong.
-    ResizeExpect(wire, &input, tty, ResizeInputCode);
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Correct code is one-shot.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Eight reads cannot exhaust this burst.
-    assert(ReadResizeInput(&input, tty) == ResizeInputDismiss);
-
-    mode.c_lflag &= ~ICANON;
-    assert(tcsetattr(tty, TCSANOW, &mode) == 0 && ReadResizeInput(&input, tty) == ResizeInputFailed);
-    ResizeTTYRestored(tty, &before, flags);
-    assert(BeginResizeInput(&input, tty, 809073));
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting);
-    assert(ResizeInputReady(&input) && input.mode == ResizeMouse);
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // A clean prefix survives ordinary read boundaries.
-    ResizeExpect(wire, &input, tty, ResizeInputCode);
-    assert(EndResizeInput(&input, tty));
-    ResizeTTYRestored(tty, &before, flags);
-
-    assert(BeginResizeInput(&input, tty, 100000));
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting);
-    assert(ResizeInputReady(&input) && input.mode == ResizeMouse);
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // First and second wrong guesses.
-    ResizeExpect(wire, &input, tty, ResizeInputFailed); // Third wrong guess, even with the code behind it.
-    assert(!ResizeInputReady(&input) && EndResizeInput(&input, tty));
-    ResizeTTYRestored(tty, &before, flags);
-
-    assert(BeginResizeInput(&input, tty, 999999));
-    ResizeExpect(wire, &input, tty, ResizeInputFailed); // No verified bracketed paste.
-    assert(!ResizeInputReady(&input) && EndResizeInput(&input, tty));
-    ResizeTTYRestored(tty, &before, flags);
-
-    assert(BeginResizeInput(&input, tty, 123456));
-    ResizeExpect(wire, &input, tty, ResizeInputDismiss); // hide during negotiation beats the final mode replies.
-    assert(!ResizeInputReady(&input) && EndResizeInput(&input, tty));
-    ResizeTTYRestored(tty, &before, flags);
-    close(tty);
-}
-
-static void GuardedResizeTTY(void) {
-    int wire[2], master;
-    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, wire) == 0);
-    struct winsize size = {.ws_row = 24, .ws_col = 80};
-    int diagnostics = dup(STDERR_FILENO);
-    assert(diagnostics >= 0);
-    pid_t child = forkpty(&master, NULL, NULL, &size);
-    assert(child >= 0);
-    if (!child) {
-        assert(dup2(diagnostics, STDERR_FILENO) >= 0);
-        close(diagnostics);
-        close(wire[0]);
-        ResizeTTYChild(wire[1]);
-        _exit(0);
-    }
-    close(diagnostics);
-    close(wire[1]);
-    const char *steps[] = {
-        "123456\r\033[<0;2;",
-        "123456\r\033[?2004;1$y\033[?1006;1$y\033[?1003;1$y\033[200~\r",
-        "\033[<0;2;3M\r\033[201~123456\r123",
-        "456\r",
-        "\033[<35;3;", "4M",
-        "\033[<0;3;4m\033[<32;3;4M\033[<64;3;4M\033[<35;81;4M\033[<0;3;25M",
-        "\033[<0;3;4M",
-        "show\r\r",
-        "\033PReply\a123456\rhide\r\033\\123456\r",
-        "\033[<0;;4M123456\r",
-        "123", "\033[<35;3;4M456\r",
-        "123\033[200~456\rhide\r\033[20", "1~456\r",
-        "\033[200~\033[201~123456\r",
-        "1234567\r 123456\r12345\r",
-        "123456\rhide\r",
-        "123456\r",
-        "\033[<0;3;",
-        "654321\r",
-        "4M\r",
-        "\033[?2004;1$y\033[?1006;1$y\033[?1003;0$y",
-        "\033[200~654321\r\033[201~654321\r",
-        "show\r\r",
-        "123456\r",
-        "654321\r",
-        "654321\r",
-        "\rx\rx\rx\rx\rx\rx\rx\rhide\r",
-        "\033[?2004;1$y\033[?1006;1$y\033[?1003;1$y",
-        "809", "073\r",
-        "\033[?2004;1$y\033[?1006;1$y\033[?1003;1$y",
-        "111111\r222222\r",
-        "333333\r100000\r",
-        "\033[?2004;0$y\033[?1006;1$y\033[?1003;1$y",
-        "123456\r\033[<35;2;2Mhi\033[?2004;1$y\033[<35;3;3Mde\r\033[?1006;1$y\033[?1003;1$y",
-    };
-    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); ++i) {
-        char step;
-        assert(read(wire[0], &step, 1) == 1 && step == '?');
-        assert(WriteAll(master, steps[i], strlen(steps[i])) && WriteAll(wire[0], "!", 1));
-    }
-    char output[640] = {0};
-    size_t used = 0;
-    ssize_t count;
-    while ((count = read(master, output + used, sizeof(output) - 1 - used)) > 0) {
-        used += (size_t)count;
-        assert(used < sizeof(output) - 1);
-    }
-    const char *save = "\033[?1003;1006;2004s";
-    const char *restore = "\033[?1003;1006;2004r";
-    const char *cursor = output;
-    for (unsigned i = 0; i < 6; ++i) {
-        cursor = strstr(cursor, save);
-        assert(cursor && strstr(cursor, "\033[?2004h\033[?1006h\033[?1003h"));
-        cursor = strstr(cursor, restore);
-        assert(cursor);
-        cursor += strlen(restore);
-    }
-    assert(!strstr(cursor, save) && !strstr(cursor, restore));
-    assert(strstr(output, "\033[?1003;1006r"));
-    assert(!strstr(output, "123456") && !strstr(output, "654321") &&
-        !strstr(output, "809073") && !strstr(output, "100000"));
-    int status;
-    assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
-    close(master);
-    close(wire[0]);
 }
 
 int main(int argc, const char *argv[]) {
@@ -693,11 +392,8 @@ int main(int argc, const char *argv[]) {
         RemapPinnedWindow();
         WatcherProtocol();
         WatcherLease();
+        WatcherDrain();
         FocusAcknowledgment();
-        GuardedLease();
-        GuardedPresentation();
-        GuardedTTY();
-        GuardedResizeTTY();
         puts("preview geometry tests passed");
     }
     return 0;

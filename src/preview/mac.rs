@@ -225,18 +225,15 @@ fn run_anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
 fn run(url: &str, anchor: Anchor<'_>, watcher: &mut Child) -> Result<(), String> {
     let state = watcher.stdout.take().ok_or("missing preview observer pipe")?;
     let (reader, reply) = focus_pipe().map_err(|_| "could not open the preview focus acknowledgment pipe")?;
-    let mode = if anchor.confirm { "confirm" } else { "auto" };
-    let helper = spawn(&[url, &anchor.native_window_id.to_string(), mode], state.into(), Some(reader))
+    let helper = spawn(&[url, &anchor.native_window_id.to_string()], state.into(), Some(reader))
         .map_err(|_| "could not launch the local WebKit helper")?;
-    serve_actions(helper, reply, |guarded| {
-        crate::rex::return_preview_focus(Anchor { confirm: anchor.confirm || guarded, ..anchor }).is_ok()
-    })
+    serve_actions(helper, reply, || crate::rex::return_preview_focus(anchor).is_ok())
 }
 
 fn serve_actions(
     mut helper: Child,
     mut reply: io::PipeWriter,
-    mut return_focus: impl FnMut(bool) -> bool,
+    mut return_focus: impl FnMut() -> bool,
 ) -> Result<(), String> {
     let mut actions = io::BufReader::new(helper.stdout.take().expect("helper stdout is piped"));
     let mut action = String::new();
@@ -244,15 +241,11 @@ fn serve_actions(
         action.clear();
         match actions.read_line(&mut action) {
             Ok(0) => break,
-            Ok(_) if matches!(action.as_str(), "focus\n" | "focus-confirm\n") => {
-                if !return_focus(action == "focus-confirm\n") {
-                    // Don't raise another window or silently redisplay the panel
-                    // when the original terminal no longer accepts focus.
-                    let _ = helper.kill();
-                    let _ = helper.wait();
-                    return Err("could not return focus to the original Rex terminal; the preview was closed".into());
-                }
-                if reply.write_all(b"1").is_err() {
+            Ok(_) if action == "focus\n" => {
+                // A tab may disappear while Rex handles the request. Never
+                // activate a different terminal or discard the existing page.
+                let result = if return_focus() { b"1" } else { b"0" };
+                if reply.write_all(result).is_err() {
                     // The helper may have closed while Rex was handling the
                     // request. EOF makes any surviving helper close as well.
                     break;
@@ -336,8 +329,7 @@ mod tests {
         let helper = command.spawn().unwrap();
         drop(command);
         let mut attempts = 0;
-        serve_actions(helper, reply, |guarded| {
-            assert!(!guarded);
+        serve_actions(helper, reply, || {
             attempts += 1;
             let mut fds = [libc::pollfd { fd: monitor.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
             // Simulate a Rex RPC that takes long enough for the child to wait on the pipe.
@@ -349,27 +341,27 @@ mod tests {
     }
 
     #[test]
-    fn rejected_focus_ends_the_panel_without_retrying() {
-        let helper = Command::new("/bin/sh")
-            .args(["-c", "printf 'focus-confirm\\n'; exec /bin/sleep 30"])
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let pid = libc::pid_t::try_from(helper.id()).unwrap();
-        let (mut reader, reply) = focus_pipe().unwrap();
+    fn refused_focus_preserves_the_helper_for_a_later_explicit_return() {
+        let (reader, reply) = focus_pipe().unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", r#"
+                for expected in 0 1; do
+                    printf 'focus\n'
+                    test "$(/usr/bin/head -c 1 "/dev/fd/$MILO_PREVIEW_FOCUS_FD")" = "$expected" || exit 1
+                done
+            "#])
+            .stdout(Stdio::piped());
+        inherit_focus_reader(&mut command, reader);
+        let helper = command.spawn().unwrap();
+        drop(command);
         let mut attempts = 0;
-        let error = serve_actions(helper, reply, |guarded| {
-            assert!(guarded);
+        serve_actions(helper, reply, || {
             attempts += 1;
-            false
+            attempts == 2
         })
-        .unwrap_err();
-        assert!(error.contains("could not return focus"));
-        assert_eq!(attempts, 1);
-        assert_eq!(reader.read(&mut [0]).unwrap(), 0);
-        // SAFETY: a null status discards the exit status of this test's known child.
-        assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) }, -1);
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+        .unwrap();
+        assert_eq!(attempts, 2);
     }
 
     #[test]
@@ -377,6 +369,6 @@ mod tests {
         let helper = Command::new("/bin/sh").args(["-c", "printf 'focus\\n'"]).stdout(Stdio::piped()).spawn().unwrap();
         let (reader, reply) = focus_pipe().unwrap();
         drop(reader);
-        serve_actions(helper, reply, |_| true).unwrap();
+        serve_actions(helper, reply, || true).unwrap();
     }
 }

@@ -12,11 +12,29 @@ pub(crate) struct Anchor<'a> {
     pub owner: &'a str,
     pub owner_pid: u32,
     pub native_window_id: std::num::NonZeroU32,
-    pub confirm: bool,
 }
 
 pub(crate) const EXPECTED: &str = "expected milo preview URL [--placement right|left|above|below]";
-pub(crate) const HELP: &str = "Usage: milo preview URL [--placement right|left|above|below]\n\nOpen a local dev site beside the working terminal in this Rex tab. Right is the default. Change Preview placement in Settings or use --placement once.\n\nExperimental: placement is approximate. Start in a Mac-created working terminal with one visible local Rex window. No Accessibility, Screen Recording or Remote Control permission is needed.\n\nMultiple sessions may stay attached. Click the new preview tile and follow its prompt to show the page for up to 12 seconds. Drag the Rex divider to resize; release, then return inside the tile. If prompted, type the six digits beside Milo in the Mac menu bar into the preview tile and press Return. Rex does not report every same-window session switch; dismiss the peek before switching.\n\nUse HTTP or HTTPS on localhost, 127.0.0.1 or [::1], without credentials, query or fragment. Milo does not search for servers. Remote terminals and floating previews are not supported.\n\nSelect an element, review its structural path, then choose Copy. Nothing is sent to an agent. Command-Shift-Return returns focus; Command-W in the preview closes it. Closing the Rex anchor also closes the preview.";
+pub(crate) const HELP: &str = "\
+Usage: milo preview URL [--placement right|left|above|below]
+
+Open a persistent local browser pane beside the working terminal in this Rex tab.
+Right is the default. Change Preview placement in Settings or override it once.
+Use HTTP or HTTPS on localhost, 127.0.0.1 or [::1], without credentials, query or fragment.
+
+Keep working in the sibling terminal or drag the Rex divider. The page stays
+loaded. Command-Shift-Return returns keyboard focus; Command-W in the preview
+closes it. Select an element, review its structural path, then choose Copy.
+Nothing is sent to an agent.
+
+Experimental macOS overlay: placement is approximate. Start in a Mac-created
+terminal with one visible local Rex window. No Accessibility, Screen Recording,
+Remote Control, port scanning or default-browser change. Remote and floating
+previews are not supported.
+
+Rex can report a tab change but not every session or host switch inside the same
+Mac window. The preview can remain over that other session indefinitely. Close
+the preview before switching sessions or hosts in the pinned window.";
 
 /// Restrict the authority before passing the literal URL through Rex. WebKit checks
 /// the parsed origin again on navigation. Never echo a rejected URL in an error.
