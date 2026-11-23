@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{self, BufReader, Read as _, Seek as _};
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -63,6 +63,7 @@ impl Task {
             .stdin(Stdio::from(input.try_clone().map_err(|_| START)?))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .process_group(0)
             .args(["-hide_banner", "-v", "error", "-max_alloc", "67108864"]);
         if !probe {
             command.args(["-nostdin", "-filter_threads", "1"]);
@@ -209,7 +210,7 @@ struct Exchange {
 
 /// The owner drops this before rewinding the snapshot or hiding the player.
 pub(super) struct Job {
-    child: Child,
+    child: Option<Child>,
     worker: Option<JoinHandle<Result<Output, &'static str>>>,
     exchange: Arc<Exchange>,
     task: Task,
@@ -219,7 +220,7 @@ impl Job {
     pub(super) fn start(tools: &Tools, input: &mut File, task: Task) -> Result<Self, &'static str> {
         let mut child = task.prepare(tools, input)?.spawn().map_err(|_| START)?;
         let stdout = child.stdout.take().expect("decoder stdout is piped");
-        let mut job = Self { child, worker: None, exchange: Arc::new(Exchange::default()), task };
+        let mut job = Self { child: Some(child), worker: None, exchange: Arc::new(Exchange::default()), task };
         let exchange = Arc::clone(&job.exchange);
         job.worker = Some(
             thread::Builder::new()
@@ -249,19 +250,58 @@ impl Job {
     }
 
     pub(super) fn finish(&mut self) -> Result<Option<Output>, &'static str> {
-        if crate::fs_ops::over_memory_budget(&self.child) {
+        let child = self.child.as_ref().expect("active video job owns its child");
+        if crate::fs_ops::over_memory_budget(child) {
             return Err("The local MP4 decoder exceeded its memory budget.");
         }
         let worker = self.worker.as_ref().expect("active video job owns its worker");
         if !worker.is_finished() {
             return Ok(None);
         }
-        let Some(status) = self.child.try_wait().map_err(|_| self.task.error())? else {
+        let Some(status) = self.reap(false).map_err(|_| self.task.error())? else {
             return Ok(None);
         };
         let result =
             self.worker.take().expect("active video job owns its worker").join().map_err(|_| self.task.error())?;
         if status.success() { result.map(Some) } else { Err(self.task.error()) }
+    }
+
+    /// Even after a natural exit, a helper with stdout closed may still share
+    /// the snapshot's input offset with the next job.
+    fn reap(&mut self, cancel: bool) -> io::Result<Option<ExitStatus>> {
+        let Some(child) = &self.child else { return Ok(None) };
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        let exited = loop {
+            // SAFETY: info is writable and P_PID selects only this direct child.
+            let result = unsafe {
+                libc::waitid(libc::P_PID, child.id(), info.as_mut_ptr(), libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
+            };
+            if result == 0 {
+                // SAFETY: waitid filled the exit record or left the zeroed no-event record.
+                let info = unsafe { info.assume_init() };
+                // SAFETY: P_PID with WEXITED returns child status (or zero for no child ready).
+                break unsafe { info.si_pid() } != 0;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        };
+        if !cancel && !exited {
+            return Ok(None);
+        }
+
+        let mut child = self.child.take().expect("the decoder child has not been reaped");
+        if let Ok(group) = libc::pid_t::try_from(child.id())
+            && group > 1
+        {
+            // SAFETY: waitid confirmed this is our child without reaping it,
+            // so the private process group still belongs to this job.
+            unsafe { libc::killpg(group, libc::SIGKILL) };
+        } else {
+            let _ = child.kill();
+        }
+        child.wait().map(Some)
     }
 }
 
@@ -271,8 +311,7 @@ impl Drop for Job {
         if let Some(worker) = &self.worker {
             worker.thread().unpark();
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.reap(true);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -395,7 +434,132 @@ fn read_frame(reader: &mut impl io::Read, frame: &mut VideoFrame) -> io::Result<
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
     use super::*;
+    use crate::fixture::Fixture;
+    use crate::format::tests::stand_in;
+
+    #[test]
+    fn dropping_a_video_job_does_not_wait_for_a_decoder_helper() {
+        let f = Fixture::folder();
+        f.write("snapshot.mp4", "");
+        let mut snapshot = File::open(f.root.join("snapshot.mp4")).unwrap();
+        stand_in(
+            &f.root,
+            "ffprobe",
+            // The helper inherits the output pipe and serves no output. Its
+            // bounded loop is also a fallback if the test never releases it.
+            r#"cd "${0%/*}" || exit 1
+(
+    : > helper-ready
+    i=0
+    while [ ! -f release-helper ] && [ "$i" -lt 400 ]; do
+        /bin/sleep 0.025
+        i=$((i+1))
+    done
+) &
+wait"#,
+        );
+        let probe = f.root.join("ffprobe").into_os_string().into_string().unwrap().leak();
+        let job = Job::start(&Tools { ffprobe: probe, ffmpeg: probe }, &mut snapshot, Task::Probe).unwrap();
+        let ready = f.root.join("helper-ready");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.is_file() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(ready.is_file(), "the fixture helper did not start");
+
+        let (closed, result) = mpsc::channel();
+        let close = thread::spawn(move || {
+            drop(job);
+            closed.send(()).unwrap();
+        });
+        let closed_before_release = result.recv_timeout(Duration::from_secs(2));
+        f.write("release-helper", "");
+        close.join().unwrap();
+        assert!(closed_before_release.is_ok(), "closing MP4 preview waited for the decoder helper's output pipe");
+    }
+
+    #[test]
+    fn a_finished_probe_cannot_consume_the_next_decoders_snapshot() {
+        fn finish(job: &mut Job) -> Result<Output, &'static str> {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(output) = job.finish()? {
+                    return Ok(output);
+                }
+                assert!(Instant::now() < deadline, "fixture decoder did not finish");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        let f = Fixture::folder();
+        f.write("snapshot.mp4", "good\n");
+        let mut snapshot = File::open(f.root.join("snapshot.mp4")).unwrap();
+        stand_in(
+            &f.root,
+            "ffprobe",
+            // The helper closes the output pipe but keeps the probe's stdin.
+            // Only consume a byte after the next job has rewound that file.
+            r#"cd "${0%/*}" || exit 1
+exec 3<&0
+(
+    : > helper-ready
+    i=0
+    while [ ! -f release-helper ] && [ "$i" -lt 400 ]; do
+        /bin/sleep 0.025
+        i=$((i+1))
+    done
+    [ -f release-helper ] || exit 1
+    /bin/dd bs=1 count=1 of=/dev/null || exit 1
+    : > snapshot-consumed
+) <&3 >/dev/null 2>&1 &
+printf '[STREAM]\ncodec_name=h264\nwidth=1\nheight=1\nduration=1\n[/STREAM]\n'"#,
+        );
+        stand_in(
+            &f.root,
+            "ffmpeg",
+            // Do not read until the test has given the previous helper a
+            // chance to consume the first byte after this job's rewind.
+            r#"cd "${0%/*}" || exit 1
+i=0
+while [ ! -f decoder-read ] && [ "$i" -lt 400 ]; do
+    /bin/sleep 0.025
+    i=$((i+1))
+done
+IFS= read -r header
+[ "$header" = good ] || exit 1
+printf 'P6\n1 1\n255\n\001\002\003'"#,
+        );
+        let tool_path = |name| f.root.join(name).into_os_string().into_string().unwrap().leak() as &'static str;
+        let tools = Tools { ffprobe: tool_path("ffprobe"), ffmpeg: tool_path("ffmpeg") };
+        let mut probe = Job::start(&tools, &mut snapshot, Task::Probe).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !f.root.join("helper-ready").is_file() {
+            assert!(Instant::now() < deadline, "the fixture helper did not start");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(finish(&mut probe), Ok(Output::Duration(duration)) if duration == Duration::from_secs(1)));
+        drop(probe);
+
+        let task = Task::Frames { from: Duration::ZERO, left: Duration::from_secs(1), playing: false };
+        let mut decoder = Job::start(&tools, &mut snapshot, task).unwrap();
+        f.write("release-helper", "");
+        let consumed = f.root.join("snapshot-consumed");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !consumed.is_file() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        f.write("decoder-read", "");
+        if let Err(error) = finish(&mut decoder) {
+            let consumed = consumed.is_file();
+            panic!("the next decoder could not show a frame (previous helper read snapshot: {consumed}): {error}");
+        }
+        let mut visible = None;
+        assert_eq!(decoder.take_frame(&mut visible), Some(Duration::ZERO));
+        assert_eq!(visible.unwrap().rgb, [1, 2, 3]);
+    }
 
     #[test]
     fn cpu_limits_distinguish_stills_and_probes_from_long_playback() {
