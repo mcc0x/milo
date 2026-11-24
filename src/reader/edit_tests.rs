@@ -150,13 +150,16 @@ fn the_unsaved_question_can_save_and_close() {
 #[test]
 fn a_file_changed_on_disk_is_not_overwritten_without_asking() {
     let f = Fixture::folder();
-    f.write("notes.txt", "one\n");
-    let file = f.root.join("notes.txt");
-    let mut reader = editing(&f, "notes.txt");
+    f.write("notes.md", "one\n");
+    let file = f.root.join("notes.md");
+    let mut reader = editing(&f, "notes.md");
     typed(&mut reader, "mine ");
 
     // Another program rewrites the file in place, then replaces it with a new file.
     fs::write(&file, "theirs\n").unwrap();
+    reader.filesystem_changed();
+    reader.check();
+    assert_eq!(draft(&reader), "mine one\n");
     reader.key(Key::Ctrl(b's'));
     assert_native_keys_inert(&mut reader);
     assert_eq!(drawn(&mut reader, 60, 4)[3], " Changed on disk: c compare · o overwrite · Esc back");

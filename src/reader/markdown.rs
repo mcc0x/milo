@@ -1,10 +1,18 @@
 //! A local Markdown view: render text into Screen cells, never into terminal commands.
 //! URLs and image paths are discarded; HTML, references and unsupported syntax stay text.
 
+use std::time::Instant;
+
 use crate::diff::{Line, LineKind};
 use crate::screen::{CYAN, MAGENTA, Screen, Style, YELLOW};
 use crate::ui::{self, FAINT};
 use crate::width::{CellWidth, cell_width};
+
+mod updates;
+
+use updates::{Marks, Matches};
+
+pub(super) const EMPTY: &str = "No Markdown content.";
 
 const MAX_BYTES: usize = 512 << 10;
 const MAX_LINES: usize = 20_000;
@@ -23,65 +31,138 @@ pub(super) struct Preview {
     layout: Layout,
     top: usize,
     height: usize,
+    // The passage being read can outlive rounding to a wrapped row or clamping at the end.
+    anchor: Option<Position>,
     pending_line: Option<usize>,
+    following: bool,
+    marks: Marks,
 }
 
 impl Preview {
     pub(super) fn new(lines: &[Line]) -> Self {
-        Self { doc: Document::parse(lines), layout: Layout::default(), top: 0, height: 0, pending_line: None }
-    }
-
-    pub(super) fn replace(&mut self, lines: &[Line]) {
-        let anchor = self.anchor();
-        self.doc = Document::parse(lines);
-        if self.layout.width != 0 {
-            self.layout.reflow(&self.doc, self.layout.width);
-            if let Some(anchor) = anchor {
-                self.restore(anchor);
-            }
+        Self {
+            doc: Document::parse(lines),
+            layout: Layout::default(),
+            top: 0,
+            height: 0,
+            anchor: None,
+            pending_line: None,
+            following: false,
+            marks: Marks::default(),
         }
     }
 
+    pub(super) fn replace(&mut self, lines: &[Line]) {
+        self.replace_at(lines, Instant::now());
+    }
+
+    fn replace_at(&mut self, lines: &[Line], now: Instant) {
+        self.expire_marks(now);
+        let doc = Document::parse(lines);
+        // Source lines can move even when the rendered document does not.
+        if self.doc.text == doc.text
+            && self.doc.blocks == doc.blocks
+            && self.doc.runs == doc.runs
+            && self.doc.trimmed == doc.trimmed
+        {
+            self.doc.sources = doc.sources;
+            return;
+        }
+        let matches = Matches::between(&self.doc, &doc);
+        self.anchor = if self.following {
+            None
+        } else {
+            self.position().map(|position| matches.translate(position, &self.doc, &doc))
+        };
+        self.marks.update(&matches, &self.doc, &doc, now);
+        let was_trimmed = self.doc.trimmed || self.layout.trimmed;
+        self.doc = doc;
+        if self.layout.width != 0 {
+            self.layout.reflow(&self.doc, self.layout.width);
+            if let Some(anchor) = &mut self.anchor {
+                // Only carry the notice across a save if both previews have one.
+                anchor.limit &= was_trimmed && (self.doc.trimmed || self.layout.trimmed);
+            }
+            self.place();
+        }
+    }
+
+    /// Also returns true when manual navigation turns off follow without moving.
     pub(super) fn scroll(&mut self, delta: isize) -> bool {
+        let following = self.following;
+        self.stop_follow();
+        self.anchor = None;
         let top = self.top.saturating_add_signed(delta).min(self.last_top());
         let moved = top != self.top;
         self.top = top;
-        moved
+        moved || following
+    }
+
+    /// Pins the viewport to the last page. Returns whether the visible state changed.
+    pub(super) fn follow_end(&mut self) -> bool {
+        let changed = !self.following || self.top != self.last_top();
+        self.following = true;
+        self.anchor = None;
+        self.pending_line = None;
+        self.top = self.last_top();
+        changed
+    }
+
+    pub(super) fn following(&self) -> bool {
+        self.following
+    }
+
+    pub(super) fn stop_follow(&mut self) {
+        self.following = false;
+    }
+
+    pub(super) fn mark_deadline(&self) -> Option<Instant> {
+        self.marks.deadline()
+    }
+
+    pub(super) fn expire_marks(&mut self, now: Instant) {
+        self.marks.expire(now);
     }
 
     /// Places an editor's top line in view once the preview has a viewport.
     pub(super) fn go_to_line(&mut self, line: usize) {
+        self.stop_follow();
         if self.layout.width == 0 {
             self.pending_line = Some(line);
         } else {
-            self.restore(Anchor { line, offset: 0, limit: false });
+            self.anchor = Some(self.line_position(line));
+            self.place();
         }
     }
 
     /// The working file line at the top of the rendered view, counted from zero.
     pub(super) fn source_line(&self) -> usize {
-        self.pending_line.unwrap_or_else(|| self.anchor().map_or(self.doc.sources[0].line, |anchor| anchor.line))
+        self.pending_line.unwrap_or_else(|| {
+            let position = self.top_row().map_or((0, 0), |row| row.position());
+            let at = self.doc.sources.partition_point(|source| source.position <= position).saturating_sub(1);
+            self.doc.sources[at].line
+        })
     }
 
     pub(super) fn draw(&mut self, screen: &mut Screen, rows: usize) {
-        self.height = rows.min(screen.h.saturating_sub(1));
-        if screen.w == 0 || self.height == 0 {
+        let height = rows.min(screen.h.saturating_sub(1));
+        if screen.w == 0 || height == 0 {
             return;
         }
         let width = screen.w - usize::from(screen.w > 1);
-        let requested = self.pending_line.take().map(|line| Anchor { line, offset: 0, limit: false });
-        let anchor = if width != self.layout.width {
-            let anchor = requested.or_else(|| self.anchor());
-            self.layout.reflow(&self.doc, width);
-            anchor
-        } else {
-            requested
-        };
-        if let Some(anchor) = anchor {
-            self.restore(anchor);
+        if self.pending_line.is_some() || width != self.layout.width || height != self.height {
+            if !self.following {
+                self.anchor = self.pending_line.take().map(|line| self.line_position(line)).or_else(|| self.position());
+            }
+            self.height = height;
+            if width != self.layout.width {
+                self.layout.reflow(&self.doc, width);
+            }
+            self.place();
         }
-        self.top = self.top.min(self.last_top());
-        for (i, row) in self.layout.rows.iter().skip(self.top).take(self.height).enumerate() {
+        let shown = &self.layout.rows[self.top.min(self.layout.rows.len())..];
+        let shown = &shown[..shown.len().min(self.height)];
+        for (i, row) in shown.iter().enumerate() {
             self.doc.draw_row(screen, i + 1, width, *row);
         }
         let total = self.layout.len();
@@ -91,64 +172,75 @@ impl Preview {
         if screen.w > 1 {
             ui::thumb(screen, width, 1, self.height, total, self.top);
         }
+        self.marks.draw(screen, shown);
     }
 
     fn last_top(&self) -> usize {
         self.layout.len().saturating_sub(self.height.max(1))
     }
 
-    fn anchor(&self) -> Option<Anchor> {
-        let at_layout_limit = self.layout.trimmed && self.top == self.layout.rows.len();
-        let position = self.layout.rows.get(self.top).or_else(|| self.layout.rows.last())?.position();
-        let at = self.doc.sources.partition_point(|source| source.position <= position) - 1;
-        let source = self.doc.sources[at];
-        Some(Anchor {
-            line: source.line,
-            offset: position.1 - source.position.1,
-            limit: at_layout_limit || (self.doc.trimmed && at + 1 == self.doc.sources.len()),
+    fn top_row(&self) -> Option<&Row> {
+        self.layout.rows.get(self.top).or_else(|| self.layout.rows.last())
+    }
+
+    fn position(&self) -> Option<Position> {
+        if let Some(anchor) = self.anchor {
+            return Some(anchor);
+        }
+        let row = self.top_row()?;
+        Some(Position {
+            block: row.block,
+            offset: row.start - self.doc.blocks[row.block].start,
+            limit: (self.layout.trimmed && self.top == self.layout.rows.len())
+                || (self.doc.trimmed && row.block + 1 == self.doc.blocks.len()),
         })
     }
 
-    fn restore(&mut self, anchor: Anchor) {
-        if anchor.limit && self.layout.trimmed {
+    fn line_position(&self, line: usize) -> Position {
+        let at = self.doc.sources.partition_point(|source| source.line < line);
+        // If the truncation note shares a line number, choose the actual text first.
+        let at =
+            if self.doc.sources.get(at).is_some_and(|source| source.line == line) { at } else { at.saturating_sub(1) };
+        let (block, byte) = self.doc.sources[at].position;
+        Position { block, offset: byte - self.doc.blocks[block].start, limit: false }
+    }
+
+    fn place(&mut self) {
+        if self.following {
+            self.top = self.last_top();
+        } else if let Some(position) = self.anchor {
+            self.restore(position);
+        } else {
+            self.top = self.top.min(self.last_top());
+        }
+    }
+
+    fn restore(&mut self, position: Position) {
+        if position.limit && self.layout.trimmed {
             self.top = self.last_top();
             return;
         }
-        let on_input_limit = anchor.limit && self.doc.trimmed;
-        let at = if on_input_limit {
-            self.doc.sources.len() - 1
+        let (block, offset) = if position.limit && self.doc.trimmed {
+            (self.doc.blocks.len() - 1, 0)
         } else {
-            let at = self.doc.sources.partition_point(|source| source.line < anchor.line);
-            // The truncation note can share a source number with the last
-            // actual line. An editor jump to that number chooses the text.
-            if self.doc.sources.get(at).is_some_and(|source| source.line == anchor.line) {
-                at
-            } else {
-                at.saturating_sub(1)
-            }
+            (position.block, position.offset)
         };
-        let source = self.doc.sources[at];
-        let (block, byte) = source.position;
-        let end = self.doc.sources.get(at + 1).map_or(self.doc.end(block), |next| next.position.1);
-        let offset = if on_input_limit { 0 } else { anchor.offset };
-        let position = (block, (byte + offset).min(end.saturating_sub(1).max(byte)));
+        let start = self.doc.blocks[block].start;
+        let at = (block, start + offset.min(self.doc.end(block).saturating_sub(start + 1)));
         if self.layout.trimmed
-            && self
-                .layout
-                .rows
-                .last()
-                .is_some_and(|last| position >= (last.block, last.end) && position > last.position())
+            && self.layout.rows.last().is_some_and(|last| at >= (last.block, last.end) && at > last.position())
         {
             self.top = self.last_top();
             return;
         }
-        self.top = self.layout.rows.partition_point(|row| row.position() <= position).saturating_sub(1);
+        self.top = self.layout.rows.partition_point(|row| row.position() <= at).saturating_sub(1);
         self.top = self.top.min(self.last_top());
     }
 }
 
-struct Anchor {
-    line: usize,
+#[derive(Clone, Copy)]
+struct Position {
+    block: usize,
     offset: usize,
     limit: bool,
 }
@@ -168,6 +260,7 @@ struct Document {
     trimmed: bool,
 }
 
+#[derive(PartialEq, Eq)]
 struct Run {
     // The input caps keep even expanded Markdown well below 4 GiB.
     start: u32,
@@ -180,12 +273,13 @@ impl Run {
     }
 }
 
+#[derive(PartialEq, Eq)]
 struct Block {
     start: usize,
     format: Format,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 struct Format {
     quotes: usize,
     indent: usize,
@@ -315,7 +409,7 @@ impl Document {
         }
         if trimmed || doc.blocks.is_empty() {
             doc.begin(source, Format::default());
-            doc.write(if trimmed { TRIMMED } else { "No Markdown content." }, FAINT);
+            doc.write(if trimmed { TRIMMED } else { EMPTY }, FAINT);
         }
         doc.trimmed = trimmed;
         doc
@@ -323,6 +417,21 @@ impl Document {
 
     fn end(&self, block: usize) -> usize {
         self.blocks.get(block + 1).map_or(self.text.len(), |next| next.start)
+    }
+
+    fn key(&self, index: usize) -> (Format, &str) {
+        let block = &self.blocks[index];
+        (block.format, &self.text[block.start..self.end(index)])
+    }
+
+    fn styles(&self, block: usize) -> impl Iterator<Item = (usize, Style)> + '_ {
+        let start = self.blocks[block].start;
+        let end = self.end(block);
+        let first = self.runs.partition_point(|run| run.start() <= start).saturating_sub(1);
+        self.runs[first..]
+            .iter()
+            .take_while(move |run| start < end && run.start() < end)
+            .map(move |run| (run.start().saturating_sub(start), run.style))
     }
 
     fn begin(&mut self, source: usize, format: Format) {
@@ -914,10 +1023,380 @@ mod tests {
         let mut narrow = Screen::sized(1, 3);
         preview.draw(&mut narrow, 2);
         assert_eq!(&narrow.text()[1..], ["…", "e\u{0301}"]);
+        preview.replace(&lines(&["first", "", "", "界o\u{0308}端", "", "last"]));
+        narrow.clear();
+        preview.draw(&mut narrow, 2);
+        assert_eq!(&narrow.text()[1..], ["…", "o\u{0308}"]);
         assert!(preview.scroll(isize::MAX));
         assert!(!preview.scroll(isize::MAX));
         assert!(preview.scroll(isize::MIN));
         assert_eq!(preview.source_line(), 0);
+    }
+
+    #[test]
+    fn keeps_a_wrapped_anchor_after_inserting_and_deleting_blocks_above_it() {
+        let now = Instant::now();
+        let paragraph = "alpha beta gamma delta epsilon zeta eta theta";
+        let mut preview = Preview::new(&lines(&["# Before", "# Delete later", paragraph, "# End", "# Tail"]));
+        let mut screen = Screen::sized(13, 3);
+        preview.go_to_line(2);
+        preview.draw(&mut screen, 2);
+        assert!(preview.scroll(1));
+
+        preview.replace_at(&lines(&["# Inserted", "# Before", "# Delete later", paragraph, "# End", "# Tail"]), now);
+        screen.clear();
+        preview.draw(&mut screen, 2);
+        assert!(screen.text()[1].starts_with("gamma delta"));
+        assert_eq!(preview.source_line(), 3);
+
+        preview.replace_at(&lines(&["# Inserted", paragraph, "# End", "# Tail"]), now);
+        screen.clear();
+        preview.draw(&mut screen, 2);
+        assert!(screen.text()[1].starts_with("gamma delta"));
+        assert_eq!(preview.source_line(), 1);
+    }
+
+    #[test]
+    fn keeps_reading_the_same_text_when_a_line_is_inserted_inside_the_paragraph() {
+        let now = Instant::now();
+        let old = ["# Lead", "alpha beta", "gamma delta epsilon zeta", "eta theta omega", "# End"];
+        let mut preview = Preview::new(&lines(&old));
+        let mut screen = Screen::sized(13, 3);
+        preview.go_to_line(2);
+        preview.draw(&mut screen, 2);
+        assert!(screen.text()[1].starts_with("gamma delta"));
+
+        let inserted = ["# Lead", "alpha beta", "prefix long", "gamma delta epsilon zeta", "eta theta omega", "# End"];
+        preview.replace_at(&lines(&inserted), now);
+        screen.clear();
+        preview.draw(&mut screen, 2);
+        assert!(screen.text()[1].starts_with("gamma delta"));
+        assert_eq!(preview.source_line(), 3);
+
+        let disjoint = ["# Lead", "alpha beta", "gamma delta epsilon zeta", "eta theta revised", "# End"];
+        preview.replace_at(&lines(&disjoint), now);
+        screen.clear();
+        preview.draw(&mut screen, 2);
+        assert!(screen.text()[1].starts_with("gamma delta"));
+        assert!(screen.text()[1].ends_with('!'));
+        assert_eq!(preview.source_line(), 2);
+    }
+
+    #[test]
+    fn keeps_the_source_line_anchor_when_a_paragraph_splits_and_merges() {
+        let now = Instant::now();
+        let merged = lines(&["# Lead", "gamma beta", "gamma delta", "eta theta omega", "# End"]);
+        let split = lines(&["# Lead", "gamma beta", "", "gamma delta", "eta theta omega", "# End"]);
+        let mut preview = Preview::new(&merged);
+        let mut screen = Screen::sized(13, 3);
+        preview.go_to_line(2);
+        preview.draw(&mut screen, 2);
+        assert!(screen.text()[1].starts_with("gamma delta"));
+
+        for (input, source) in [(&split, 3), (&merged, 2)] {
+            preview.replace_at(input, now);
+            screen.clear();
+            preview.draw(&mut screen, 2);
+            assert!(screen.text()[1].starts_with("gamma delta"));
+            assert_eq!(preview.source_line(), source);
+        }
+    }
+
+    #[test]
+    fn keeps_a_wrapped_anchor_in_a_uniquely_moved_paragraph() {
+        let paragraph = "alpha beta gamma delta epsilon zeta eta theta";
+        let old = lines(&["# Lead", paragraph, "# Kept one", "# Kept two", "# Tail"]);
+        let mut preview = Preview::new(&old);
+        let mut screen = Screen::sized(13, 3);
+        preview.go_to_line(1);
+        preview.draw(&mut screen, 2);
+        assert!(preview.scroll(1));
+
+        let new = lines(&["# Lead", "# Kept one", "# Kept two", paragraph, "# Tail"]);
+        preview.replace_at(&new, Instant::now());
+        screen.clear();
+        preview.draw(&mut screen, 2);
+        assert!(screen.text()[1].starts_with("gamma delta"));
+        assert_eq!(preview.source_line(), 3);
+    }
+
+    #[test]
+    fn continues_at_the_next_surviving_block_when_the_anchor_is_deleted() {
+        let mut preview = Preview::new(&lines(&["# Above", "# Removed", "# Next", "# Last"]));
+        let mut screen = Screen::sized(24, 2);
+        preview.go_to_line(1);
+        preview.draw(&mut screen, 1);
+        preview.replace_at(&lines(&["# Above", "# Next", "# Last"]), Instant::now());
+        screen.clear();
+        preview.draw(&mut screen, 1);
+        assert!(screen.text()[1].starts_with("Next"));
+        assert!(!screen.text()[1].ends_with('!'));
+        assert_eq!(preview.source_line(), 1);
+        assert_eq!(preview.mark_deadline(), None);
+    }
+
+    #[test]
+    fn keeps_an_unchanged_anchor_after_an_insertion_beyond_local_lookahead() {
+        let old = ["# Old head", "# Anchor", "# Still here", "# Old tail"];
+        let mut preview = Preview::new(&lines(&old));
+        let mut screen = Screen::sized(24, 4);
+        preview.go_to_line(1);
+        preview.draw(&mut screen, 3);
+
+        let mut new = vec!["# Inserted"; 40];
+        new.insert(0, "# New head");
+        new.extend(["# Anchor", "# Still here", "# New tail"]);
+        preview.replace_at(&lines(&new), Instant::now());
+        screen.clear();
+        preview.draw(&mut screen, 3);
+        let rows = screen.text();
+        assert_eq!(&rows[1..3], ["Anchor", "Still here"]);
+        assert!(rows[3].starts_with("New tail") && rows[3].ends_with('!'));
+        assert_eq!(preview.source_line(), 41);
+    }
+
+    #[test]
+    fn updates_source_lines_without_marking_identical_rendered_blocks() {
+        let mut preview = Preview::new(&lines(&["# Title", "# Anchor", "# Tail"]));
+        let mut screen = Screen::sized(24, 2);
+        preview.go_to_line(1);
+        preview.draw(&mut screen, 1);
+        preview.replace_at(&lines(&["Title", "===", "# Anchor", "# Tail"]), Instant::now());
+        screen.clear();
+        preview.draw(&mut screen, 1);
+        assert!(screen.text()[1].starts_with("Anchor"));
+        assert_eq!(preview.source_line(), 2);
+        assert_eq!(preview.mark_deadline(), None);
+    }
+
+    #[test]
+    fn marks_disjoint_changes_without_marking_a_repeated_middle() {
+        let mut old = vec!["# Same"; 80];
+        old[0] = "# First old";
+        old[79] = "# Last old";
+        let mut new = old.clone();
+        new[0] = "# First new";
+        new[79] = "# Last new";
+        new.insert(1, "# Inserted");
+        new.remove(79);
+        let mut preview = Preview::new(&lines(&old));
+        preview.replace_at(&lines(&new), Instant::now());
+        let mut screen = Screen::sized(30, 81);
+        preview.draw(&mut screen, 80);
+        let rows = screen.text();
+        assert!(rows[1].starts_with("First new") && rows[1].ends_with('!'));
+        assert!(rows[2].starts_with("Inserted") && rows[2].ends_with('!'));
+        assert!(rows[80].starts_with("Last new") && rows[80].ends_with('!'));
+        assert!(rows[3..80].iter().all(|line| line == "Same"));
+    }
+
+    #[test]
+    fn keeps_repeated_anchors_unmarked_after_a_large_insertion() {
+        let mut old = vec!["# Same"; 42];
+        old[0] = "# Old head";
+        old[41] = "# Old tail";
+        let mut preview = Preview::new(&lines(&old));
+        let mut screen = Screen::sized(24, 3);
+        preview.go_to_line(10);
+        preview.draw(&mut screen, 2);
+
+        let mut new = vec!["# Inserted"; 41];
+        new[0] = "# New head";
+        new.extend_from_slice(&old[1..41]);
+        new.push("# New tail");
+        preview.replace_at(&lines(&new), Instant::now());
+        screen.clear();
+        preview.draw(&mut screen, 2);
+        assert_eq!(preview.source_line(), 50);
+        assert!(screen.text()[1..].iter().all(|line| line.starts_with("Same") && !line.ends_with('!')));
+
+        preview.go_to_line(80);
+        screen.clear();
+        preview.draw(&mut screen, 2);
+        let rows = screen.text();
+        assert!(rows[1].starts_with("Same") && !rows[1].ends_with('!'));
+        assert!(rows[2].starts_with("New tail") && rows[2].ends_with('!'));
+    }
+
+    #[test]
+    fn unchanged_refresh_keeps_the_mark_deadline_and_later_edits_have_their_own() {
+        use std::time::Duration;
+
+        let now = Instant::now();
+        let mut preview = Preview::new(&lines(&["# Start", "# First", "# Middle", "# Last"]));
+        let first = lines(&["# Start", "# First changed", "# Middle", "# Last"]);
+        preview.replace_at(&first, now);
+        let deadline = preview.mark_deadline().unwrap();
+        let next = now + Duration::from_millis(100);
+        preview.replace_at(&first, next);
+        assert_eq!(preview.mark_deadline(), Some(deadline));
+
+        let second = lines(&["# Start", "# Inserted", "# First changed", "# Middle", "# Last changed"]);
+        preview.replace_at(&second, next);
+        assert_eq!(preview.mark_deadline(), Some(deadline));
+        let mut screen = Screen::sized(30, 6);
+        preview.draw(&mut screen, 5);
+        assert!(screen.text()[3].ends_with('!'));
+        assert!(!screen.text()[4].ends_with('!'));
+
+        preview.expire_marks(deadline);
+        screen.clear();
+        preview.draw(&mut screen, 5);
+        let rows = screen.text();
+        assert!(rows[2].ends_with('!') && rows[5].ends_with('!'));
+        assert_eq!(rows[3], "First changed");
+        assert_eq!(preview.mark_deadline(), Some(deadline + (next - now)));
+        preview.expire_marks(preview.mark_deadline().unwrap());
+        assert_eq!(preview.mark_deadline(), None);
+        screen.clear();
+        preview.draw(&mut screen, 5);
+        assert!(screen.text().iter().all(|line| !line.ends_with('!')));
+    }
+
+    #[test]
+    fn marks_rendered_style_changes_but_not_hidden_link_targets() {
+        let now = Instant::now();
+        let mut preview = Preview::new(&lines(&["[label](old)"]));
+        preview.replace_at(&lines(&["[label](new)"]), now);
+        assert_eq!(preview.mark_deadline(), None);
+        preview.replace_at(&lines(&["label"]), now);
+        assert!(preview.mark_deadline().is_some());
+        let mut screen = Screen::sized(15, 2);
+        preview.draw(&mut screen, 1);
+        assert!(screen.text()[1].ends_with('!'));
+    }
+
+    #[test]
+    fn follow_end_repins_on_replacement_and_resize_until_manual_navigation() {
+        let now = Instant::now();
+        let mut preview = Preview::new(&lines(&["# First", "# Middle", "# Last"]));
+        assert!(!preview.following());
+        assert!(preview.follow_end());
+        assert!(!preview.follow_end());
+        let mut screen = Screen::sized(25, 3);
+        preview.draw(&mut screen, 2);
+        assert!(screen.text()[2].starts_with("Last"));
+
+        preview.replace_at(&lines(&["# First", "# Middle", "# Last", "# Wide text here"]), now);
+        screen.clear();
+        preview.draw(&mut screen, 2);
+        assert!(screen.text()[2].starts_with("Wide text here"));
+        let mut narrow = Screen::sized(7, 4);
+        preview.draw(&mut narrow, 3);
+        assert!(narrow.text()[1].starts_with("Wide"));
+        assert!(narrow.text()[3].starts_with("here"));
+
+        assert!(preview.scroll(isize::MAX));
+        assert!(!preview.following());
+        assert!(!preview.scroll(isize::MAX));
+        preview.replace_at(&lines(&["# First", "# Middle", "# Last", "# Wide text here", "# New"]), now);
+        narrow.clear();
+        preview.draw(&mut narrow, 3);
+        assert!(narrow.text()[3].starts_with("here"));
+        assert!(preview.follow_end());
+        narrow.clear();
+        preview.draw(&mut narrow, 3);
+        assert!(narrow.text()[3].starts_with("New"));
+
+        preview.replace_at(&lines(&["# Short"]), now);
+        assert!(preview.following());
+        assert!(preview.scroll(-1));
+        assert!(!preview.following());
+        assert!(preview.follow_end());
+        preview.go_to_line(0);
+        assert!(!preview.following());
+    }
+
+    #[test]
+    fn keeps_the_logical_anchor_across_width_rounding_and_height_clamping() {
+        let paragraph = (0..98).map(|i| format!("w{i:04}")).collect::<Vec<_>>().join(" ");
+        let mut preview = Preview::new(&lines(&["# Lead", &paragraph]));
+        let mut narrow = Screen::sized(43, 8);
+        let mut wide = Screen::sized(49, 8);
+        let mut tall = Screen::sized(43, 13);
+        preview.draw(&mut narrow, 6);
+        assert!(preview.scroll(6));
+        for _ in 0..3 {
+            narrow.clear();
+            preview.draw(&mut narrow, 6);
+            assert!(narrow.text()[1].starts_with("w0035"));
+            wide.clear();
+            preview.draw(&mut wide, 6);
+            assert!(wide.text()[1].starts_with("w0032") && wide.text()[1].contains("w0035"));
+            tall.clear();
+            preview.draw(&mut tall, 11);
+            assert!(tall.text()[1].starts_with("w0021"));
+        }
+        // Even a scroll that can't move at the temporary boundary chooses the visible position.
+        assert!(!preview.scroll(isize::MAX));
+        narrow.clear();
+        preview.draw(&mut narrow, 6);
+        assert!(narrow.text()[1].starts_with("w0021"));
+    }
+
+    #[test]
+    fn consecutive_replacements_keep_the_retained_byte_in_bounds() {
+        let mut text = ["abcdefghijklmnopqrstuvwxyz0123456789", "# Tail A", "# Tail B", "# Tail C"];
+        let mut preview = Preview::new(&lines(&text));
+        let mut screen = Screen::sized(8, 3);
+        preview.draw(&mut screen, 2);
+        assert!(preview.scroll(2));
+        screen.clear();
+        preview.draw(&mut screen, 2);
+        assert!(screen.text()[1].starts_with("opqrstu"));
+
+        let mut narrow = Screen::sized(3, 3);
+        for (edited, expected) in [("東西南北終", "終"), ("海鳥", "鳥"), ("unrelated text", "re")] {
+            text[0] = edited;
+            preview.replace(&lines(&text));
+            narrow.clear();
+            preview.draw(&mut narrow, 2);
+            assert!(narrow.text()[1].starts_with(expected), "{edited}: {:?}", narrow.text());
+        }
+    }
+
+    #[test]
+    fn a_save_anchors_the_passage_revealed_by_widening_past_the_row_cap() {
+        let paragraph = "x".repeat(MAX_ROWS - 1) + "M" + &"y".repeat(200);
+        let mut entries = lines(&[&paragraph]);
+        let mut preview = Preview::new(&entries);
+        let mut narrow = Screen::sized(1, 2);
+        preview.draw(&mut narrow, 1);
+        assert!(preview.scroll(isize::MAX));
+
+        let mut wide = Screen::sized(65, 2);
+        preview.draw(&mut wide, 1);
+        assert!(wide.text()[1].contains("xM"));
+        let extra = 2..=u32::try_from(MAX_LINES + 1).unwrap();
+        entries.extend(extra.map(|line| Line::new(LineKind::Same, line, "# More")));
+        preview.replace(&entries);
+        wide.clear();
+        preview.draw(&mut wide, 1);
+        assert!(wide.text()[1].contains("xM"));
+    }
+
+    #[test]
+    fn removing_the_trim_notice_anchors_later_appends_to_the_surviving_passage() {
+        let mut entries = lines(&["# First", "# Second", "# Third"]);
+        let extra = 4..=u32::try_from(MAX_LINES + 1).unwrap();
+        entries.extend(extra.map(|line| Line::new(LineKind::Same, line, "# More")));
+        let mut preview = Preview::new(&entries);
+        let mut screen = Screen::sized(64, 2);
+        preview.draw(&mut screen, 1);
+        assert!(preview.scroll(isize::MAX)); // End, not following.
+        screen.clear();
+        preview.draw(&mut screen, 1);
+        assert!(screen.text()[1].starts_with(TRIMMED));
+
+        preview.replace(&entries[..3]);
+        screen.clear();
+        preview.draw(&mut screen, 1);
+        assert!(screen.text()[1].starts_with("Third"));
+
+        preview.replace(&entries);
+        screen.clear();
+        preview.draw(&mut screen, 1);
+        assert!(screen.text()[1].starts_with("Third"));
     }
 
     #[test]

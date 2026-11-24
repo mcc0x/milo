@@ -1880,3 +1880,126 @@ fn editing_a_markdown_preview_keeps_a_deleted_row_at_the_top_of_the_folded_sourc
     assert_eq!(reader.key(Key::Char('c')), After::Stay);
     assert_eq!(drawn(&mut reader, 60, 8), full);
 }
+
+#[test]
+fn only_explicit_follow_tracks_the_end_of_working_markdown() {
+    let f = Fixture::folder();
+    f.write("log.markdown", "");
+    let path = f.root.join("log.markdown");
+    let mut reader = Reader::open(&path).unwrap();
+    assert!(drawn(&mut reader, 40, 5)[1].contains("No Markdown content"));
+    reader.key(Key::Char('G'));
+    assert!(drawn(&mut reader, 40, 5)[0].contains("Following end"));
+    assert!(reader.next_frame().is_none(), "follow should sleep between saves");
+
+    let entries: String = (1..=20).map(|n| format!("- Entry {n}\n")).collect();
+    f.write("tmp", &entries);
+    fs::rename(f.root.join("tmp"), &path).unwrap();
+    reader.check();
+    assert!(drawn(&mut reader, 40, 5)[3].contains("Entry 20"));
+    assert!(reader.next_frame().is_some(), "a changed block needs an expiry frame");
+
+    // End at the bottom is still manual navigation, even though no row moves.
+    assert_eq!(reader.key(Key::End), After::Stay);
+    f.write("log.markdown", &format!("{entries}- Entry 21\n"));
+    reader.check();
+    let rows = drawn(&mut reader, 40, 5);
+    assert!(!rows[0].contains("Following") && rows[3].contains("Entry 20"), "{rows:?}");
+    reader.key(Key::Char('G'));
+    assert!(drawn(&mut reader, 28, 4)[2].contains("Entry 21"));
+    reader.key(Key::Char('m'));
+    assert!(reader.next_frame().is_none(), "source has no live marks");
+    reader.key(Key::Char('m'));
+    assert!(!drawn(&mut reader, 40, 5)[0].contains("Following"));
+}
+
+#[test]
+fn a_truncated_working_markdown_keeps_the_anchor_of_the_last_nonempty_preview() {
+    let f = Fixture::new();
+    let entries: String = (1..=20).map(|n| format!("## Entry {n:02}\n")).collect();
+    f.write("notes.md", &entries);
+    f.commit("log");
+    let mut reader = Reader::open(&f.root.join("notes.md")).unwrap();
+    drawn(&mut reader, 40, 5);
+    for _ in 0..8 {
+        reader.key(Key::Down);
+    }
+    assert!(drawn(&mut reader, 40, 5)[1].starts_with("Entry 09"));
+
+    f.write("notes.md", "");
+    reader.check();
+    let rows = drawn(&mut reader, 40, 5);
+    assert_eq!(rows[1], "No Markdown content.");
+    assert!(!rows.join("\n").contains("Entry"), "{rows:?}");
+    assert!(reader.next_frame().is_none());
+    assert_eq!(reader.key(Key::Char('m')), After::Stay);
+    assert!(drawn(&mut reader, 40, 5)[1].contains("- ## Entry 01"));
+    assert_eq!(reader.key(Key::Char('m')), After::Stay);
+
+    f.write("notes.md", &format!("## Inserted above\n{entries}"));
+    reader.check();
+    assert!(drawn(&mut reader, 40, 5)[1].starts_with("Entry 09"));
+}
+
+#[test]
+fn a_missing_or_linked_working_markdown_never_draws_its_cached_preview() {
+    let f = Fixture::folder();
+    let entries: String = (1..=20).map(|n| format!("## Entry {n:02}\n")).collect();
+    f.write("notes.md", &entries);
+    let path = f.root.join("notes.md");
+    let mut reader = Reader::open(&path).unwrap();
+    drawn(&mut reader, 40, 5);
+    reader.key(Key::Char('G'));
+    f.write("notes.md", &format!("{entries}## Last saved\n"));
+    reader.check();
+    assert!(drawn(&mut reader, 40, 5)[3].contains("Last saved"));
+    assert!(reader.next_frame().is_some());
+
+    fs::remove_file(&path).unwrap();
+    reader.check();
+    let gone = drawn(&mut reader, 40, 5).join("\n");
+    assert!(gone.contains("This file is gone.") && !gone.contains("Following") && !gone.contains("Entry"), "{gone}");
+    assert!(reader.next_frame().is_none());
+
+    f.write("other.md", "Not the working document.\n");
+    symlink("other.md", &path).unwrap();
+    reader.check();
+    let link = drawn(&mut reader, 40, 5).join("\n");
+    assert!(link.contains("other.md") && !link.contains("Following") && !link.contains("Entry"), "{link}");
+    assert!(!link.contains("Not the working document."), "{link}");
+    assert!(reader.next_frame().is_none());
+
+    fs::remove_file(&path).unwrap();
+    f.write("notes.md", &format!("{entries}## Last saved\n## Restored\n"));
+    reader.check();
+    let rows = drawn(&mut reader, 40, 5);
+    assert!(rows[0].contains("Following end") && rows[3].contains("Restored"), "{rows:?}");
+}
+
+#[test]
+fn a_markdown_revision_and_a_handed_patch_do_not_follow_the_working_file() {
+    let f = Fixture::new();
+    f.write("notes.md", "# Before\n");
+    f.commit("before");
+    let path = f.root.join("notes.md");
+    let mut repo = Repo::open(&f.root).unwrap();
+    repo.read();
+    let history = repo.history(1).unwrap();
+    let revision = Reader::at_commit(&path, CommitId::parse(&history[0].hash).unwrap()).unwrap();
+    f.write("notes.md", "# After\n");
+    let patch =
+        crate::handoff::Patch::parse("--- a/notes.md\n+++ b/notes.md\n@@ -1 +1 @@\n-# Before\n+# After\n").unwrap();
+    let handed = Reader::handed_over(&repo, &patch, "notes.md", Handed { from: None, number: 1, total: 1 });
+    f.write("notes.md", "# Unrelated save\n");
+    for (mut reader, expected) in [(revision, "# Before"), (handed, "+ # After")] {
+        reader.key(Key::Char('G'));
+        reader.filesystem_changed();
+        reader.check();
+        let frame = drawn(&mut reader, 60, 6).join("\n");
+        assert!(
+            frame.contains(expected) && !frame.contains("Unrelated save") && !frame.contains("Following"),
+            "{frame}"
+        );
+        assert!(reader.next_frame().is_none());
+    }
+}
