@@ -62,7 +62,13 @@ impl Outline {
         if self.actions.is_some() {
             return self.actions_key(key);
         }
-        if key == Key::Ctrl(b'a')
+        let actions_key = match key {
+            Key::Ctrl(b'a') => true,
+            Key::Char('a') => self.search.is_none(),
+            Key::Ctrl(b't') => self.search.is_some(),
+            _ => false,
+        };
+        if actions_key
             || matches!(key, Key::Click(x, y)
                 if self.search.as_ref().map_or_else(|| self.painted.actions_at(x, y), |search| search.actions_at(x, y)))
         {

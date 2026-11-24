@@ -35,8 +35,7 @@ use self::draw::{ChangeColumns, Layout};
 /// How long something said in place of the key hint stays.
 const NOTE: Duration = Duration::from_secs(4);
 const NATIVE_HINT: &str = "Ctrl-O open · Ctrl-R reveal";
-const ACTIONS_HINT: &str = "Ctrl-A Actions";
-const SHORT_ACTIONS_HINT: &str = "Actions";
+const ACTIONS_HINT: &str = "a Actions";
 
 struct Actions {
     path: Rc<str>,
@@ -643,7 +642,7 @@ impl Pane for Outline {
             key("Enter", "toggle folder"),
             key("Enter", "read in Milo"),
             key("/    ", "find file or path"),
-            key("Ctrl-A", "item actions"),
+            key("a Ctrl-A", "item actions"),
             key("Space", "toggle folder"),
             key("←    ", "close or parent"),
             key("→    ", "open folder"),
@@ -662,7 +661,7 @@ impl Pane for Outline {
             key("↑↓   ", "select a result"),
             key("←→   ", "pan long paths"),
             key("Enter", "read in Milo"),
-            key("Ctrl-A", "file actions"),
+            key("Ctrl-T Ctrl-A", "actions"),
             key("Esc  ", "back to tree"),
         ]);
         rows.extend([
@@ -731,9 +730,15 @@ mod tests {
         let f = Fixture::folder();
         f.write("page.txt", "hello from the tree");
         let mut o = open(&f);
+        draw(&mut o, 28, 12);
+        o.key(Key::Ctrl(b't'));
+        assert!(o.actions.is_none());
+        o.key(Key::Char('a'));
+        assert!(o.actions.is_some());
+        o.key(Key::Esc);
         let rows = draw(&mut o, 28, 12).text();
-        let x = label_col(&rows[11], "Actions");
-        assert_eq!(o.hover_span(x, 11), Some(x..x + 7));
+        let x = label_col(&rows[11], "a Actions");
+        assert_eq!(o.hover_span(x, 11), Some(x..x + "a Actions".len()));
         assert_eq!(o.hover_span(x - 1, 11), None);
         o.key(Key::Click(x - 1, 11));
         assert!(o.actions.is_none());
@@ -836,40 +841,47 @@ mod tests {
 
         let f = Fixture::new();
         f.write("a.txt", "first");
-        f.write("sub/b.txt", "second");
+        f.write("sub/bar.txt", "second");
         f.commit("first");
         let mut o = open(&f);
         o.key(Key::Char('/'));
         draw(&mut o, 52, 5);
-        o.paste(Some("b.txt"));
-        o.key(Key::Ctrl(b'a'));
+        o.paste(Some("b"));
+        o.key(Key::Char('a'));
+        assert!(o.actions.is_none());
+        o.paste(Some("r.txt"));
+        o.key(Key::Ctrl(b't'));
         assert!(o.actions.is_none());
         // The query fits, but this one-row pane does not paint its matching path.
         let rows = draw(&mut o, 16, 1).text();
-        assert!(rows[0].contains("b.txt") && !rows[0].contains("sub/b.txt"));
-        assert_eq!(o.search.as_ref().unwrap().selected_path(), Some("sub/b.txt"));
-        o.key(Key::Ctrl(b'a'));
+        assert!(rows[0].contains("bar.txt") && !rows[0].contains("sub/bar.txt"));
+        assert_eq!(o.search.as_ref().unwrap().selected_path(), Some("sub/bar.txt"));
+        o.key(Key::Ctrl(b't'));
         assert!(o.actions.is_none());
 
         let rows = draw(&mut o, 28, 5).text();
-        let x = label_col(&rows[4], "Actions");
-        assert!(o.hover_span(x, 4).is_some());
+        let x = label_col(&rows[4], "Ctrl-T Actions");
+        assert_eq!(o.hover_span(x, 4), Some(x..x + "Ctrl-T Actions".len()));
         let (_, calls) = with_fake(Ok(()), || {
             o.key(Key::Click(x, 4));
             assert_eq!(o.paste(Some("ignored")), After::Ignored);
             o.key(Key::Ctrl(b'o'));
             let rows = draw(&mut o, 52, 5).text();
-            assert!(rows[0].contains("sub/b.txt"));
+            assert!(rows[0].contains("sub/bar.txt"));
             let reveal = rows.iter().position(|row| row.contains("Reveal in Finder")).unwrap();
             o.key(Key::Click(5, reveal));
         });
-        assert_eq!(calls, [(Action::Reveal, f.root.join("sub/b.txt"))]);
+        assert_eq!(calls, [(Action::Reveal, f.root.join("sub/bar.txt"))]);
         let rows = draw(&mut o, 52, 5).text();
-        assert!(rows[0].contains("b.txt") && rows[1].contains("sub/b.txt"));
-        assert_eq!(o.search.as_ref().unwrap().selected_path(), Some("sub/b.txt"));
-        o.key(Key::Ctrl(b'a'));
-        o.key(Key::Esc);
-        assert!(o.search.is_some());
+        assert!(rows[0].contains("bar.txt") && rows[1].contains("sub/bar.txt"));
+        assert_eq!(o.search.as_ref().unwrap().selected_path(), Some("sub/bar.txt"));
+        for key in [Key::Ctrl(b't'), Key::Ctrl(b'a')] {
+            o.key(key);
+            assert!(draw(&mut o, 52, 5).text()[0].contains("sub/bar.txt"));
+            o.key(Key::Esc);
+            assert!(o.search.is_some());
+            assert_eq!(draw(&mut o, 52, 5).text(), rows);
+        }
         o.key(Key::Enter);
         assert!(o.reading.is_some());
     }
@@ -1131,7 +1143,7 @@ mod tests {
         let rows = draw(&mut o, 60, 7).text();
         let y = rows.iter().position(|row| row.contains("notes.txt")).unwrap();
         o.key(Key::Click(2, y));
-        for key in [Key::Ctrl(b'a'), Key::Ctrl(b'o'), Key::Ctrl(b'r')] {
+        for key in [Key::Char('a'), Key::Ctrl(b'a'), Key::Ctrl(b'o'), Key::Ctrl(b'r')] {
             let (after, calls) = with_fake(Ok(()), || o.key(key));
             assert_eq!(after, After::Stay);
             assert!(calls.is_empty());
@@ -1637,9 +1649,13 @@ mod tests {
         let f = Fixture::folder();
         f.write("page.txt", "a file\n");
         let mut o = open(&f);
-        assert_eq!(draw(&mut o, 60, 12).text()[11], " / find · e open all · q quit · Ctrl-A Actions · ? help");
-        assert_eq!(draw(&mut o, 28, 12).text()[11], " / find · Actions · ? help");
+        assert_eq!(draw(&mut o, 60, 12).text()[11], " / find · e open all · q quit · a Actions · ? help");
+        assert_eq!(draw(&mut o, 28, 12).text()[11], " / find a Actions ? help");
         assert_eq!(draw(&mut o, 24, 12).text()[11], " / find · ? help");
+        let help = o.help();
+        help.assert_rows_fit(26);
+        assert!(help.text().contains("a Ctrl-A  item actions"));
+        assert!(help.text().contains("Ctrl-T Ctrl-A  actions"));
     }
 
     #[test]

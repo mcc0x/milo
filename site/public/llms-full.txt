@@ -538,7 +538,7 @@ History catches up with repository changes when you return from a file, keeping 
 
 ### File actions
 
-In the Outline tree, in Find, or while reading a working file, press **Ctrl-A** or click **Actions**. The menu names its target. Choose a row with the arrows and `Enter`, click the choice, or press `Esc` to go back. `Enter` in the tree and Find still opens Milo's Reader. Open and Reveal keep their [Mac shortcuts](https://github.com/mcc0x/milo/blob/main/docs/panes.md#opening-a-file-outside-milo-on-a-mac).
+Press **a** in the Outline tree or while reading a working file. In Find, press **Ctrl-T** instead: letters still go into the query. **Ctrl-A** and clicking **Actions** work in all three views. The menu names its target. Choose a row with the arrows and `Enter`, click the choice, or press `Esc` to go back. `Enter` in the tree and Find still opens Milo's Reader. Open and Reveal keep their [Mac shortcuts](https://github.com/mcc0x/milo/blob/main/docs/panes.md#opening-a-file-outside-milo-on-a-mac).
 
 **Preview with tkmp** is an explicit alternative for a working Markdown file. In Rex, it opens a split beside the shell; preview another file in the same tab to replace Milo's preview, not your shell or Reader. Milo does not send a commit, a diff or an editor draft to tkmp. Outside Rex, keep reading in Milo. `milo doctor` reports whether it can find the optional executable without running it. Nothing to enable, install or configure in Milo.
 
@@ -547,6 +547,17 @@ In Peek Outline, the preview goes beside the shell even when another pane opened
 Milo looks for `tkmp` in absolute `PATH` directories outside the checkout and current directory. Use a personal directory such as `~/.local/bin` on `PATH` if your shared tool directory is writable by other users. The selected `.md` or `.markdown` file must be regular UTF-8 text, at most 512 KiB when launched, without terminal controls. Links and paths through linked directories are refused.
 
 Use tkmp only with a previewer, document and project you trust. Milo checks the working file before passing its absolute path as one argument. [tkmp](https://github.com/tfcace/tkmp) runs as your user: it watches and reopens the path on save, emits terminal output and renders diagrams through its embedded JavaScript engine. Those later reads and renders are not sandboxed or bounded by Milo. Milo does not load tkmp's Rex plugin or read the clipboard.
+
+#### Using the full pane width with tkmp
+
+Milo passes only the filename, so a tkmp build without width support needs no special arguments. If **your build's `tkmp --help` lists `--max-width`**, you can opt into full width yourself. Put an executable named `tkmp` in a directory you own, such as `$HOME/.local/bin`, outside the project and before the real tkmp on Milo's `PATH`. Use this as its contents, replacing the quoted executable path with the absolute path to your trusted width-capable binary:
+
+```sh
+#!/bin/sh
+exec "/absolute/path/to/real/tkmp" --max-width 0 "$@"
+```
+
+Make the wrapper executable (`chmod 700 "$HOME/.local/bin/tkmp"`). The absolute path avoids calling the wrapper again; `"$@"` forwards Milo's filename as one literal argument, including spaces and shell punctuation. `milo doctor` should report the wrapper's path. No Milo extra-arguments setting is needed. Built-in fit-to-pane support is tracked in [#94](https://github.com/mcc0x/milo/issues/94), pending a released version with [the upstream width option](https://github.com/tfcace/tkmp/pull/1).
 
 ### Opening a file outside Milo on a Mac
 
@@ -866,7 +877,8 @@ These keys work in the outline tree, history and reader. The reader and help pag
 | Key | Action |
 | --- | --- |
 | `Enter` | Open or close a folder, or read a file |
-| `Ctrl-A` | Show Actions for the selected path in the tree or Find |
+| `a` or `Ctrl-A` | Show Actions for the selected path in the tree |
+| `Ctrl-T` or `Ctrl-A` in Find | Show Actions for the highlighted result. Typing `a` adds it to the query. |
 | `Ctrl-O` / `Ctrl-R` | Open the selected working file in its default Mac app / reveal it in Finder; also works on the highlighted Find result |
 | `Space` | Open or close a folder |
 | Left or `h` | Close an open folder, or go to the parent |
@@ -909,7 +921,7 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 | `c` | Switch between the full diff and changes with nearby context |
 | `Tab`, then `Enter` | Select and expand a folded stretch of unchanged lines; clicking the fold expands it too |
 | `e` | Edit the file, or say why it is read-only |
-| `Ctrl-A` | Show Actions for the working file in read mode. In the editor this still moves to the start of the line. |
+| `a` or `Ctrl-A` | Show Actions for the working file in read mode. When editing, `a` types a letter and `Ctrl-A` moves to the start of the line. |
 | `Ctrl-O` / `Ctrl-R` | Open the shown working file in its default Mac app / reveal it in Finder (read mode only) |
 | `q` or `Esc` | Close |
 
@@ -1317,7 +1329,7 @@ See [account setup](https://github.com/mcc0x/milo/blob/main/docs/usage.md#accoun
 ## Reader, media and file tools
 
 - **Git** supplies worktree changes, commit history and historical file contents. Outline also browses plain folders. [Pane guide](https://github.com/mcc0x/milo/blob/main/docs/panes.md)
-- **Markdown** renders directly in Reader; no external previewer is required. The optional **tkmp** handoff is [tracked in #88](https://github.com/mcc0x/milo/issues/88), **not included in v0.1.7**.
+- **Markdown** renders directly in Reader in the **v0.1.7 release**; no external previewer is required. On **main**, the [Actions menu](https://github.com/mcc0x/milo/blob/main/docs/panes.md#file-actions) also offers an explicit handoff to a user-installed **tkmp** beside the Rex shell for eligible working Markdown files. That handoff is not in v0.1.7. Milo passes the filename only; see the [wrapper for width-capable builds](https://github.com/mcc0x/milo/blob/main/docs/panes.md#using-the-full-pane-width-with-tkmp). A built-in fit-to-pane choice is tracked separately in [#94](https://github.com/mcc0x/milo/issues/94) and depends on [tfcace/tkmp#1](https://github.com/tfcace/tkmp/pull/1).
 - **Kitty graphics** can display supported images after a positive terminal capability check. **FFmpeg and FFprobe** are optional, user-installed tools for supported MP4s. The [format matrix](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reading-pictures-video-and-markdown) lists platform fallbacks and decoder requirements.
 - **Finder and default Mac apps** can reveal or open eligible working files on a verified local Mac. These actions don’t export a draft or open today’s file in place of a historical revision. [Native file actions](https://github.com/mcc0x/milo/blob/main/docs/panes.md#opening-a-file-outside-milo-on-a-mac)
 - **Formatters** run on request against the draft: rustfmt, gofmt, Ruff, Black, Prettier, Biome, Deno, Taplo, clang-format, shfmt, StyLua, swift-format and Terraform. Milo doesn’t download them or save their output without your explicit save. [File types and formatter selection](https://github.com/mcc0x/milo/blob/main/docs/panes.md#formatting)

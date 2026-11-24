@@ -1,4 +1,5 @@
-//! The real Rex server owns the panes. Only the optional external renderer is a stand-in.
+//! Real Rex and Milo panes, with a sizing shim instead of a GUI client.
+//! The external renderer is a stand-in that records argv without rendering.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -10,6 +11,14 @@ use super::{Lab, soon};
 #[ignore = "needs an installed Rex; starts a disposable server"]
 fn markdown_handoff_reuses_only_its_own_split() {
     let mut lab = Lab::start();
+    let config = lab.root.join("home/.config/rex");
+    fs::create_dir(&config).unwrap();
+    fs::write(config.join("init.lua"), "rex.bind(\"ctrl+a>z\", \"pane.zoom\")\n").unwrap();
+    lab.rex(&["config", "reload"]);
+    let keymap = lab.rex(&["keymap"]);
+    assert!(keymap.lines().any(|line| line.split_whitespace().take(3).eq(["ctrl+a", "z", "pane.zoom"])), "{keymap}");
+    // CLI key injection targets the terminal directly. Check the loaded client
+    // binding above, then exercise only the keys still available in the pane.
     lab.start_app();
     let dir = lab.root.join("field notes");
     fs::create_dir(&dir).unwrap();
@@ -64,8 +73,8 @@ fn markdown_handoff_reuses_only_its_own_split() {
             std::thread::sleep(Duration::from_millis(50));
         }
     };
-    let preview = |block: &str| {
-        keys(block, &["ctrl+a"]);
+    let preview = |block: &str, actions: &str| {
+        keys(block, &[actions]);
         let menu = wait(block, &|frame| frame.contains("Preview with tkmp"));
         let selected = menu.lines().position(|line| line.trim_start().starts_with('›')).unwrap();
         let wanted = menu.lines().position(|line| line.contains("Preview with tkmp")).unwrap();
@@ -75,29 +84,40 @@ fn markdown_handoff_reuses_only_its_own_split() {
         keys(block, &["enter"]);
     };
     wait(&outline, &|frame| frame.contains(first));
-    keys(&outline, &["ctrl+a"]);
+    keys(&outline, &["a"]);
     wait(&outline, &|frame| frame.contains("tkmp not installed"));
-    keys(&outline, &["end", "enter"]);
+    keys(&outline, &["end"]);
+    wait(&outline, &|frame| {
+        frame.lines().any(|line| line.trim_start().starts_with('›') && line.contains("tkmp not installed"))
+    });
+    keys(&outline, &["enter"]);
     wait(&outline, &|frame| frame.contains("tkmp not installed"));
     keys(&outline, &["escape"]);
+    wait(&outline, &|frame| frame.contains(first) && !frame.contains("tkmp not installed"));
     assert_eq!(lab.view().tab(&tab).panes.len(), 3, "a missing tool must not open a split");
 
     let tool = lab.root.join("bin/tkmp");
     let log = lab.root.join("calls");
+    // With no wrapper, the recorder must receive just the literal file path.
     fs::write(&tool, concat!(
         "#!/bin/sh\n",
-        "printf '%s\\n' \"$#\" \"$1\" \"${TKMP_LOG-unset}\" \"${TKMP_DUMP-unset}\" \"$PWD\" >> \"${0%/*}/../calls\"\n",
+        "printf '%s\\n' \"$#\" \"$@\" \"${TKMP_LOG-unset}\" \"${TKMP_DUMP-unset}\" \"$PWD\" >> \"${0%/*}/../calls\"\n",
         "exec /bin/sleep 600\n",
     )).unwrap();
-    fs::set_permissions(tool, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
     // Detection alone never executes the file, not even to ask for its version.
     let doctor = lab.command(&lab.milo).current_dir(&dir).arg("doctor").output().unwrap();
     assert!(doctor.status.success());
     assert!(String::from_utf8(doctor.stdout).unwrap().contains("tkmp found at"));
     assert!(!log.exists());
     let mut expected = String::new();
-    let mut check_call = |file: &str| {
-        expected.push_str(&format!("1\n{}\nunset\nunset\n/\n", dir.join(file).display()));
+    let mut check_call = |file: &str, options: &[&str]| {
+        expected.push_str(&format!("{}\n", options.len() + 1));
+        for option in options {
+            expected.push_str(option);
+            expected.push('\n');
+        }
+        expected.push_str(&format!("{}\nunset\nunset\n/\n", dir.join(file).display()));
         assert!(soon(|| lab.read("calls") == expected), "handoff record: {:?}", lab.read("calls"));
         // The child can start before Rex finishes removing the previous split.
         assert!(soon(|| lab.view().tab(&tab).panes.iter().filter(|p| p.label == label).count() == 2));
@@ -110,19 +130,34 @@ fn markdown_handoff_reuses_only_its_own_split() {
         assert!(panes.iter().any(|p| p.block == other));
         owned.block.clone()
     };
-    preview(&outline);
-    let first_preview = check_call(first);
-    keys(&outline, &["[Slash]", "r", "o", "u", "t", "e"]);
+    preview(&outline, "a");
+    let first_preview = check_call(first, &[]);
+
+    // The user's PATH wrapper owns the width setting; Milo still passes only
+    // the filename. Use an absolute recorder path so tkmp cannot call itself.
+    let recorder = lab.root.join("bin/record-tkmp");
+    fs::rename(&tool, &recorder).unwrap();
+    fs::write(&tool, format!("#!/bin/sh\nexec '{}' --max-width 0 \"$@\"\n", recorder.display())).unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    let width_options = &["--max-width", "0"];
+
+    keys(&outline, &["[Slash]", "a"]);
+    wait(&outline, &|frame| {
+        frame.lines().next().is_some_and(|line| line.trim_start().starts_with("/ a "))
+            && frame.contains(first)
+            && !frame.contains(second)
+    });
+    keys(&outline, &["backspace", "r", "o", "u", "t", "e"]);
     wait(&outline, &|frame| frame.contains("/ route") && frame.contains(second));
     let calls = lab.read("calls");
     fs::write(dir.join(second), b"# Invalid encoding\n\xff").unwrap();
-    preview(&outline);
+    preview(&outline, "ctrl+t");
     wait(&outline, &|frame| frame.contains("Preview needs UTF-8"));
     assert_eq!(lab.read("calls"), calls, "an unreadable selection must not reach tkmp");
     assert!(lab.view().tab(&tab).panes.iter().any(|p| p.block == first_preview));
     fs::write(dir.join(second), "# Route\n\nFollow the river.\n").unwrap();
-    preview(&outline);
-    check_call(second);
+    preview(&outline, "ctrl+t");
+    assert_ne!(check_call(second, width_options), first_preview);
 
     // Enter in the tree still opens Milo. A floating Reader targets the same shell
     // as its opener, even though the active block is no longer that shell.
@@ -133,15 +168,15 @@ fn markdown_handoff_reuses_only_its_own_split() {
     assert!(soon(|| reader().is_some()), "no floating Reader: {:?}", lab.view());
     let reader = reader().unwrap();
     wait(&reader, &|frame| frame.contains("Meet at the trailhead"));
-    preview(&reader);
-    let moved = check_call(first);
+    preview(&reader, "a");
+    let moved = check_call(first, width_options);
     wait(&reader, &|frame| frame.contains("Meet at the trailhead"));
 
     // A pane the user moved to another tab is no longer ours to replace.
     let elsewhere = lab.new_tab(&session, &dir);
     let anchor = lab.view().tab(&elsewhere).panes[0].block.clone();
     lab.rex(&["move", "-s", &session, &moved, "right", &anchor]);
-    preview(&reader);
-    assert_ne!(check_call(first), moved);
+    preview(&reader, "a");
+    assert_ne!(check_call(first, width_options), moved);
     assert!(lab.view().tab(&elsewhere).panes.iter().any(|p| p.block == moved));
 }

@@ -59,7 +59,7 @@ History catches up with repository changes when you return from a file, keeping 
 
 ### File actions
 
-In the Outline tree, in Find, or while reading a working file, press **Ctrl-A** or click **Actions**. The menu names its target. Choose a row with the arrows and `Enter`, click the choice, or press `Esc` to go back. `Enter` in the tree and Find still opens Milo's Reader. Open and Reveal keep their [Mac shortcuts](#opening-a-file-outside-milo-on-a-mac).
+Press **a** in the Outline tree or while reading a working file. In Find, press **Ctrl-T** instead: letters still go into the query. **Ctrl-A** and clicking **Actions** work in all three views. The menu names its target. Choose a row with the arrows and `Enter`, click the choice, or press `Esc` to go back. `Enter` in the tree and Find still opens Milo's Reader. Open and Reveal keep their [Mac shortcuts](#opening-a-file-outside-milo-on-a-mac).
 
 **Preview with tkmp** is an explicit alternative for a working Markdown file. In Rex, it opens a split beside the shell; preview another file in the same tab to replace Milo's preview, not your shell or Reader. Milo does not send a commit, a diff or an editor draft to tkmp. Outside Rex, keep reading in Milo. `milo doctor` reports whether it can find the optional executable without running it. Nothing to enable, install or configure in Milo.
 
@@ -68,6 +68,17 @@ In Peek Outline, the preview goes beside the shell even when another pane opened
 Milo looks for `tkmp` in absolute `PATH` directories outside the checkout and current directory. Use a personal directory such as `~/.local/bin` on `PATH` if your shared tool directory is writable by other users. The selected `.md` or `.markdown` file must be regular UTF-8 text, at most 512 KiB when launched, without terminal controls. Links and paths through linked directories are refused.
 
 Use tkmp only with a previewer, document and project you trust. Milo checks the working file before passing its absolute path as one argument. [tkmp](https://github.com/tfcace/tkmp) runs as your user: it watches and reopens the path on save, emits terminal output and renders diagrams through its embedded JavaScript engine. Those later reads and renders are not sandboxed or bounded by Milo. Milo does not load tkmp's Rex plugin or read the clipboard.
+
+#### Using the full pane width with tkmp
+
+Milo passes only the filename, so a tkmp build without width support needs no special arguments. If **your build's `tkmp --help` lists `--max-width`**, you can opt into full width yourself. Put an executable named `tkmp` in a directory you own, such as `$HOME/.local/bin`, outside the project and before the real tkmp on Milo's `PATH`. Use this as its contents, replacing the quoted executable path with the absolute path to your trusted width-capable binary:
+
+```sh
+#!/bin/sh
+exec "/absolute/path/to/real/tkmp" --max-width 0 "$@"
+```
+
+Make the wrapper executable (`chmod 700 "$HOME/.local/bin/tkmp"`). The absolute path avoids calling the wrapper again; `"$@"` forwards Milo's filename as one literal argument, including spaces and shell punctuation. `milo doctor` should report the wrapper's path. No Milo extra-arguments setting is needed. Built-in fit-to-pane support is tracked in [#94](https://github.com/mcc0x/milo/issues/94), pending a released version with [the upstream width option](https://github.com/tfcace/tkmp/pull/1).
 
 ### Opening a file outside Milo on a Mac
 

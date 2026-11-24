@@ -712,8 +712,8 @@ mod tests {
         f.write("two.txt", "second\n");
         let mut tabs = opened(&f, &["one.md", "two.txt"]);
         let rows = drawn(&mut tabs, 80, 9);
-        let at = str_width(rows[8].split_once("Ctrl-A Actions").unwrap().0);
-        assert_eq!(tabs.hover_span(at, 8), Some(at..at + "Ctrl-A Actions".len()));
+        let at = str_width(rows[8].split_once("a Actions").unwrap().0);
+        assert_eq!(tabs.hover_span(at, 8), Some(at..at + "a Actions".len()));
         assert_eq!(tabs.key(Key::Click(at, 8)), After::Stay);
         let menu = drawn(&mut tabs, 80, 9);
         assert_eq!(rows[0], menu[0]);
@@ -732,7 +732,7 @@ mod tests {
         assert!(tabs.editing() && tabs.reader().path == "one.md");
         assert_eq!(tabs.key(Key::Esc), After::Stay);
 
-        tabs.key(Key::Ctrl(b'a'));
+        assert_eq!(tabs.key(Key::Char('a')), After::Stay);
         assert!(drawn(&mut tabs, 80, 9)[1].contains("Actions"));
         // This request comes from outside the Reader, not from its tab strip.
         ask(&mut tabs, &f, "two.txt");

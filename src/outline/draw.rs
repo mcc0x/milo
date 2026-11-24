@@ -12,7 +12,7 @@ use crate::ui::{self, FAINT};
 use crate::width::str_width;
 
 use super::attention::{LIVE, PULSE};
-use super::{ACTIONS_HINT, NATIVE_HINT, Note, Outline, SHORT_ACTIONS_HINT};
+use super::{ACTIONS_HINT, NATIVE_HINT, Note, Outline};
 
 /// The shortest pane with room for the project heading.
 const HEADING_ROWS: usize = 4;
@@ -264,14 +264,17 @@ impl Outline {
         let last = if cfg!(target_os = "macos") && s.w >= native_width + 4 * 3 + 2 { NATIVE_HINT } else { "q quit" };
         let filter = if self.pending_only { "c all files" } else { "c changed only" };
         let first = if self.pending.is_empty() { "Enter open" } else { "n next change" };
-        let actions =
-            if s.w >= FIND.len() + ACTIONS_HINT.len() + HELP.len() + 8 { ACTIONS_HINT } else { SHORT_ACTIONS_HINT };
-        let git = [first, folders, filter, last, actions];
-        let folder = [first, folders, last, actions];
+        let actions_width = FIND.len() + ACTIONS_HINT.len() + HELP.len() + 2;
+        let git = [first, folders, filter, last, ACTIONS_HINT];
+        let folder = [first, folders, last, ACTIONS_HINT];
         let middle = if self.repo.git { git.as_slice() } else { folder.as_slice() };
         let can_act = layout.tree_rows.contains(&self.sel);
         let middle = if can_act { middle } else { &middle[..middle.len() - 1] };
-        let hits = help::draw_hint(s, FIND, middle, HELP);
+        let hits = if can_act && (actions_width + 2..actions_width + 6).contains(&s.w) {
+            help::draw_compact_hint(s, FIND, middle, HELP)
+        } else {
+            help::draw_hint(s, FIND, middle, HELP)
+        };
         layout.footer_y = Some(s.h - 1);
         layout.find = hits.span(0).unwrap_or_default();
         if can_act {

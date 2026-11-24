@@ -15,11 +15,13 @@ use crate::ui::{self, FAINT};
 use crate::walk;
 use crate::width::{byte_at_col, str_width};
 
-use super::{ACTIONS_HINT, NATIVE_HINT, NativeSelection, Outline, SHORT_ACTIONS_HINT};
+use super::{NATIVE_HINT, NativeSelection, Outline};
 
 pub(super) const WALK_FRAME: Duration = Duration::from_millis(40);
 const QUERY_LIMIT: usize = 4096;
 const OPEN: &str = "Enter open";
+const ACTIONS: &str = "Ctrl-T Actions";
+const ACTIONS_SHORT: &str = "Actions";
 const WIDEN: &str = "Widen Find";
 
 pub(super) enum Action {
@@ -493,13 +495,16 @@ impl Search {
             s.put_fit(inset, y, self.path_width, note, FAINT);
             return;
         }
-        let actions =
-            if self.path_width >= OPEN.len() + 3 + ACTIONS_HINT.len() { ACTIONS_HINT } else { SHORT_ACTIONS_HINT };
+        let labels = OPEN.len() + ACTIONS.len();
+        let actions = if self.path_width > labels { ACTIONS } else { ACTIONS_SHORT };
+        let compact = (labels + 1..labels + 3).contains(&self.path_width);
         let middle = ["←→ pan", "↑↓ move", actions];
         let hits = if cfg!(target_os = "macos")
             && self.path_width >= OPEN.len() + actions.len() + str_width(NATIVE_HINT) + 6
         {
             help::draw_hint(s, OPEN, &middle, NATIVE_HINT)
+        } else if compact {
+            help::draw_compact_hint(s, OPEN, &middle[..2], actions)
         } else {
             help::draw_hint(s, OPEN, &middle[..2], actions)
         };

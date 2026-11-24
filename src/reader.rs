@@ -361,7 +361,7 @@ impl Reader {
     }
 
     fn action_help(&self) -> Option<help::HelpRow> {
-        self.offers_actions().then(|| help::key("Ctrl-A", "file actions"))
+        self.offers_actions().then(|| help::key("a Ctrl-A", "file actions"))
     }
 
     fn show_actions(&mut self, now: Instant) -> After {
@@ -836,7 +836,7 @@ impl Reader {
             let step = editor.key(key, now);
             return self.apply(step, now);
         }
-        if key == Key::Ctrl(b'a') {
+        if key == Key::Ctrl(b'a') || key == Key::Char('a') && self.offers_actions() {
             return self.show_actions(now);
         }
         if let Some(action) = Action::key(key) {

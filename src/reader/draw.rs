@@ -29,8 +29,9 @@ const NAME_ROOM: usize = 10;
 const PLACE_OF: &str = " of ";
 const PLACE_SPACE: &str = " · ";
 const HELP: &str = "? help";
-const ACTIONS: &str = "Ctrl-A Actions";
+const ACTIONS: &str = "a Actions";
 const ACTIONS_SHORT: &str = "Actions";
+const EDIT: &str = "e edit";
 const GAP: &str = " · ";
 
 #[derive(Clone, Copy)]
@@ -385,11 +386,11 @@ impl Reader {
             let action = if self.markdown_source { "m preview" } else { "m source" };
             let follow = if preview.following() { "↑↓ stop follow" } else { "G follow end" };
             let middle: &[_] = match (self.read_only.is_none(), self.markdown_source, self.can_fold()) {
-                (true, false, _) => &[follow, "e edit", "q close"],
+                (true, false, _) => &[follow, EDIT, "q close"],
                 (false, false, _) => &[follow, "q close"],
-                (true, true, true) => &["e edit", "n N changes", "c fold", "q close"],
+                (true, true, true) => &[EDIT, "n N changes", "c fold", "q close"],
                 (false, true, true) => &["n N changes", "c fold", "q close"],
-                (true, true, false) => &["e edit", "↑↓ scroll", "q close"],
+                (true, true, false) => &[EDIT, "↑↓ scroll", "q close"],
                 (false, true, false) => &["↑↓ scroll", "q close"],
             };
             self.draw_reader_hint(s, action, middle);
@@ -406,7 +407,7 @@ impl Reader {
             let middle: &[_] = if self.read_only.is_some() {
                 &["↑↓ scroll", "q close", "n N changes"]
             } else {
-                &["e edit", "↑↓ scroll", "q close", "n N changes"]
+                &[EDIT, "↑↓ scroll", "q close", "n N changes"]
             };
             self.draw_reader_hint(s, action, middle);
             return;
@@ -420,9 +421,9 @@ impl Reader {
             (false, _) => "",
         };
         let middle: &[_] = match (still, self.read_only.is_none()) {
-            (true, true) => &["e edit", "q close"],
+            (true, true) => &[EDIT, "q close"],
             (true, false) => &["q close"],
-            (false, true) => &["↑↓ scroll", "e edit", "q close"],
+            (false, true) => &["↑↓ scroll", EDIT, "q close"],
             (false, false) => &["↑↓ scroll", "q close"],
         };
         self.draw_reader_hint(s, action, middle);
@@ -439,17 +440,23 @@ impl Reader {
         let actions = self.offers_actions();
         let mut compact = false;
         if actions {
-            // Keep the direct edit shortcut with the new menu where possible.
-            // The painter retains a suffix, so budget the labels after Edit too.
-            let edit = middle.iter().position(|&item| item == "e edit");
+            let edit = middle.iter().position(|&item| item == EDIT);
             let tail = edit.map_or(&["q close"][..], |i| &middle[i..]);
-            let occupied = 2 + HELP.len() + str_width(action) + tail.iter().map(|item| str_width(item)).sum::<usize>();
-            let gaps = 1 + usize::from(!action.is_empty()) + tail.len();
-            let decorated = occupied + gaps * str_width(GAP);
-            items[actions_at] = if s.w >= decorated + ACTIONS.len() { ACTIONS } else { ACTIONS_SHORT };
-            compact = edit.is_some()
-                && s.w < decorated + ACTIONS_SHORT.len()
-                && s.w >= occupied + gaps + ACTIONS_SHORT.len();
+            let required = 2 + HELP.len() + str_width(action) + ACTIONS.len();
+            let gaps = 1 + usize::from(!action.is_empty());
+            let occupied = required + tail.iter().map(|item| str_width(item)).sum::<usize>();
+            let decorated = occupied + (gaps + tail.len()) * str_width(GAP);
+            compact = s.w < decorated && s.w >= required + gaps;
+            items[actions_at] = if s.w >= decorated || compact { ACTIONS } else { ACTIONS_SHORT };
+            if compact
+                && s.w < occupied + gaps + tail.len()
+                && let Some(i) = edit
+                && s.w >= required + gaps + 1 + EDIT.len()
+            {
+                // The painter drops a prefix of the middle hints. In a split
+                // too narrow for the whole tail, keep Edit beside Actions.
+                items[native + i..actions_at].rotate_left(1);
+            }
         }
         let count = actions_at + usize::from(actions);
         let hits = if compact {

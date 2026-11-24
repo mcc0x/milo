@@ -31,25 +31,26 @@ fn reader_hints_say_close_and_keep_help_last() {
     let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
     let rows = drawn(&mut reader, 80, 5);
     assert_eq!(rows[4].contains("^O open · ^R reveal"), cfg!(target_os = "macos"));
-    assert!(rows[4].ends_with("↑↓ scroll · e edit · q close · Ctrl-A Actions · ? help"));
+    assert!(rows[4].ends_with("↑↓ scroll · e edit · q close · a Actions · ? help"));
     let help = reader.help();
     help.assert_rows_fit(26);
     let help = help.text();
-    assert!(help.contains("Ctrl-A  file actions"));
+    assert!(help.contains("a Ctrl-A  file actions"));
     assert_eq!(help.contains("^O  open in default app"), cfg!(target_os = "macos"));
     assert_eq!(help.contains("^R  reveal in Finder"), cfg!(target_os = "macos"));
     let compact = drawn(&mut reader, 36, 12);
-    assert!(compact[11].contains("e edit") && compact[11].contains("Actions") && compact[11].ends_with("? help"));
-    let at = column(&compact[11], "Actions");
-    assert_eq!(reader.hover_span(at, 11), Some(at..at + "Actions".len()));
+    assert_eq!(compact[11], " e edit q close a Actions ? help");
+    let at = column(&compact[11], "a Actions");
+    assert_eq!(reader.hover_span(at, 11), Some(at..at + "a Actions".len()));
     assert_eq!(reader.key(Key::Click(at, 11)), After::Stay);
     assert!(drawn(&mut reader, 36, 12)[1].contains("Edit in Milo"));
     assert_eq!(reader.key(Key::Esc), After::Stay);
     assert_eq!(reader.key(Key::Char('e')), After::Stay);
     assert!(reader.editing());
     assert_eq!(reader.key(Key::Esc), After::Stay);
-    assert_eq!(drawn(&mut reader, 28, 5)[4], " q close · Actions · ? help");
-    assert_eq!(drawn(&mut reader, 20, 5)[4], " Actions · ? help");
+    assert_eq!(drawn(&mut reader, 28, 5)[4], " e edit a Actions ? help");
+    assert_eq!(drawn(&mut reader, 20, 5)[4], " a Actions ? help");
+    assert_eq!(drawn(&mut reader, 17, 5)[4], " ? help");
 }
 
 #[test]
@@ -82,9 +83,9 @@ fn reader_footer_clicks_only_work_where_the_hint_is_drawn() {
     f.write("page.txt", "one line\n");
     let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
     let rows = drawn(&mut reader, 28, 6);
-    let action = column(&rows[5], "Actions");
+    let action = column(&rows[5], "a Actions");
     let help = column(&rows[5], "? help");
-    assert_eq!(reader.hover_span(action, 5), Some(action..action + "Actions".len()));
+    assert_eq!(reader.hover_span(action, 5), Some(action..action + "a Actions".len()));
     assert_eq!(reader.hover_span(help, 5), Some(help..help + "? help".len()));
     assert_eq!(reader.key(Key::Click(action - 1, 5)), After::Ignored);
     assert_eq!(reader.key(Key::Click(action, 4)), After::Ignored);
@@ -115,12 +116,15 @@ fn only_rendered_working_markdown_offers_tkmp_and_the_draft_keeps_its_keys() {
     f.commit("before");
     f.write("page.md", "# After\n");
     let mut reader = Reader::open(&f.root.join("page.md")).unwrap();
+    let compact = drawn(&mut reader, 36, 10);
+    assert_eq!(compact[9], " m source e edit a Actions ? help");
     let rendered = drawn(&mut reader, 80, 10);
+    assert_eq!(reader.key(Key::Ctrl(b't')), After::Ignored);
     let ((), opened) = with_fake(Ok(()), || {
-        assert_eq!(reader.key(Key::Ctrl(b'a')), After::Stay);
+        assert_eq!(reader.key(Key::Char('a')), After::Stay);
         let menu = drawn(&mut reader, 80, 10);
         assert!(menu.iter().any(|row| row.contains("tkmp")), "{menu:?}");
-        for key in [Key::Ctrl(b'o'), Key::Ctrl(b'r'), Key::Char('m'), Key::Char('e')] {
+        for key in [Key::Ctrl(b'o'), Key::Ctrl(b'r'), Key::Ctrl(b't'), Key::Char('a'), Key::Char('m'), Key::Char('e')] {
             assert_eq!(reader.key(key), After::Stay);
         }
         assert_eq!(drawn(&mut reader, 80, 10), menu);
@@ -139,6 +143,10 @@ fn only_rendered_working_markdown_offers_tkmp_and_the_draft_keeps_its_keys() {
     assert!(reader.editing());
     assert_eq!(reader.key(Key::End), After::Stay);
     assert_eq!(reader.key(Key::Ctrl(b'a')), After::Stay);
+    assert_eq!(reader.key(Key::Char('a')), After::Stay);
+    assert_eq!(reader.key(Key::Ctrl(b't')), After::Ignored);
+    assert_eq!(reader.editor.as_ref().unwrap().text(), "a# After\n");
+    assert_eq!(reader.key(Key::Ctrl(b'z')), After::Stay);
     let rows = drawn(&mut reader, 80, 10);
     assert!(!rows[9].contains("Actions") && !reader.help().text().contains("file actions"));
     assert_eq!(reader.key(Key::Click(column(&rows[9], "^G help"), 9)), After::Help);
@@ -212,6 +220,7 @@ fn native_actions_refuse_commit_and_handed_over_views_of_a_working_file() {
         assert!(!reader.help().text().contains("Ctrl-A"));
         assert!(!drawn(&mut reader, 60, 4)[3].contains("Actions"));
         assert_eq!(reader.key(Key::Ctrl(b'a')), After::Ignored);
+        assert_eq!(reader.key(Key::Char('a')), After::Ignored);
         let ((), opened) = with_fake(Ok(()), || {
             for key in [Key::Ctrl(b'o'), Key::Ctrl(b'r')] {
                 assert_eq!(reader.key(key), After::Stay);
@@ -2065,13 +2074,25 @@ fn only_explicit_follow_tracks_the_end_of_working_markdown() {
     reader.key(Key::Char('G'));
     assert!(drawn(&mut reader, 40, 5)[0].contains("Following end"));
     assert!(reader.next_frame().is_none(), "follow should sleep between saves");
+    assert_eq!(reader.key(Key::Char('a')), After::Stay);
+    assert!(drawn(&mut reader, 40, 5)[0].contains("Actions"));
 
     let entries: String = (1..=20).map(|n| format!("- Entry {n}\n")).collect();
     f.write("tmp", &entries);
     fs::rename(f.root.join("tmp"), &path).unwrap();
     reader.check();
-    assert!(drawn(&mut reader, 40, 5)[3].contains("Entry 20"));
+    assert!(drawn(&mut reader, 40, 5)[0].contains("Actions"));
+    assert_eq!(reader.key(Key::Esc), After::Stay);
+    let rows = drawn(&mut reader, 40, 5);
+    assert!(rows[0].contains("Following end") && rows[3].contains("Entry 20"), "{rows:?}");
     assert!(reader.next_frame().is_some(), "a changed block needs an expiry frame");
+    let deadline = reader.markdown().unwrap().mark_deadline().unwrap();
+    assert_eq!(reader.key(Key::Char('a')), After::Stay);
+    let mut screen = Screen::sized(40, 5);
+    reader.draw_file(&mut screen, deadline);
+    assert!(screen.text()[0].contains("Actions"));
+    assert!(reader.next_frame().is_none(), "marks expire even while Actions is open");
+    assert_eq!(reader.key(Key::Esc), After::Stay);
 
     // End at the bottom is still manual navigation, even though no row moves.
     assert_eq!(reader.key(Key::End), After::Stay);
