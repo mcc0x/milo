@@ -287,6 +287,7 @@ local function pane(role, cwd, shell, origin, trial)
   local command = { milo, role }
   if origin then
     command = { milo, role, "--peek-origin", origin }
+    if shell then command[5], command[6] = "--shell", shell end
   elseif shell and role ~= "usage" then
     command = { milo, role, "--shell", shell }
   end
@@ -827,11 +828,11 @@ local function peek(ctx, closing)
     if not err then _, err = rex.session.focus_block{ session_id = ctx.session_id, block_id = block.block_id } end
     if err then raise(err) end
   else
-    local _, cwd = anchor(ctx, window, true)
+    local _, cwd, shell = anchor(ctx, window, true)
     if not cwd then raise("no_shell") end
     local made, err = rex.session.new_layer{
       session_id = ctx.session_id, window_id = window.window_id, focus = true,
-      bounds = {0.12, 0.10, 0.55, 0.80}, layout = pane("outline", cwd, nil, ctx.block_id),
+      bounds = {0.12, 0.10, 0.55, 0.80}, layout = pane("outline", cwd, shell, ctx.block_id),
     }
     if not made or not made.block_ids or not made.block_ids[1] then raise(err or "Rex could not open Peek Outline.") end
     origins[window.window_id] = { block = made.block_ids[1], origin = ctx.block_id }

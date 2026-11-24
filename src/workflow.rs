@@ -156,6 +156,14 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
         self.preference_note.or_else(|| self.pane.notice())
     }
 
+    fn tracks_hover(&self) -> bool {
+        !self.notice_only && self.pane.tracks_hover()
+    }
+
+    fn hover_span(&self, x: usize, y: usize) -> Option<std::ops::Range<usize>> {
+        if self.notice_only { None } else { self.pane.hover_span(x, y) }
+    }
+
     fn help(&self) -> Page {
         self.pane.help()
     }
@@ -239,8 +247,8 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
     }
 
     fn key(&mut self, key: Key) -> After {
-        // A one-row notice hides the pane but leaves its last hit map intact.
-        if self.notice_only && matches!(key, Key::Click(..)) {
+        // A one-row notice hides every choice, including the last painted menu.
+        if self.notice_only && !key.while_obscured() {
             return After::Ignored;
         }
         if let Key::Focus(focused) = key {
@@ -375,7 +383,7 @@ mod tests {
                 Some(Duration::ZERO)
             }
             fn key(&mut self, key: Key) -> After {
-                if matches!(key, Key::Click(..)) { After::Stay } else { After::Ignored }
+                if matches!(key, Key::Click(..) | Key::Enter) { After::Stay } else { After::Ignored }
             }
         }
 
@@ -397,6 +405,7 @@ mod tests {
         assert_eq!(screen.text()[0].trim(), "Waiting for shell · showing strata");
         assert_eq!(pane.next_frame(), None);
         assert!(matches!(pane.key(Key::Click(1, 0)), After::Ignored));
+        assert_eq!(pane.key(Key::Enter), After::Ignored);
 
         screen.resize(40, 2);
         pane.draw(&mut screen);
@@ -404,6 +413,7 @@ mod tests {
         assert!(screen.text()[1].contains(NO_CWD));
         assert_eq!(pane.next_frame(), Some(Duration::ZERO));
         assert_eq!(pane.key(Key::Click(1, 0)), After::Stay);
+        assert_eq!(pane.key(Key::Enter), After::Stay);
 
         screen.resize(40, 1);
         pane.draw(&mut screen);

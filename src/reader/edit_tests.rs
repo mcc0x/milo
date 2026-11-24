@@ -64,7 +64,7 @@ fn an_edit_is_a_draft_until_saved_and_the_reader_returns_to_a_fresh_diff() {
     f.commit("first");
     let file = f.root.join("notes.txt");
     let mut reader = open(&f, "notes.txt");
-    assert_eq!(drawn(&mut reader, 44, 6)[5], " ↑↓ scroll · e edit · q close · ? help");
+    assert_eq!(drawn(&mut reader, 44, 6)[5], " e edit · q close · a Actions · ? help");
 
     assert_eq!(reader.key(Key::Char('e')), After::Stay);
     let rows = drawn(&mut reader, 44, 6);
@@ -1127,10 +1127,18 @@ fn a_file_that_cannot_be_written_does_not_offer_editing() {
     f.write("locked.txt", "one\n");
     fs::set_permissions(f.root.join("locked.txt"), Permissions::from_mode(0o444)).unwrap();
     let mut reader = open(&f, "locked.txt");
-    let rows = drawn(&mut reader, 60, 4);
+    let rows = drawn(&mut reader, 80, 4);
     assert_eq!(rows[3].contains("^O open · ^R reveal"), cfg!(target_os = "macos"));
-    assert!(rows[3].ends_with("↑↓ scroll · q close · ? help"));
+    let hint = if cfg!(target_os = "macos") {
+        "↑↓ scroll · q close · a Actions · ? help"
+    } else {
+        "↑↓ scroll · q close · ? help"
+    };
+    assert!(rows[3].ends_with(hint));
     assert!(reader.help().text().contains("Read-only:\n  no write permission\n"));
+    if !cfg!(target_os = "macos") {
+        assert_eq!(reader.key(Key::Char('a')), After::Ignored);
+    }
     assert_eq!(refusal(&mut reader), " Read-only: no write permission · ? help");
 }
 

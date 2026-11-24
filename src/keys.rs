@@ -83,6 +83,23 @@ pub enum Direction {
 }
 
 impl Key {
+    /// A notice can occupy the entire pane. Allow leaving and terminal reports,
+    /// but never activate a choice left over from the previous visible frame.
+    pub(crate) fn while_obscured(self) -> bool {
+        matches!(
+            self,
+            Key::Char('q')
+                | Key::Esc
+                | Key::Ctrl(b'c')
+                | Key::Focus(_)
+                | Key::Eof
+                | Key::Background(_)
+                | Key::Pictures(_)
+                | Key::CellSize(..)
+                | Key::Answered
+        )
+    }
+
     /// How far this key scrolls a list with `shown` visible rows, if it scrolls.
     pub fn rows(self, shown: usize) -> Option<isize> {
         let page = isize::try_from(shown.max(2) - 1).unwrap_or(isize::MAX);

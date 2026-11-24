@@ -1,6 +1,7 @@
 //! Hands a verified working-tree path to the local macOS opener on explicit input.
 
 mod local;
+pub(crate) mod trusted;
 
 use std::ffi::{CStr, CString};
 use std::fs::File;
@@ -9,7 +10,7 @@ use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -40,12 +41,12 @@ impl Action {
     }
 
     pub(crate) fn run(self, root: &Path, identity: Option<(u64, u64)>, relative: &Path) -> Result<(), &'static str> {
-        #[cfg(test)]
-        tests::locality().unwrap_or_else(|| local::check(root))?;
-        #[cfg(not(test))]
-        local::check(root)?;
-
-        let target = self.target(root, identity, relative)?;
+        locality(root)?;
+        self.validate(&working_entry(root, identity, relative)?)?;
+        // Holding directory descriptors keeps validation from following links.
+        // The opener resolves a pathname again, so a checked entry can still be
+        // replaced before LaunchServices uses it.
+        let target = root.join(relative);
         let command = self.command(&target);
         #[cfg(test)]
         if tests::capture(self, &command) {
@@ -54,34 +55,17 @@ impl Action {
         launch(command)
     }
 
-    fn target(self, root: &Path, identity: Option<(u64, u64)>, relative: &Path) -> Result<PathBuf, &'static str> {
-        let expected = identity.ok_or(ROOT_CHANGED)?;
-        let mut dir = root_dir(root).ok_or(ROOT_CHANGED)?;
-        if dir_id(&dir) != Some(expected) {
-            return Err(ROOT_CHANGED);
-        }
-
-        let mut parts = relative.as_os_str().as_bytes().rsplitn(2, |&byte| byte == b'/');
-        let name = child_name(parts.next().unwrap_or_default())?;
-        if let Some(parent) = parts.next() {
-            for part in parent.split(|&byte| byte == b'/') {
-                let child = child_name(part)?;
-                dir = fs_ops::open_at(&dir, &child, libc::O_RDONLY | libc::O_DIRECTORY, 0).map_err(path_error)?;
-            }
-        }
-        let stat = stat_at(&dir, &name).map_err(path_error)?;
+    fn validate(self, entry: &WorkingEntry) -> Result<(), &'static str> {
+        let WorkingEntry { dir, name, stat } = entry;
         match stat.st_mode & libc::S_IFMT {
             libc::S_IFLNK => return Err(LINK),
             libc::S_IFDIR if self == Self::Reveal => {}
             libc::S_IFDIR => return Err("Use Reveal for folders"),
-            libc::S_IFREG if self == Self::Open => check_open(&dir, &name, &stat)?,
+            libc::S_IFREG if self == Self::Open => check_open(dir, name, stat)?,
             libc::S_IFREG => {}
             _ => return Err("Only regular files and folders can be revealed"),
         }
-        // Holding directory descriptors keeps validation from following links.
-        // The opener resolves a pathname again, so a checked entry can still be
-        // replaced before LaunchServices uses it.
-        Ok(root.join(relative))
+        Ok(())
     }
 
     fn command(self, target: &Path) -> Command {
@@ -95,17 +79,64 @@ impl Action {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct Choices {
+    pub(crate) open: bool,
+    pub(crate) reveal: bool,
+}
+
+/// An explicit menu opening needs one location check and one path traversal
+/// for both native actions. A later dispatch checks them again independently.
+pub(crate) fn choices(root: &Path, identity: Option<(u64, u64)>, relative: &Path) -> Choices {
+    let Ok(entry) = working_entry(root, identity, relative) else { return Choices::default() };
+    if Action::Reveal.validate(&entry).is_err() || locality(root).is_err() {
+        return Choices::default();
+    }
+    Choices { open: Action::Open.validate(&entry).is_ok(), reveal: true }
+}
+
+fn locality(root: &Path) -> Result<(), &'static str> {
+    #[cfg(test)]
+    if let Some(result) = tests::locality() {
+        return result;
+    }
+    local::check(root)
+}
+
 /// Capture the original directory before the user can request an action.
 pub(crate) fn identity(root: &Path) -> Option<(u64, u64)> {
-    #[cfg(any(target_os = "macos", test))]
-    {
-        dir_id(&root_dir(root)?)
+    dir_id(&root_dir(root)?)
+}
+
+pub(crate) struct WorkingEntry {
+    pub(crate) dir: File,
+    pub(crate) name: CString,
+    pub(crate) stat: libc::stat,
+}
+
+/// Resolve a working entry through the original directory, without any links
+/// or normalized-away components in the requested relative path.
+pub(crate) fn working_entry(
+    root: &Path,
+    identity: Option<(u64, u64)>,
+    relative: &Path,
+) -> Result<WorkingEntry, &'static str> {
+    let expected = identity.ok_or(ROOT_CHANGED)?;
+    let mut dir = root_dir(root).ok_or(ROOT_CHANGED)?;
+    if dir_id(&dir) != Some(expected) {
+        return Err(ROOT_CHANGED);
     }
-    #[cfg(not(any(target_os = "macos", test)))]
-    {
-        let _ = root;
-        None
+
+    let mut parts = relative.as_os_str().as_bytes().rsplitn(2, |&byte| byte == b'/');
+    let name = child_name(parts.next().unwrap_or_default())?;
+    if let Some(parent) = parts.next() {
+        for part in parent.split(|&byte| byte == b'/') {
+            let child = child_name(part)?;
+            dir = fs_ops::open_at(&dir, &child, libc::O_RDONLY | libc::O_DIRECTORY, 0).map_err(path_error)?;
+        }
     }
+    let stat = stat_at(&dir, &name).map_err(path_error)?;
+    Ok(WorkingEntry { dir, name, stat })
 }
 
 fn dir_id(dir: &File) -> Option<(u64, u64)> {
@@ -253,12 +284,14 @@ pub(crate) mod tests {
     use std::fs;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
     use std::os::unix::process::ExitStatusExt as _;
+    use std::path::PathBuf;
 
     use super::*;
     use crate::fixture::Fixture;
 
     struct Fake {
         locality: Result<(), &'static str>,
+        locality_checks: usize,
         calls: Vec<(Action, PathBuf)>,
     }
 
@@ -281,7 +314,7 @@ pub(crate) mod tests {
         FAKE.with(|slot| {
             let mut slot = slot.borrow_mut();
             assert!(slot.is_none(), "already recording native actions");
-            *slot = Some(Fake { locality, calls: Vec::new() });
+            *slot = Some(Fake { locality, locality_checks: 0, calls: Vec::new() });
         });
         let _reset = Reset;
         let result = f();
@@ -290,7 +323,12 @@ pub(crate) mod tests {
     }
 
     pub(super) fn locality() -> Option<Result<(), &'static str>> {
-        FAKE.with(|slot| slot.borrow().as_ref().map(|fake| fake.locality))
+        FAKE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let fake = slot.as_mut()?;
+            fake.locality_checks += 1;
+            Some(fake.locality)
+        })
     }
 
     pub(super) fn capture(action: Action, command: &Command) -> bool {
@@ -343,6 +381,29 @@ pub(crate) mod tests {
         let (result, calls) =
             with_fake(Err("Can't verify a local viewer"), || Action::Open.run(Path::new("bad"), None, Path::new("..")));
         assert_eq!(result, Err("Can't verify a local viewer"));
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn menu_eligibility_checks_paths_and_locality_without_launching() {
+        let fixture = Fixture::folder();
+        fixture.write("report.pdf", "data");
+        fs::create_dir(fixture.root.join("folder")).unwrap();
+        let root = &fixture.root;
+        let id = identity(root);
+        let file = Path::new("report.pdf");
+        let ((), calls) = with_fake(Ok(()), || {
+            let found = choices(root, id, file);
+            assert!(found.open && found.reveal);
+            let folder = choices(root, id, Path::new("folder"));
+            assert!(!folder.open && folder.reveal);
+            let missing = choices(root, id, Path::new("missing.pdf"));
+            assert!(!missing.open && !missing.reveal);
+            assert_eq!(FAKE.with(|slot| slot.borrow().as_ref().unwrap().locality_checks), 2);
+        });
+        assert!(calls.is_empty());
+        let (found, calls) = with_fake(Err("No local terminal"), || choices(root, id, file));
+        assert!(!found.open && !found.reveal);
         assert!(calls.is_empty());
     }
 

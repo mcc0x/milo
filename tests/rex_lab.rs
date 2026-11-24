@@ -279,6 +279,8 @@ impl Lab {
         if let Some(graphics) = self.graphics {
             command.env("MILO_GRAPHICS", graphics);
         }
+        // A user's debugging environment must not carry through a file action.
+        command.env("TKMP_LOG", self.root.join("preview.log")).env("TKMP_DUMP", &self.root);
         let server = command
             .args(["server", "run", "--listen", &self.socket(), "--state-dir"])
             .arg(self.root.join("state"))
@@ -1043,6 +1045,9 @@ fn a_floating_reader_holds_the_outlines_files_as_tabs_and_keeps_their_unsaved_ed
     assert!(soon(|| fs::read_to_string(dir.join("b.txt")).unwrap() == "lost? second\n"));
     assert!(soon(|| kept() == ["also typed first\n"]), "{:?}", kept());
 }
+
+#[path = "rex_lab/file_actions.rs"]
+mod file_actions;
 
 #[cfg(target_os = "macos")]
 #[path = "rex_lab/rich_reader.rs"]

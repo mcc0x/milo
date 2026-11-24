@@ -108,14 +108,18 @@ local ok, why = pcall(actions.milo_remember_layout, ctx, { scope = "global" })
 assert(not ok and why:match("separate from other panes") and #commands == 2)
 tiled.layout = tree("horizontal", 0.68, work, rail)
 
--- Repeated peek reuses the layer, and dismissal only closes it and focuses the origin.
+-- Peek from a rail pane: preview splits beside the shell, dismiss returns to the rail.
+ctx.block_id = outline.block_id
 actions.milo_peek_outline(ctx)
 assert(#floats == 1 and floats[1].focus and floats[1].layout.options.command[3] == "--peek-origin")
-assert(floats[1].layout.options.command[4] == "block:shell" and floats[1].layout.options.cwd == "/my project")
+local peek_command = floats[1].layout.options.command
+assert(peek_command[4] == outline.block_id and peek_command[5] == "--shell" and peek_command[6] == shell.block_id)
+assert(floats[1].layout.options.cwd == "/my project")
 actions.milo_peek_outline(ctx)
 assert(#floats == 1 and focus[1] == "block:peek")
 actions.milo_close_peek(ctx)
-assert(#closed == 1 and closed[1] == "block:peek" and focus[2] == "block:shell")
+assert(#closed == 1 and closed[1] == "block:peek" and focus[2] == outline.block_id)
+ctx.block_id = shell.block_id
 window.layers[2] = nil
 
 local function probe(args, profile)

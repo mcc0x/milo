@@ -20,7 +20,7 @@ use super::{lock, rex_files};
 use crate::git::discover_worktree;
 use crate::host::Host;
 use crate::preferences::{IconMode, Preferences, Show, Source, UsageAccount, UsageAccounts, UsageTool, UsageTools};
-use crate::{rex, usage};
+use crate::{preview, rex, usage};
 
 pub(crate) const TITLE: &str = "Milo doctor";
 pub(crate) const CHECKING: &str = "Checking…";
@@ -201,6 +201,12 @@ fn report_with_worktree(
         Err(note) => writeln!(out, "Worktree: {note}").unwrap(),
     }
     let root = worktree.ok().flatten();
+    let previewer = worktree.map(preview::installed);
+    write_markdown_preview(
+        &mut out,
+        previewer.as_ref().map(|tool| tool.as_deref()).map_err(|&note| note),
+        target.is_some(),
+    );
     match Preferences::resolve_in(&store.config, root) {
         Ok((p, source)) => {
             let scope = match source {
@@ -370,6 +376,20 @@ fn report_with_worktree(
     }
     out.pop();
     Ok((out, health, tools))
+}
+
+fn write_markdown_preview(out: &mut String, tool: Result<Option<&Path>, &'static str>, in_rex: bool) {
+    match tool {
+        Ok(Some(tool)) => writeln!(out, "Markdown preview: optional tkmp found at {tool:?}.").unwrap(),
+        Ok(None) => {
+            writeln!(out, "Markdown preview: optional tkmp not found on a safe PATH. {}.", preview::MISSING_TOOL)
+                .unwrap();
+        }
+        Err(_) => out.push_str("Markdown preview: optional tkmp was not checked because the worktree is unknown.\n"),
+    }
+    if !in_rex {
+        out.push_str("  Open Milo in a local Rex pane to use Markdown preview.\n");
+    }
 }
 
 fn write_rex_installation(
@@ -780,6 +800,24 @@ mod tests {
             claude: fixture.root.join("settings.json"),
             claude_state: None,
         }
+    }
+
+    #[test]
+    fn doctor_reports_optional_markdown_preview_without_starting_it() {
+        let mut report = String::new();
+        write_markdown_preview(&mut report, Ok(None), false);
+        assert!(report.contains("optional tkmp not found on a safe PATH."), "{report}");
+        assert!(report.contains("add its absolute directory to PATH"), "{report}");
+        assert!(report.contains("Open Milo in a local Rex pane"), "{report}");
+
+        report.clear();
+        let path = Path::new("/trusted path/bin/tkmp");
+        write_markdown_preview(&mut report, Ok(Some(path)), true);
+        assert_eq!(report, format!("Markdown preview: optional tkmp found at {path:?}.\n"));
+
+        report.clear();
+        write_markdown_preview(&mut report, Err("unknown worktree"), true);
+        assert!(report.contains("optional tkmp was not checked"), "{report}");
     }
 
     #[test]

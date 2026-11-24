@@ -142,7 +142,7 @@ impl Tabs {
     }
 
     fn add(&mut self, load: impl FnOnce() -> Reader) {
-        self.reader_mut().park_media();
+        self.reader_mut().hide();
         self.tabs.push(load());
         // The first snapshot was just loaded. Rescope so the pane loop still
         // reconciles it after installing the watcher, without forcing a second diff now.
@@ -164,7 +164,7 @@ impl Tabs {
     /// Brings a tab forward as its file is now, not as it was when the tab was last shown.
     fn show(&mut self, tab: usize) {
         if tab != self.shown {
-            self.reader_mut().park_media();
+            self.reader_mut().hide();
         }
         self.activate(tab);
         let reader = self.reader_mut();
@@ -417,6 +417,14 @@ impl Pane for Tabs {
         self.reader_mut().cover();
     }
 
+    fn tracks_hover(&self) -> bool {
+        self.reader().tracks_hover()
+    }
+
+    fn hover_span(&self, x: usize, y: usize) -> Option<Range<usize>> {
+        self.reader().hover_span(x, y.checked_sub(self.strip_rows)?)
+    }
+
     fn notice(&self) -> Option<&'static str> {
         self.reader().notice()
     }
@@ -477,12 +485,14 @@ impl Pane for Tabs {
     fn key(&mut self, key: Key) -> After {
         let several = self.tabs.len() > 1;
         match key {
+            Key::Ctrl(b'c') if !self.reader().editing() => self.quit(),
+            Key::Click(_, y) if y < self.strip_rows && self.reader().actions.is_some() => After::Ignored,
+            Key::Click(x, y) if y < self.strip_rows => self.click_strip(x),
+            Key::Click(x, y) => self.pass(Key::Click(x, y - self.strip_rows)),
+            key if self.reader().actions.is_some() => self.pass(key),
             Key::Ctrl(b'n') if several => self.step(true),
             Key::Ctrl(b'p') if several => self.step(false),
             Key::Ctrl(b'w') => self.close(self.shown),
-            Key::Ctrl(b'c') if !self.reader().editing() => self.quit(),
-            Key::Click(x, y) if y < self.strip_rows => self.click_strip(x),
-            Key::Click(x, y) => self.pass(Key::Click(x, y - self.strip_rows)),
             key => self.pass(key),
         }
     }
@@ -581,7 +591,7 @@ mod tests {
         let rows = drawn(&mut tabs, 40, 6);
         assert_eq!(rows[0], " a.txt  b.txt ×");
         assert!(rows[1].contains("b.txt") && rows[2].ends_with("second"), "{rows:?}");
-        assert_eq!(rows[5], " ↑↓ scroll · e edit · q close · ? help");
+        assert!(rows[5].contains("Actions"));
         let help = tabs.help();
         help.assert_rows_fit(26);
         assert!(help.text().contains("^N ^P") && help.text().contains("^W"), "{}", help.text());
@@ -636,7 +646,7 @@ mod tests {
         assert_eq!(tabs.key(Key::Ctrl(b'p')), After::Stay);
         let rows = drawn(&mut tabs, 40, 8);
         assert_eq!(rows[0], " long.txt ×  *b.txt");
-        assert!(rows[2].starts_with("  6   line 6") && rows[7].contains("e edit"), "{rows:?}");
+        assert!(rows[2].starts_with("  6   line 6") && rows[7].contains("Actions"), "{rows:?}");
         assert!(!tabs.editing());
         tabs.key(Key::Char('j'));
 
@@ -693,6 +703,44 @@ mod tests {
         assert_eq!(tabs.key(Key::Ctrl(b'p')), After::Stay);
         assert_eq!(drawn(&mut tabs, 80, 6), draft);
         assert_eq!(fs::read_to_string(f.root.join("draft.txt")).unwrap(), "original\n");
+    }
+
+    #[test]
+    fn actions_capture_tab_keys_and_clicks_without_outliving_the_shown_tab() {
+        let f = Fixture::folder();
+        f.write("one.md", "# First\n");
+        f.write("two.txt", "second\n");
+        let mut tabs = opened(&f, &["one.md", "two.txt"]);
+        let rows = drawn(&mut tabs, 80, 9);
+        let at = str_width(rows[8].split_once("a Actions").unwrap().0);
+        assert_eq!(tabs.hover_span(at, 8), Some(at..at + "a Actions".len()));
+        assert_eq!(tabs.key(Key::Click(at, 8)), After::Stay);
+        let menu = drawn(&mut tabs, 80, 9);
+        assert_eq!(rows[0], menu[0]);
+        assert!(menu[1].contains("one.md") && menu[1].contains("Actions"), "{menu:?}");
+        assert!(menu.iter().any(|row| row.contains("tkmp")), "{menu:?}");
+        assert_eq!(tabs.key(Key::Ctrl(b'n')), After::Stay);
+        assert_eq!(tabs.key(Key::Ctrl(b'p')), After::Stay);
+        assert_eq!(tabs.key(Key::Ctrl(b'w')), After::Stay);
+        assert_eq!(click(&mut tabs, "two.txt"), After::Ignored);
+        assert_eq!(click(&mut tabs, "×"), After::Ignored);
+        assert_eq!(drawn(&mut tabs, 80, 9), menu);
+
+        let edit = menu.iter().position(|row| row.contains("Edit in Milo")).unwrap();
+        assert!(tabs.hover_span(3, edit).is_some());
+        assert_eq!(tabs.key(Key::Click(3, edit)), After::Stay);
+        assert!(tabs.editing() && tabs.reader().path == "one.md");
+        assert_eq!(tabs.key(Key::Esc), After::Stay);
+
+        assert_eq!(tabs.key(Key::Char('a')), After::Stay);
+        assert!(drawn(&mut tabs, 80, 9)[1].contains("Actions"));
+        // This request comes from outside the Reader, not from its tab strip.
+        ask(&mut tabs, &f, "two.txt");
+        assert!(drawn(&mut tabs, 80, 9)[2].ends_with("second"));
+        assert_eq!(tabs.key(Key::Enter), After::Ignored);
+        assert_eq!(tabs.key(Key::Ctrl(b'p')), After::Stay);
+        assert_eq!(tabs.reader().path, "one.md");
+        assert!(!drawn(&mut tabs, 80, 9)[1].contains("Actions"));
     }
 
     #[test]

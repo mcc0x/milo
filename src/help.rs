@@ -43,19 +43,24 @@ impl HintHits<'_> {
         self.hit(x, y).map(|(_, _, span)| span)
     }
 
+    pub(crate) fn span(&self, index: usize) -> Option<std::ops::Range<usize>> {
+        self.spans().find_map(|(i, _, span)| (i == index).then_some(span))
+    }
+
+    fn spans(&self) -> impl Iterator<Item = (usize, &str, std::ops::Range<usize>)> {
+        self.items().scan(1, |left, (index, text)| {
+            let end = *left + str_width(text);
+            let span = *left..end;
+            *left = end + self.gap;
+            Some((index, text, span))
+        })
+    }
+
     pub(crate) fn hit(&self, x: usize, y: usize) -> Option<(usize, &str, std::ops::Range<usize>)> {
         if y != self.y {
             return None;
         }
-        let mut left = 1;
-        for (index, text) in self.items() {
-            let end = left + str_width(text);
-            if (left..end).contains(&x) {
-                return Some((index, text, left..end));
-            }
-            left = end + self.gap;
-        }
-        None
+        self.spans().find(|(_, _, span)| span.contains(&x))
     }
 }
 
@@ -338,6 +343,10 @@ mod tests {
         assert_eq!(hits.index_at(3, 1), None); // Separator, not an action.
         assert_eq!(hits.index_at(6, 1), Some(3));
         assert_eq!(hits.index_at(6, 0), None);
+        assert_eq!(hits.span(0), None);
+        assert_eq!(hits.span(1), None);
+        assert_eq!(hits.span(2), Some(1..3));
+        assert_eq!(hits.span(3), Some(6..12));
     }
 
     #[test]
