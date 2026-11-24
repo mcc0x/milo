@@ -199,10 +199,27 @@ impl Discord {
 
     /// Takes a connection through the handshake, as Discord does for an application it knows.
     fn welcome(&self, limit: Duration) -> Client {
+        self.handshake(limit, APPLICATION, 1, READY)
+    }
+
+    fn handshake(&self, limit: Duration, app: &str, opcode: u32, reply: &str) -> Client {
         let mut client = self.accept_within(limit);
-        assert_eq!(client.frame(), Some((0, format!(r#"{{"v":1,"client_id":"{APPLICATION}"}}"#))));
-        client.send(1, READY);
+        assert_eq!(client.frame(), Some((0, format!(r#"{{"v":1,"client_id":"{app}"}}"#))));
+        client.send(opcode, reply);
         client
+    }
+
+    // The CLI waits for the helper's status; the helper gives Discord only two
+    // seconds to answer. Serve the handshake while the CLI is still running.
+    fn handshake_during(&self, app: &str, opcode: u32, reply: &str, command: impl FnOnce() -> String) -> (String, Client) {
+        std::thread::scope(|scope| {
+            let peer = scope.spawn(|| self.handshake(Duration::from_secs(30), app, opcode, reply));
+            (command(), peer.join().unwrap())
+        })
+    }
+
+    fn welcome_during(&self, command: impl FnOnce() -> String) -> (String, Client) {
+        self.handshake_during(APPLICATION, 1, READY, command)
     }
 
     /// Whether nothing connects for a moment.
@@ -316,8 +333,7 @@ fn one_helper_at_a_time_sets_the_activity() {
     let home = Home::new();
     let discord = home.discord();
     home.rex_says("active");
-    home.enable();
-    let mut first = discord.welcome(Duration::from_secs(30));
+    let (_, mut first) = discord.welcome_during(|| home.enable());
     let helper = first.activity(1);
 
     // Rex starts `milo listen` each time it loads its settings, and each asks for a helper.
@@ -331,9 +347,8 @@ fn one_helper_at_a_time_sets_the_activity() {
     assert!(home.status_says("Discord is showing “In a Rex session”."));
 
     // Turning it on again replaces the helper: the old one clears before the new one shows.
-    home.enable();
+    let (_, mut second) = discord.welcome_during(|| home.enable());
     first.cleared(helper, 2);
-    let mut second = discord.welcome(Duration::from_secs(30));
     assert_ne!(second.activity(1), helper);
     assert!(discord.quiet());
 }
@@ -367,10 +382,7 @@ fn an_application_discord_does_not_know_is_not_asked_about_again() {
     let home = Home::new();
     let discord = home.discord();
     home.rex_says("active");
-    home.enable();
-    let mut client = discord.accept_within(Duration::from_secs(30));
-    assert_eq!(client.frame().unwrap().0, 0);
-    client.send(2, r#"{"code":4000,"message":"Invalid Client ID"}"#);
+    let _peer = discord.handshake_during(APPLICATION, 2, r#"{"code":4000,"message":"Invalid Client ID"}"#, || home.enable());
     assert!(home.status_says("Discord does not know this application ID"));
     home.rex_says("idle");
     home.rex_says("active");
@@ -383,8 +395,7 @@ fn the_activity_and_the_helper_end_with_rex() {
     let home = Home::new();
     let discord = home.discord();
     home.rex_says("active");
-    home.enable();
-    let mut client = discord.welcome(Duration::from_secs(30));
+    let (_, mut client) = discord.welcome_during(|| home.enable());
     let helper = client.activity(1);
 
     // The Rex server stops, which ends the script that watches it.
@@ -395,8 +406,7 @@ fn the_activity_and_the_helper_end_with_rex() {
     assert!(home.status_says("Milo's presence helper is not running"));
 
     // The next Rex starts `milo listen`, and presence comes back with it.
-    assert!(home.milo(&["listen"]).status.success());
-    let mut again = discord.welcome(Duration::from_secs(30));
+    let (_, mut again) = discord.welcome_during(|| home.say(&["listen"]));
     assert_ne!(again.activity(1), helper);
 }
 
@@ -436,9 +446,9 @@ fn chosen_names_follow_what_is_in_front_and_go_when_they_are_no_longer_chosen() 
     assert!(said.contains("as in “Project: milo · Session: release-notes”") && said.contains("--yes"), "{said}");
     assert!(!home.root.join(".config/milo/discord.conf").exists());
 
-    assert!(home.say(&["presence", "enable", "--details", "both", "--yes"]).starts_with("Discord presence is on."));
+    let (enabled, mut client) = discord.welcome_during(|| home.say(&["presence", "enable", "--details", "both", "--yes"]));
+    assert!(enabled.starts_with("Discord presence is on."));
     assert_eq!(home.rex_asked(), r#"{"session":true,"directory":true}"#);
-    let mut client = discord.welcome(Duration::from_secs(30));
     let helper = client.shows(1, Some("Project: client-site · Session: release notes"));
     assert!(
         home.status_says("Discord is showing “In a Rex session” with “Project: client-site · Session: release notes”.")
@@ -471,18 +481,18 @@ fn chosen_names_follow_what_is_in_front_and_go_when_they_are_no_longer_chosen() 
     assert_eq!(client.shows(1, Some("Project: client-site · Session: release notes")), helper);
 
     // Showing one name less takes the other down at once: the old activity is cleared before the new one is set.
-    assert!(home.say(&["presence", "details", "project"]).contains("the folder name of the Git project in front"));
+    let (details, mut next) = discord.welcome_during(|| home.say(&["presence", "details", "project"]));
+    assert!(details.contains("the folder name of the Git project in front"));
     client.cleared(helper, 2);
     assert_eq!(home.rex_asked(), r#"{"session":false,"directory":true}"#, "the session's label is no longer asked for");
-    let mut client = discord.welcome(Duration::from_secs(30));
-    let project_only = client.shows(1, Some("Project: client-site"));
+    let project_only = next.shows(1, Some("Project: client-site"));
     assert_ne!(project_only, helper);
 
     // Back to no names: Rex is asked about no session, and none is shown even if one were reported.
-    assert!(home.say(&["presence", "details", "generic"]).contains("the fixed line and no names"));
-    client.cleared(project_only, 2);
+    let (details, mut client) = discord.welcome_during(|| home.say(&["presence", "details", "generic"]));
+    assert!(details.contains("the fixed line and no names"));
+    next.cleared(project_only, 2);
     assert_eq!(home.rex_asked(), r#"{"session":false,"directory":false}"#);
-    let mut client = discord.welcome(Duration::from_secs(30));
     let generic = client.activity(1);
     home.rex_shows(Some("fix-login"), Some(&tool));
     assert!(discord.quiet());
@@ -510,25 +520,21 @@ fn an_application_of_your_own_is_kept_until_you_go_back_to_milos() {
             .starts_with(&format!("Discord presence: off\nApplication: your own, {OWN}\nDetails: generic"))
     );
 
-    home.enable();
-    let mut client = discord.accept_within(Duration::from_secs(30));
-    assert_eq!(client.frame(), Some((0, format!(r#"{{"v":1,"client_id":"{OWN}"}}"#))), "the saved application is kept");
-    client.send(1, READY);
+    let (_, mut client) = discord.handshake_during(OWN, 1, READY, || home.enable());
     let helper = client.activity(1);
 
-    assert!(
-        home.say(&["presence", "application", "official"]).starts_with("Discord presence uses Milo's application.")
-    );
+    let (changed, mut official) = discord.welcome_during(|| home.say(&["presence", "application", "official"]));
+    assert!(changed.starts_with("Discord presence uses Milo's application."));
     client.cleared(helper, 2);
-    let mut official = discord.welcome(Duration::from_secs(30));
     let helper = official.activity(1);
     let saved = || fs::read_to_string(home.root.join(".config/milo/discord.conf")).unwrap();
     assert_eq!(saved(), "presence = true\n");
 
     // Milo's own ID is Milo's application however it is given, when turning presence on too.
-    assert!(home.say(&["presence", "enable", APPLICATION, "--yes"]).starts_with("Discord presence is on."));
+    let (enabled, mut next) = discord.welcome_during(|| home.say(&["presence", "enable", APPLICATION, "--yes"]));
+    assert!(enabled.starts_with("Discord presence is on."));
     official.cleared(helper, 2);
-    discord.welcome(Duration::from_secs(30)).activity(1);
+    next.activity(1);
     assert_eq!(saved(), "presence = true\n");
     assert!(home.say(&["presence"]).contains("\nApplication: Milo's, "));
 }
