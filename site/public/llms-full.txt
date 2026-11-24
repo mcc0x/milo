@@ -121,7 +121,7 @@ To review an agent’s edits without mixing in your own uncommitted work, have i
 
 ## Documentation
 
-[Setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md) · [Keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md) · [Usage limits](https://github.com/mcc0x/milo/blob/main/docs/usage.md) · [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) · [Pane behaviour](https://github.com/mcc0x/milo/blob/main/docs/panes.md) · [How it works](https://github.com/mcc0x/milo/blob/main/docs/internals.md)
+[Integrations](https://github.com/mcc0x/milo/blob/main/docs/integrations.md) · [Setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md) · [Keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md) · [Usage limits](https://github.com/mcc0x/milo/blob/main/docs/usage.md) · [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) · [Pane behaviour](https://github.com/mcc0x/milo/blob/main/docs/panes.md) · [How it works](https://github.com/mcc0x/milo/blob/main/docs/internals.md)
 
 [Contributing](https://github.com/mcc0x/milo/blob/main/CONTRIBUTING.md) · [MIT licence](https://github.com/mcc0x/milo/blob/main/LICENSE)
 
@@ -817,6 +817,8 @@ Limits on bytes, pixels and output apply before or during decoding. The macOS he
 
 **Markdown.** Headings, paragraphs, lists, quotes, emphasis and code render in the pane's own text styles. Links show text; embedded images show their labels, not fetched pixels. No HTML, scripts, URLs or file references are executed or loaded. `m` switches back and forth without losing the source diff. `e` opens the ordinary source editor; only an explicit save writes. Large previews stop at a labeled limit (512 KiB of text, 20,000 source lines or 32,000 wrapped rows); the source Reader keeps its own limits.
 
+When another program saves or replaces the working file, the preview refreshes in place. An exclamation mark (`!`) identifies new or edited blocks for three seconds. These marks compare the last two previews, not the file against Git. If text moves above you, Milo keeps the passage you're reading in view when it can. Press `G` to follow the end instead. Scrolling (including the wheel), switching to source, or entering the editor stops following. `End` jumps to the bottom without following. A save on disk never replaces an open draft.
+
 ### Representative open times
 
 Median of five release-build starts on an Apple M5 Pro, macOS 27.2.1, FFmpeg 9.0.2. Measured from spawning Milo to the first complete content frame on a 160 × 50 cell terminal. RSS is Milo's resident memory at that frame, not peak memory or the decoder's RSS. Release builds, terminal sizes and decoder builds affect these numbers.
@@ -900,6 +902,7 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 | `b` / `Space` | Scroll a page up or down |
 | Left / Right or `h` / `l` | Scroll sideways |
 | `m` in a working Markdown file | Switch between rendered text and the source/diff |
+| `G` in rendered Markdown | Follow the end as the file changes. Any scroll stops following; `End` jumps once. |
 | `Space` in a video | Play or pause (always muted) |
 | Left / Right or `h` / `l` in a video | Seek back or forward five seconds |
 | `n` / `N` | Next or previous block of added or removed lines |
@@ -1266,6 +1269,58 @@ If Discord is not running, or quits, the helper waits and puts the activity back
 - Names are shown only [when one session is plainly in front](https://github.com/mcc0x/milo/blob/main/docs/presence.md#which-session-is-in-front). Expect the fixed line alone after you have looked at several sessions.
 - The fixed line's wording cannot be changed. To change the name or icon, use [an application of your own](https://github.com/mcc0x/milo/blob/main/docs/presence.md#your-own-application).
 - If Discord rejects an application ID, Milo stops asking until you turn presence on again or Rex restarts.
+
+---
+
+Source: https://github.com/mcc0x/milo/blob/main/docs/integrations.md
+
+# Milo integrations
+
+Milo works in a supported terminal without Rex or a connected account. Pick the integration for the job: reading local usage, checking an online account, forwarding an alert, or opening a file. These are separate choices.
+
+## Coding agents and usage
+
+`milo usage` reads reports already on disk. It doesn’t launch a harness or sign in to discover one. **Auto** keeps tools without a reading out of the way; **Hide** stops checking that tool. See [usage settings and local sources](https://github.com/mcc0x/milo/blob/main/docs/usage.md#which-tools-appear).
+
+| Local source | What shows up in Milo |
+| --- | --- |
+| Codex | Limit windows recorded in recent sessions. |
+| Claude Code | Saved limit windows and, when available, today’s transcript token count. An optional Claude Code status line can supply limit reports. |
+| oh-my-pi (OMP) | Saved Codex and Claude limit reports contribute to those tools’ readings, not a separate OMP quota. |
+| OpenCode | Today’s recorded tokens, steps and estimated cost from its local database. Not a remaining quota. |
+
+**Agent patch review** is separate from usage detection: a harness that can hand over a recorded patch can use `milo review PATCH`. This shows that patch rather than treating every change in the worktree as the agent’s. See the [Milo agent skill](https://github.com/mcc0x/milo/blob/main/skills/milo/SKILL.md).
+
+## Online provider accounts
+
+These are **off by default**. Enable an account and supply its own credential to query the provider. Milo doesn’t reuse a harness login. Balances, spend and credits are not quota percentages.
+
+| Provider | What the API reports |
+| --- | --- |
+| DeepSeek | Prepaid balance in the account currency. |
+| OpenRouter | The key’s remaining spending limit or its spend; account credits require a management key. |
+| GitHub Copilot | AI credits consumed this month, not credits remaining; access depends on the plan and token permissions. |
+| Devin | Daily ACUs consumed for an eligible Enterprise organization, not an allowance remaining. |
+
+See [account setup](https://github.com/mcc0x/milo/blob/main/docs/usage.md#accounts-asked-online) and the [provider evidence](https://github.com/mcc0x/milo/blob/main/docs/usage-sources.md#summary), including access restrictions and schema-only checks. Cursor, Gemini CLI and Amp are not shipped usage adapters.
+
+## Rex, messaging and the Mac menu bar
+
+| Integration | What it adds | Where to start |
+| --- | --- | --- |
+| Rex | Remembered pane layouts, floating Reader tabs, shell following and access to another host’s local settings dashboard. | [Setup and hosts](https://github.com/mcc0x/milo/blob/main/docs/setup.md) |
+| Discord alerts | Forward selected Rex events to a channel. Pair through Milo or use your own webhook. Delivery goes directly from your device to Discord. | [Alert forwarding](https://github.com/mcc0x/milo/blob/main/docs/setup.md#mirror-rex-alerts) |
+| Telegram alerts | Pair with Milo’s bot in a private chat (delivery uses the hosted relay), or configure your own bot and chat without the relay. Can run alongside Discord. | [Alert forwarding](https://github.com/mcc0x/milo/blob/main/docs/setup.md#mirror-rex-alerts) |
+| Discord Rich Presence | Optionally show Rex activity in Discord. Separate from alerts; session and project names are separate opt-ins. | [Presence and privacy](https://github.com/mcc0x/milo/blob/main/docs/presence.md) |
+| Milo for macOS | Optional menu app for agent quota or local CPU/memory readings, with access to settings. Included in the Apple Silicon release; installed separately with `milo menubar install`. | [Menu bar guide](https://github.com/mcc0x/milo/blob/main/docs/usage.md#macos-menu-bar) |
+
+## Reader, media and file tools
+
+- **Git** supplies worktree changes, commit history and historical file contents. Outline also browses plain folders. [Pane guide](https://github.com/mcc0x/milo/blob/main/docs/panes.md)
+- **Markdown** renders directly in Reader; no external previewer is required. The optional **tkmp** handoff is [tracked in #88](https://github.com/mcc0x/milo/issues/88), **not included in v0.1.7**.
+- **Kitty graphics** can display supported images after a positive terminal capability check. **FFmpeg and FFprobe** are optional, user-installed tools for supported MP4s. The [format matrix](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reading-pictures-video-and-markdown) lists platform fallbacks and decoder requirements.
+- **Finder and default Mac apps** can reveal or open eligible working files on a verified local Mac. These actions don’t export a draft or open today’s file in place of a historical revision. [Native file actions](https://github.com/mcc0x/milo/blob/main/docs/panes.md#opening-a-file-outside-milo-on-a-mac)
+- **Formatters** run on request against the draft: rustfmt, gofmt, Ruff, Black, Prettier, Biome, Deno, Taplo, clang-format, shfmt, StyLua, swift-format and Terraform. Milo doesn’t download them or save their output without your explicit save. [File types and formatter selection](https://github.com/mcc0x/milo/blob/main/docs/panes.md#formatting)
 
 ---
 

@@ -60,6 +60,8 @@ pub struct Reader {
     /// What happened to the working file.
     kind: Kind,
     body: Body,
+    /// Last populated working Markdown view, kept even through a replacement gap.
+    markdown_preview: Option<Box<markdown::Preview>>,
     /// The source/diff and rendered document keep independent scroll positions in this tab.
     markdown_source: bool,
     /// Scratch space reused when colouring code.
@@ -251,9 +253,15 @@ impl Body {
     }
 }
 
+#[derive(Clone, Copy)]
+enum MarkdownBody {
+    Empty,
+    Populated,
+}
+
 struct Text {
     lines: Vec<Line>,
-    preview: Option<Box<markdown::Preview>>,
+    markdown: Option<MarkdownBody>,
     lang: Option<&'static Lang>,
     /// Start lines at which the open syntax differs from the preceding line.
     starts: Vec<(usize, State)>,
@@ -304,7 +312,7 @@ impl Text {
         if let Some(end) = end_of_change.filter(|_| previous == LineKind::Same) {
             folds.push(end + LEAD, lines.len());
         }
-        Self { lines, preview: None, lang, starts, changes, folds, digits: last.ilog10() as usize + 1, added, removed }
+        Self { lines, markdown: None, lang, starts, changes, folds, digits: last.ilog10() as usize + 1, added, removed }
     }
 }
 
@@ -313,8 +321,12 @@ fn short_commit_id(hash: &str) -> &str {
 }
 
 impl Reader {
+    fn markdown_body(&self) -> Option<MarkdownBody> {
+        if let Body::Text(text) = &self.body { text.markdown } else { None }
+    }
+
     fn markdown(&self) -> Option<&markdown::Preview> {
-        if let Body::Text(text) = &self.body { text.preview.as_deref() } else { None }
+        self.markdown_body().and(self.markdown_preview.as_deref())
     }
 
     fn pause_video(&mut self) {
@@ -457,6 +469,7 @@ impl Reader {
             preference_note,
             kind: Kind::None,
             body: Body::Note("Git did not answer."),
+            markdown_preview: None,
             markdown_source: false,
             spans: Vec::new(),
             opening: true,
@@ -595,7 +608,10 @@ impl Pane for Reader {
                 key("↑↓   ", "scroll (k j)"),
                 key("Space", "page down"),
                 key("b    ", "page up"),
-                key("g G  ", "top/bottom"),
+                key("g    ", "top"),
+                key("G    ", "follow end"),
+                note("Scrolling stops follow."),
+                sample("!", Style::PLAIN.bold(), "recently changed"),
             ];
             rows.extend(self.action_help());
             rows.extend(self.native_help());
@@ -763,10 +779,20 @@ impl Pane for Reader {
             Some(editor) => editor.next_frame(now),
             None => {
                 let message = self.change_notice.map(|(_, until)| until.saturating_duration_since(now));
+                let marks = if !self.markdown_source && matches!(self.markdown_body(), Some(MarkdownBody::Populated)) {
+                    self.markdown().and_then(markdown::Preview::mark_deadline)
+                } else {
+                    None
+                };
                 let loading = matches!(&self.source, Source::Working(work)
                     if matches!(&work.media, Some(media_load::State::Loading(_))) || work.media_check.is_some());
                 let playing = matches!(&self.body, Body::Video(video) if video.needs_tick());
-                (loading || playing).then_some(Duration::from_millis(30)).into_iter().chain(message).min()
+                (loading || playing)
+                    .then_some(Duration::from_millis(30))
+                    .into_iter()
+                    .chain(message)
+                    .chain(marks.map(|until| until.saturating_duration_since(now)))
+                    .min()
             }
         }
     }
@@ -826,23 +852,39 @@ impl Reader {
             Key::Char('b') => Key::PgUp,
             _ => key,
         };
-        if let Body::Text(text) = &mut self.body
-            && let Some(preview) = text.preview.as_deref_mut()
+        if let Some(body) = self.markdown_body()
+            && let Some(preview) = self.markdown_preview.as_deref_mut()
         {
             if key == Key::Char('m') {
+                preview.stop_follow();
                 self.markdown_source = !self.markdown_source;
                 self.change_notice = None;
                 self.clear_hits();
                 return After::Stay;
             }
             if !self.markdown_source {
+                if key == Key::Char('G') {
+                    return if preview.follow_end() { After::Stay } else { After::Ignored };
+                }
                 if let Some(delta) = key.rows(self.rows) {
+                    if matches!(body, MarkdownBody::Empty) {
+                        let following = preview.following();
+                        preview.stop_follow();
+                        return if following { After::Stay } else { After::Ignored };
+                    }
                     return if preview.scroll(delta) { After::Stay } else { After::Ignored };
                 }
                 if !matches!(key, Key::Char('e' | 'q') | Key::Esc) {
                     return After::Ignored;
                 }
             }
+        } else if !self.markdown_source
+            && key != Key::Char('G')
+            && key.rows(self.rows).is_some()
+            && let Some(preview) = &mut self.markdown_preview
+        {
+            // The old document is not visible, but manual navigation still disarms follow.
+            preview.stop_follow();
         }
         let before = (self.top, self.pan);
         match key {
@@ -869,6 +911,9 @@ impl Reader {
     pub fn edit(&mut self, now: Instant) -> After {
         match self.open_editor() {
             Ok(editor) => {
+                if let Some(preview) = &mut self.markdown_preview {
+                    preview.stop_follow();
+                }
                 self.editor = Some(Box::new(editor));
                 self.clear_hits();
                 self.clear_change();
@@ -935,8 +980,13 @@ impl Reader {
 
     /// The file line at the top of the view, counted from zero and skipping removed lines.
     fn top_line(&self) -> usize {
-        if !self.markdown_source && let Some(preview) = self.markdown() {
-            return preview.source_line();
+        if !self.markdown_source
+            && let Some(body) = self.markdown_body()
+        {
+            return match body {
+                MarkdownBody::Empty => 0,
+                MarkdownBody::Populated => self.markdown_preview.as_deref().map_or(0, markdown::Preview::source_line),
+            };
         }
         self.line_number_at(self.source_top())
     }
@@ -1013,14 +1063,17 @@ impl Reader {
 
     fn show_editor_line(&mut self, line: usize) {
         if !self.markdown_source
-            && let Body::Text(text) = &mut self.body
-            && let Some(preview) = &mut text.preview
+            && let Some(body) = self.markdown_body()
         {
-            preview.go_to_line(line);
-        } else {
-            self.opening = false;
-            self.pan = 0;
-            self.set_source_top(self.source_row(line));
+            if matches!(body, MarkdownBody::Populated)
+                && let Some(preview) = &mut self.markdown_preview
+            {
+                preview.go_to_line(line);
+            }
+            return;
         }
+        self.opening = false;
+        self.pan = 0;
+        self.set_source_top(self.source_row(line));
     }
 }

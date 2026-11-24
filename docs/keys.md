@@ -63,6 +63,7 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 | `b` / `Space` | Scroll a page up or down |
 | Left / Right or `h` / `l` | Scroll sideways |
 | `m` in a working Markdown file | Switch between rendered text and the source/diff |
+| `G` in rendered Markdown | Follow the end as the file changes. Any scroll stops following; `End` jumps once. |
 | `Space` in a video | Play or pause (always muted) |
 | Left / Right or `h` / `l` in a video | Seek back or forward five seconds |
 | `n` / `N` | Next or previous block of added or removed lines |

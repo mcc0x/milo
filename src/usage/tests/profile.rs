@@ -148,7 +148,7 @@ const DB_LOOKS: u32 = 12;
 const HISTORY_ROWS: u32 = 200_000;
 const OPEN_CODE_ROWS: u32 = 50_000;
 
-fn opencode_rows(path: &Path, first: u32, rows: u32, newest: i64) {
+fn opencode_rows(path: &Path, sessions: u32, first: u32, rows: u32, newest: i64) {
     let ms = newest * 1000;
     let text = "fictional response with a tool result and a code change. ".repeat(5);
     exec(
@@ -156,10 +156,27 @@ fn opencode_rows(path: &Path, first: u32, rows: u32, newest: i64) {
         &format!(
             "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i+1<{rows})
              INSERT INTO session_message(id,session_id,type,seq,time_created,time_updated,data)
-             SELECT 'seed-'||({first}+i),'session-'||(i%8),CASE WHEN i%4=0 THEN 'user' ELSE 'assistant' END,
+             SELECT 'seed-'||({first}+i),'session-'||(i%{sessions}),CASE WHEN i%4=0 THEN 'user' ELSE 'assistant' END,
                     {first}+i,{ms}-i*500,{ms}-i*500,
                     '{{\"agent\":\"build\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}],\"cost\":0.001,
                       \"tokens\":{{\"input\":10,\"output\":5,\"reasoning\":0,\"cache\":{{\"read\":7,\"write\":1}}}}}}'
+             FROM n;"
+        ),
+    );
+}
+
+fn opencode_legacy_rows(path: &Path, sessions: u32, first: u32, rows: u32, newest: i64) {
+    let ms = newest * 1000;
+    let text = "fictional response with a tool result and a code change. ".repeat(5);
+    exec(
+        path,
+        &format!(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i+1<{rows})
+             INSERT INTO message(id,session_id,time_created,time_updated,data)
+             SELECT 'seed-'||({first}+i),'session-'||(i%{sessions}),{ms}-i*500,{ms}-i*500,
+                    '{{\"role\":\"' || CASE WHEN i%4=0 THEN 'user' ELSE 'assistant' END || '\",
+                       \"agent\":\"build\",\"content\":\"{text}\",\"cost\":0.001,
+                       \"tokens\":{{\"input\":10,\"output\":5,\"reasoning\":0,\"cache\":{{\"read\":7,\"write\":1}}}}}}'
              FROM n;"
         ),
     );
@@ -216,6 +233,7 @@ fn usage_profile_active_sqlite() {
     }
     println!("# WAL writers stay open; one change per 20s look; byte counts are base files; one warm-up omitted");
     println!("# Job completion includes process startup. A longer fixture limit exposes reads over one second.");
+    println!("# Seed rows count both tables in a migrated OpenCode database.");
     println!(
         "profile\tdatabase_bytes\tseed_rows\tday_assistant_rows\tcommits\tjobs\tover_1s\tinline_p50_us\tinline_p95_us\tresult_p50_us\tresult_p95_us"
     );
@@ -266,28 +284,51 @@ fn usage_profile_active_sqlite() {
         );
         writer.close();
     }
-    for (profile, day_rows) in [("opencode-mostly-history", 2_000), ("opencode-dense-day", 40_000)] {
+    for (profile, release, seed_rows, day_rows, sessions) in [
+        ("opencode-mostly-history", RELEASES[3], OPEN_CODE_ROWS, 2_000, 8),
+        ("opencode-dense-day", RELEASES[3], OPEN_CODE_ROWS, 40_000, 8),
+        ("opencode-1x-archive", RELEASES[1], HISTORY_ROWS, 2_000, 8),
+        ("opencode-migrated-archive", RELEASES[4], HISTORY_ROWS, 2_000, 8),
+        ("opencode-migrated-many-sessions", RELEASES[4], HISTORY_ROWS, 2_000, 1_000),
+    ] {
         let f = Fixture::folder();
-        let (version, schema, store) = RELEASES[3];
+        let (version, schema, store) = release;
+        let has_legacy = store != (opencode::Store::V2 { legacy: false });
+        let session_version = if has_legacy { RELEASES[1].0 } else { version };
         let db = Database::new(&f, schema, store);
-        for i in 0..8 {
-            db.session(&format!("session-{i}"), version, now - 2 * DAY, None);
+        for i in 0..sessions {
+            db.session(&format!("session-{i}"), session_version, now - 3 * DAY, None);
         }
-        db.session("bench", version, now - HOUR, None);
-        opencode_rows(&db.path, 0, OPEN_CODE_ROWS - day_rows, now - DAY);
-        opencode_rows(&db.path, OPEN_CODE_ROWS - day_rows, day_rows, now - 60);
+        db.session("bench", session_version, now - HOUR, None);
+        if has_legacy {
+            opencode_legacy_rows(&db.path, sessions, 0, seed_rows - day_rows, now - DAY);
+            opencode_legacy_rows(&db.path, sessions, seed_rows - day_rows, day_rows, now - 60);
+        }
+        if store != opencode::Store::V1 {
+            opencode_rows(&db.path, sessions, 0, seed_rows - day_rows, now - DAY);
+            opencode_rows(&db.path, sessions, seed_rows - day_rows, day_rows, now - 60);
+        }
         let mut writer = Writer::open(&f, &db.path);
         let mut usage = unopened(&f, now);
         usage.opencode = OpenCode::new(Some(db.path.clone()), TEST_WAIT);
         let assistant_rows = day_rows * 3 / 4;
+        let physical_rows = if store == (opencode::Store::V2 { legacy: true }) { 2 * seed_rows } else { seed_rows };
         database_looks(
             profile,
             &db.path,
             usage,
             now,
-            (OPEN_CODE_ROWS, assistant_rows),
+            (physical_rows, assistant_rows),
             |look, at| {
-                writer.run(&steps_sql(look, 1, (at - 1) * 1000));
+                let at_ms = (at - 1) * 1000;
+                if store == opencode::Store::V1 {
+                    writer.run(&format!(
+                        "INSERT INTO message VALUES ('append-{look}','bench',{at_ms},{at_ms},
+                         '{{\"role\":\"assistant\",\"tokens\":{{\"input\":10}}}}');"
+                    ));
+                } else {
+                    writer.run(&steps_sql(look, 1, at_ms));
+                }
                 dated(&db.path, at - 1);
             },
             |usage, look| {

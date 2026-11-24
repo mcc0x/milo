@@ -591,9 +591,11 @@ impl Editor {
             let root = root.clone().ok_or("Open Settings from a Git worktree to apply a project's settings to it.")?;
             Ok(vec![(name, root)])
         };
-        let plan = || -> Result<transfer::Plan, String> {
+        let plan = || -> Result<(transfer::Plan, String), String> {
             let bundle = bundle.and_then(|bundle| bundle.string(transfer::BUNDLE_LIMIT)).ok_or(BAD_ACTION)?;
-            transfer::plan(&place, &bundle, &maps()?)
+            let plan = transfer::plan(&place, &bundle, &maps()?)?;
+            let basis = plan.basis()?;
+            Ok((plan, basis))
         };
         let current = |editor: &Self| version.and_then(Value::unsigned) == Some(editor.version);
         let result = match action.as_ref() {
@@ -610,7 +612,7 @@ impl Editor {
             }
             "preview" => {
                 return match plan() {
-                    Ok(plan) => Data(plan.json()),
+                    Ok((plan, basis)) => Data(plan.json(&basis)),
                     Err(why) => Refused(why),
                 };
             }
@@ -621,12 +623,12 @@ impl Editor {
                 if self.setup.dirty() || self.setup.trial.is_some() {
                     return Refused(DRAFT_OPEN.into());
                 }
-                let plan = match plan() {
+                let (plan, basis_now) = match plan() {
                     Ok(plan) => plan,
                     Err(why) => return Refused(why),
                 };
                 let reviewed = basis.and_then(|basis| basis.string(16));
-                if reviewed.as_deref() != Some(plan.basis().as_str()) {
+                if reviewed.as_deref() != Some(basis_now.as_str()) {
                     return Stale(transfer::STALE.into());
                 }
                 transfer::apply(&place, plan).map(|count| {
@@ -1188,6 +1190,70 @@ mod tests {
 
     fn field<'a>(json: Value<'a>, name: &str) -> Value<'a> {
         json.fields([name])[0].unwrap()
+    }
+
+    #[test]
+    fn a_mapped_import_must_review_the_checkout_that_will_receive_it() {
+        let host = Fixture::folder();
+        let original = Fixture::new();
+        let replacement = Fixture::new(); // Unborn worktrees can still be mapped by hand.
+        original.git(&["commit", "-qm", "first", "--allow-empty"]);
+        original.git(&["remote", "add", "origin", "https://example.invalid/first.git"]);
+
+        let store = fixture_store(&host);
+        let global = crate::preferences::layer_file(&store.config, None);
+        let layer = |root: &Path| crate::preferences::layer_file(&store.config, Some(root));
+        fs::create_dir(&store.config).unwrap();
+        fs::write(&global, "icons = plain\n").unwrap();
+        let mut editor = outside(store.clone(), Some(&original.root));
+        let bundle = Quoted("milo-settings 1\n[project]\nname = project\nicons = off\n");
+        let preview = |editor: &mut Editor| {
+            let request = format!(r#"{{"action":"preview","bundle":{bundle},"here":"project"}}"#);
+            let TransferReply::Data(json) = editor.transfer(request.as_bytes()) else {
+                panic!("explicit preview was refused")
+            };
+            field(Value::parse(json.as_bytes()).unwrap(), "basis").string(16).unwrap().into_owned()
+        };
+        let apply = |editor: &mut Editor, basis: &str| {
+            let request = format!(
+                r#"{{"action":"apply","bundle":{bundle},"here":"project","basis":"{basis}","version":{}}}"#,
+                editor.version
+            );
+            editor.transfer(request.as_bytes())
+        };
+
+        let reviewed = preview(&mut editor);
+        original.git(&["remote", "set-url", "origin", "https://example.invalid/renamed.git"]);
+        original.git(&["commit", "-qm", "next", "--allow-empty"]);
+        assert_eq!(preview(&mut editor), reviewed, "new tips and remote URLs do not change the checkout");
+
+        original.git(&["checkout", "--orphan", "unrelated"]);
+        original.git(&["commit", "-qm", "another root", "--allow-empty"]);
+        assert!(matches!(apply(&mut editor, &reviewed), TransferReply::Stale(_)));
+        assert!(!layer(&original.root).exists() && !transfer::undo_available(&store.state));
+
+        // Neither checkout has a root commit on this branch; the directory changed instead.
+        original.git(&["checkout", "--orphan", "fresh"]);
+        let reviewed = preview(&mut editor);
+        // Reinitializing the repository can replace only its Git directory.
+        let reinitialized = Fixture::new();
+        fs::rename(original.root.join(".git"), original.root.with_file_name("old-git")).unwrap();
+        fs::rename(reinitialized.root.join(".git"), original.root.join(".git")).unwrap();
+        assert!(matches!(apply(&mut editor, &reviewed), TransferReply::Stale(_)));
+        assert!(!layer(&original.root).exists() && !transfer::undo_available(&store.state));
+        let reviewed = preview(&mut editor);
+
+        let moved = original.root.with_file_name("moved");
+        fs::rename(&original.root, &moved).unwrap();
+        fs::rename(&replacement.root, &original.root).unwrap();
+        assert!(matches!(apply(&mut editor, &reviewed), TransferReply::Stale(_)));
+        assert!(!layer(&original.root).exists() && !transfer::undo_available(&store.state));
+
+        let reviewed = preview(&mut editor);
+        assert!(matches!(apply(&mut editor, &reviewed), TransferReply::Changed(_)));
+        assert_eq!(fs::read_to_string(layer(&original.root)).unwrap(), "icons = off\n");
+        assert!(!layer(&moved).exists() && !layer(&replacement.root).exists());
+        assert_eq!(fs::read_to_string(global).unwrap(), "icons = plain\n");
     }
 
     fn change_alert(editor: &mut Editor, name: &str, value: &str) -> Result<String, String> {

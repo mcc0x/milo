@@ -6,7 +6,7 @@ use std::time::Instant;
 use super::changes::{Fold, Row};
 use super::edit::Editor;
 use super::handed::Handed;
-use super::{Body, JumpNotice, Reader, Source};
+use super::{Body, JumpNotice, MarkdownBody, Reader, Source, markdown};
 use crate::diff::{Line, LineKind};
 use crate::git::Kind;
 use crate::icons;
@@ -202,6 +202,9 @@ impl Reader {
         if self.change_notice.is_some_and(|(_, until)| now >= until) {
             self.change_notice = None;
         }
+        if let Some(preview) = &mut self.markdown_preview {
+            preview.expire_marks(now);
+        }
         if let Some(menu) = &mut self.actions {
             menu.draw(s, &self.path);
             return;
@@ -258,10 +261,19 @@ impl Reader {
 
     fn draw_body(&mut self, s: &mut Screen) {
         if !self.markdown_source
-            && let Body::Text(text) = &mut self.body
-            && let Some(preview) = &mut text.preview
+            && let Some(body) = self.markdown_body()
         {
-            preview.draw(s, self.rows);
+            match body {
+                MarkdownBody::Empty => {
+                    let width = s.w - usize::from(s.w > 1);
+                    s.put_fit(0, 1, width, markdown::EMPTY, FAINT);
+                }
+                MarkdownBody::Populated => {
+                    if let Some(preview) = &mut self.markdown_preview {
+                        preview.draw(s, self.rows);
+                    }
+                }
+            }
             return;
         }
         if std::mem::take(&mut self.opening) {
@@ -273,6 +285,7 @@ impl Reader {
             Body::Note(note) => Some(*note),
             Body::Picture(picture) => super::media::picture(s, self.rows, picture),
             Body::Video(video) => super::media::movie(s, self.rows, video),
+            Body::Text(text) if text.lines.is_empty() => Some(super::content::EMPTY),
             Body::Text(text) => {
                 let folds = self.review.folds();
                 let total = folds.row_count(text.lines.len());
@@ -368,14 +381,16 @@ impl Reader {
             self.draw_reader_hint(s, action, &["←→ seek 5s", "q close"]);
             return;
         }
-        if self.markdown().is_some() {
+        if let Some(preview) = self.markdown() {
             let action = if self.markdown_source { "m preview" } else { "m source" };
-            let changes = self.markdown_source && self.can_fold();
-            let middle: &[_] = match (self.read_only.is_none(), changes) {
-                (true, true) => &["e edit", "n N changes", "c fold", "q close"],
-                (false, true) => &["n N changes", "c fold", "q close"],
-                (true, false) => &["e edit", "↑↓ scroll", "q close"],
-                (false, false) => &["↑↓ scroll", "q close"],
+            let follow = if preview.following() { "↑↓ stop follow" } else { "G follow end" };
+            let middle: &[_] = match (self.read_only.is_none(), self.markdown_source, self.can_fold()) {
+                (true, false, _) => &[follow, "e edit", "q close"],
+                (false, false, _) => &[follow, "q close"],
+                (true, true, true) => &["e edit", "n N changes", "c fold", "q close"],
+                (false, true, true) => &["n N changes", "c fold", "q close"],
+                (true, true, false) => &["e edit", "↑↓ scroll", "q close"],
+                (false, true, false) => &["↑↓ scroll", "q close"],
             };
             self.draw_reader_hint(s, action, middle);
             return;
@@ -511,6 +526,13 @@ impl Reader {
             let size = format!("{}×{}", picture.width, picture.height);
             if str_width(&size) <= right.saturating_sub(NAME_ROOM) {
                 right -= s.put_right(right, 0, &size, FAINT);
+            }
+        } else if self.markdown().is_some_and(super::markdown::Preview::following) {
+            let room = right.saturating_sub(NAME_ROOM);
+            let label = if "Following end".len() <= room { "Following end" } else { "Following" };
+            if label.len() <= room {
+                right -= s.put_right(right, 0, label, Style::PLAIN.bold());
+                right = right.saturating_sub(2);
             }
         }
         if matches!(self.source, Source::Working(_)) && self.kind != Kind::None {

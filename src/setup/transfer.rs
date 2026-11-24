@@ -13,10 +13,10 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Component, Path, PathBuf};
 
 use super::files::{self, Change, Image};
@@ -127,6 +127,7 @@ pub(crate) struct Place<'a> {
     pub config: &'a Path,
     pub state: &'a Path,
     pub home: Option<&'a Path>,
+    /// The checkout root for export, or the directory to match against for import.
     pub worktree: Option<&'a Path>,
 }
 
@@ -359,10 +360,25 @@ pub(crate) enum Destination {
     Global,
     Worktree {
         root: PathBuf,
-        why: &'static str,
+        matched: WorktreeMatch,
     },
     /// A project that no worktree here was matched to.
     Unmapped,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WorktreeMatch {
+    SameRepository,
+    Chosen,
+}
+
+impl WorktreeMatch {
+    const fn reason(&self) -> &'static str {
+        match self {
+            Self::SameRepository => "same repository",
+            Self::Chosen => "chosen by you",
+        }
+    }
 }
 
 /// One setting an import would change, in the words shown for it.
@@ -395,9 +411,9 @@ impl Plan {
         self.sections.iter().map(|section| section.rows.len()).sum()
     }
 
-    /// Names the exact files this plan was worked out against and what it
-    /// would write. A later plan with another basis is another plan.
-    pub(crate) fn basis(&self) -> String {
+    /// The browser rechecks the files and explicit mapping it previewed. A
+    /// one-shot CLI import does not need to walk a manually chosen repo's history.
+    pub(crate) fn basis(&self) -> Result<String, String> {
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         let mut feed = |bytes: &[u8]| {
             for &byte in bytes.iter().chain(&[0xff]) {
@@ -411,7 +427,21 @@ impl Plan {
             feed(&[u8::from(before.is_some())]);
             feed(after.map_or(&[][..], |image| &image.bytes));
         }
-        format!("{hash:016x}")
+        for section in &self.sections {
+            if let Destination::Worktree { root, matched: WorktreeMatch::Chosen } = &section.destination {
+                let folder =
+                    fs::metadata(root).map_err(|_| format!("Could not read the worktree at {}.", root.display()))?;
+                feed(root.as_os_str().as_bytes());
+                feed(&folder.dev().to_le_bytes());
+                feed(&folder.ino().to_le_bytes());
+                let (device, inode, first) = git::mapped_checkout(root)
+                    .ok_or_else(|| format!("Could not verify the repository at {}.", root.display()))?;
+                feed(&device.to_le_bytes());
+                feed(&inode.to_le_bytes());
+                feed(first.as_deref().unwrap_or("").as_bytes());
+            }
+        }
+        Ok(format!("{hash:016x}"))
     }
 
     /// The plan as someone reads it in a terminal.
@@ -420,8 +450,8 @@ impl Plan {
         for section in &self.sections {
             match (&section.project, &section.destination) {
                 (None, _) => out.push_str("Global defaults\n"),
-                (Some(name), Destination::Worktree { root, why }) => {
-                    writeln!(out, "Project {name} → {} ({why})", root.display()).unwrap()
+                (Some(name), Destination::Worktree { root, matched }) => {
+                    writeln!(out, "Project {name} → {} ({})", root.display(), matched.reason()).unwrap()
                 }
                 (Some(name), _) => {
                     writeln!(
@@ -451,15 +481,17 @@ impl Plan {
     }
 
     /// The plan as the browser editor shows it.
-    pub(crate) fn json(&self) -> String {
-        let mut out = format!("{{\"basis\":\"{}\",\"changes\":{},\"sections\":[", self.basis(), self.changes());
+    pub(crate) fn json(&self, basis: &str) -> String {
+        let mut out = format!("{{\"basis\":\"{basis}\",\"changes\":{},\"sections\":[", self.changes());
         for (index, section) in self.sections.iter().enumerate() {
             if index != 0 {
                 out.push(',');
             }
             let (kind, path, why) = match &section.destination {
                 Destination::Global => ("global", None, None),
-                Destination::Worktree { root, why } => ("worktree", Some(root.to_string_lossy()), Some(*why)),
+                Destination::Worktree { root, matched } => {
+                    ("worktree", Some(root.to_string_lossy()), Some(matched.reason()))
+                }
                 Destination::Unmapped => ("unmapped", None, None),
             };
             let optional = |text: Option<&str>| text.map_or_else(|| "null".to_owned(), quoted);
@@ -501,7 +533,7 @@ fn destination(place: &Place<'_>, project: &Project, maps: &[(String, PathBuf)])
     if let Some((_, dir)) = maps.iter().find(|(name, _)| *name == project.name) {
         let root =
             git::worktree(dir).ok_or_else(|| format!("{} is not in a Git worktree on this host.", dir.display()))?;
-        return Ok(Destination::Worktree { root, why: "chosen by you" });
+        return Ok(Destination::Worktree { root, matched: WorktreeMatch::Chosen });
     }
     let Some(commit) = &project.repository else { return Ok(Destination::Unmapped) };
     let below_home = place.home.zip(project.home.as_deref()).map(|(home, path)| home.join(path));
@@ -510,7 +542,7 @@ fn destination(place: &Place<'_>, project: &Project, maps: &[(String, PathBuf)])
         if let Some(root) = git::worktree(&candidate)
             && git::root_commit(&root).as_ref() == Some(commit)
         {
-            return Ok(Destination::Worktree { root, why: "same repository" });
+            return Ok(Destination::Worktree { root, matched: WorktreeMatch::SameRepository });
         }
     }
     Ok(Destination::Unmapped)
@@ -800,9 +832,18 @@ fn read_bundle(file: &OsStr) -> Result<String, String> {
 pub(crate) fn command(request: Request<'_>) -> Result<String, String> {
     let store = Store::real().ok_or("Could not locate your settings folders. Check HOME and XDG_CONFIG_HOME.")?;
     let home = paths::home();
-    let worktree = git::worktree(Path::new("."));
-    let place =
-        Place { config: &store.config, state: &store.state, home: home.as_deref(), worktree: worktree.as_deref() };
+    let cwd = Path::new(".");
+    let root;
+    let worktree = match request {
+        Request::Export { scopes: Scopes::Worktree | Scopes::All, .. } => {
+            root = git::worktree(cwd);
+            root.as_deref()
+        }
+        // Project matching resolves the directory itself, and only when the bundle needs it.
+        Request::Import { .. } => Some(cwd),
+        Request::Export { scopes: Scopes::Global, .. } | Request::Undo => None,
+    };
+    let place = Place { config: &store.config, state: &store.state, home: home.as_deref(), worktree };
     match request {
         Request::Export { groups, scopes, output } => {
             let bundle = export(&place, &groups, scopes)?;

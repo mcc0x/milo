@@ -113,6 +113,6 @@ To review an agent’s edits without mixing in your own uncommitted work, have i
 
 ## Documentation
 
-[Setup and removal](docs/setup.md) · [Keys and marks](docs/keys.md) · [Usage limits](docs/usage.md) · [Discord presence](docs/presence.md) · [Pane behaviour](docs/panes.md) · [How it works](docs/internals.md)
+[Integrations](docs/integrations.md) · [Setup and removal](docs/setup.md) · [Keys and marks](docs/keys.md) · [Usage limits](docs/usage.md) · [Discord presence](docs/presence.md) · [Pane behaviour](docs/panes.md) · [How it works](docs/internals.md)
 
 [Contributing](CONTRIBUTING.md) · [MIT licence](LICENSE)

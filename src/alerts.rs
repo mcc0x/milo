@@ -526,6 +526,17 @@ enum Keeping {
     Revoke { binding: Revoking, selection: ConnectionSelection, restarted: Result<(), String> },
 }
 
+struct CredentialLock(std::fs::File);
+
+impl Drop for CredentialLock {
+    fn drop(&mut self) {
+        // A child can inherit a duplicate until exec; closing our descriptor
+        // alone would leave the transaction locked until that duplicate closes.
+        // On error, leave the lock to be released by the last close.
+        let _ = self.0.unlock();
+    }
+}
+
 /// A local settings and credential transaction, using the configuration directory lock.
 /// Network requests run without it, under the corresponding credential lock instead.
 pub(crate) struct AlertsEdit<'a> {
@@ -616,7 +627,7 @@ impl Alerts {
     /// Serialize connection changes without making a pause wait on the relay.
     /// Always take this before the settings lock; callers already holding the
     /// settings lock may only probe it, never wait.
-    fn lock_credential(&self, destination: Destination) -> Result<std::fs::File, String> {
+    fn lock_credential(&self, destination: Destination) -> Result<CredentialLock, String> {
         let open = || {
             std::fs::create_dir_all(&self.config)?;
             let directory = crate::fs_ops::open_dir(&self.config)?;
@@ -630,7 +641,7 @@ impl Alerts {
         let failed = || format!("Could not lock the saved {} connection.", destination.title());
         let file: std::fs::File = open().map_err(|_: io::Error| failed())?;
         match file.try_lock() {
-            Ok(()) => Ok(file),
+            Ok(()) => Ok(CredentialLock(file)),
             Err(std::fs::TryLockError::WouldBlock) => Err(format!(
                 "Another {} connection change is in progress. Wait for it to finish and try again.",
                 destination.title()

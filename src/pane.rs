@@ -661,7 +661,8 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                 }
                 tracking = want_motion;
             }
-            if help.is_none() && pace.as_ref().is_some_and(Pace::waiting_for_git) {
+            let git_wait = help.is_none() && pace.as_ref().is_some_and(Pace::waiting_for_git);
+            if git_wait {
                 draw_git_wait(pane.as_mut(), screen);
             } else {
                 draw_pane(pane.as_mut(), screen, help.as_mut());
@@ -678,7 +679,13 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                 }
                 return Err(format!("cannot write to this terminal: {e}"));
             }
-            frame_due = if help.is_some() { None } else { pane.next_frame().map(|wait| Instant::now() + wait) };
+            // A pane hidden by help or a one-row Git notice cannot draw and
+            // retire an expired mark. Its next visible frame handles it.
+            frame_due = if help.is_some() || git_wait && screen.h <= 1 {
+                None
+            } else {
+                pane.next_frame().map(|wait| Instant::now() + wait)
+            };
         }
 
         let now = Instant::now();

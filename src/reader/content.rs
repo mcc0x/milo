@@ -8,7 +8,7 @@ use super::disk::ReadOnly;
 use super::media_load::{self, Format, Load, Outcome, SourceJob, State};
 use super::video::Bookmark;
 use super::working_path::{Entry, LookupError, Root, Stamp};
-use super::{Body, Reader, Source, Text, WorkingFile};
+use super::{Body, MarkdownBody, Reader, Source, Text, WorkingFile};
 use crate::diff::{self, FileDiff, Line, LineKind};
 use crate::git::run::OutputError;
 use crate::git::{CommitId, CommitVersion, DIFF_LIMIT, GIT_UNAVAILABLE, Kind, PendingFile, Repo};
@@ -475,21 +475,28 @@ impl Reader {
         let picture_suffix = crate::picture::is_picture(&self.path);
         self.kind = patch.kind;
         *last = Some(stamp);
-        let mut body = working_body(&entry, patch, picture_suffix, syntax::for_file(&self.path));
-        if let Body::Text(text) = &mut body
-            && entry.as_ref().is_ok_and(Entry::is_regular)
-            && relative.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
-        {
-            let previous = match &mut self.body {
-                Body::Text(old) => old.preview.take(),
-                _ => None,
-            };
-            text.preview = Some(if let Some(mut preview) = previous {
-                preview.replace(&text.lines);
-                preview
+        let lang = syntax::for_file(&self.path);
+        let mut body = working_body(&entry, patch, picture_suffix, lang);
+        let working_markdown = entry.as_ref().is_ok_and(Entry::is_regular)
+            && relative
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"));
+        // An empty regular file can render and follow, without replacing the
+        // previous reading position with the position of an empty snapshot.
+        if working_markdown && matches!(body, Body::Note(EMPTY)) {
+            body = Body::Text(Text::new(Vec::new(), lang));
+        }
+        if working_markdown && let Body::Text(text) = &mut body {
+            let empty = text.lines.iter().all(|line| line.kind == LineKind::Del);
+            text.markdown = Some(if empty { MarkdownBody::Empty } else { MarkdownBody::Populated });
+            if let Some(preview) = &mut self.markdown_preview {
+                if !empty {
+                    preview.replace(&text.lines);
+                }
             } else {
-                Box::new(super::markdown::Preview::new(&text.lines))
-            });
+                let lines = if empty { &[] } else { text.lines.as_slice() };
+                self.markdown_preview = Some(Box::new(super::markdown::Preview::new(lines)));
+            }
         }
         self.replace_body(body);
     }

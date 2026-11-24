@@ -338,6 +338,8 @@ Limits on bytes, pixels and output apply before or during decoding. The macOS he
 
 **Markdown.** Headings, paragraphs, lists, quotes, emphasis and code render in the pane's own text styles. Links show text; embedded images show their labels, not fetched pixels. No HTML, scripts, URLs or file references are executed or loaded. `m` switches back and forth without losing the source diff. `e` opens the ordinary source editor; only an explicit save writes. Large previews stop at a labeled limit (512 KiB of text, 20,000 source lines or 32,000 wrapped rows); the source Reader keeps its own limits.
 
+When another program saves or replaces the working file, the preview refreshes in place. An exclamation mark (`!`) identifies new or edited blocks for three seconds. These marks compare the last two previews, not the file against Git. If text moves above you, Milo keeps the passage you're reading in view when it can. Press `G` to follow the end instead. Scrolling (including the wheel), switching to source, or entering the editor stops following. `End` jumps to the bottom without following. A save on disk never replaces an open draft.
+
 ### Representative open times
 
 Median of five release-build starts on an Apple M5 Pro, macOS 27.2.1, FFmpeg 9.0.2. Measured from spawning Milo to the first complete content frame on a 160 × 50 cell terminal. RSS is Milo's resident memory at that frame, not peak memory or the decoder's RSS. Release builds, terminal sizes and decoder builds affect these numbers.
