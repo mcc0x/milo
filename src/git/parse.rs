@@ -5,13 +5,14 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use super::{Commit, CommitId, CommitVersion, DiffFiles, Ends, Kind, PendingFile};
+use super::{Commit, CommitId, CommitVersion, DiffFiles, Kind, PendingFile, UNBORN};
 use crate::when;
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(super) struct Status {
+    pub(super) raw: Vec<u8>,
     pub(super) branch: String,
-    pub(super) ends: Ends,
+    pub(super) tip: String,
     /// The upstream this branch is measured against.
     pub(super) upstream: Option<String>,
     /// A named upstream whose branch is missing.
@@ -31,6 +32,12 @@ pub(super) struct Status {
     pub(super) unrepresented: usize,
 }
 
+impl Status {
+    pub(super) fn has_commit(&self) -> bool {
+        !self.tip.is_empty() && self.tip != UNBORN
+    }
+}
+
 pub(super) fn utf8_path(raw: &[u8]) -> Option<&str> {
     std::str::from_utf8(raw).ok().filter(|path| !path.is_empty())
 }
@@ -40,9 +47,9 @@ fn status_path(record: &[u8], fields: usize) -> Option<&str> {
 }
 
 /// Parses `git status --porcelain=v2 --branch -z`.
-pub(super) fn parse_status(raw: &[u8]) -> Status {
-    let mut st = Status::default();
-    let mut entries = raw.split(|&b| b == 0);
+pub(super) fn parse_status(raw: Vec<u8>) -> Status {
+    let mut st = Status { raw, ..Status::default() };
+    let mut entries = st.raw.split(|&b| b == 0);
     // Git names a missing upstream but omits the ahead/behind line.
     let mut measured = false;
     // The path is the last of a fixed number of fields, and may hold spaces.
@@ -94,7 +101,7 @@ pub(super) fn parse_status(raw: &[u8]) -> Status {
                 st.unrepresented += 1;
             }
         } else if let Some(v) = bytes.strip_prefix(b"# branch.oid ") {
-            st.ends.tip = String::from_utf8_lossy(v).into_owned();
+            st.tip = String::from_utf8_lossy(v).into_owned();
         } else if let Some(v) = bytes.strip_prefix(b"# branch.head ") {
             st.branch = String::from_utf8_lossy(v).into_owned();
         } else if let Some(v) = bytes.strip_prefix(b"# branch.upstream ") {
@@ -263,9 +270,10 @@ mod tests {
     #[test]
     fn status_reads_branch_and_untracked() {
         let st = parse_status(
-            b"# branch.oid abc\0# branch.head main\0# branch.upstream origin/main\0# branch.ab +2 -1\0? a b.txt\0? nested/\0",
+            b"# branch.oid abc\0# branch.head main\0# branch.upstream origin/main\0# branch.ab +2 -1\0? a b.txt\0? nested/\0"
+                .to_vec(),
         );
-        assert_eq!((st.branch.as_str(), st.ends.tip.as_str(), st.ahead), ("main", "abc", 2));
+        assert_eq!((st.branch.as_str(), st.tip.as_str(), st.ahead), ("main", "abc", 2));
         assert_eq!(st.upstream.as_deref(), Some("origin/main"));
         assert_eq!(st.untracked, ["a b.txt", "nested"]);
     }
@@ -274,7 +282,8 @@ mod tests {
     fn status_separates_ignored_paths_from_uncommitted_files() {
         let st = parse_status(
             b"! cache with spaces/\0! raw-\xff/\0! build log\0! raw-\xfe.log\0? scratch.txt\0\
-              1 .M N... 100644 100644 100644 h1 h2 source.rs\0",
+              1 .M N... 100644 100644 100644 h1 h2 source.rs\0"
+                .to_vec(),
         );
         assert_eq!(st.ignored_dirs[0], PathBuf::from("cache with spaces"));
         assert_eq!(st.ignored_dirs[1].as_os_str().as_bytes(), b"raw-\xff");
@@ -289,7 +298,7 @@ mod tests {
 
     #[test]
     fn status_sets_aside_an_upstream_that_is_gone() {
-        let st = parse_status(b"# branch.oid abc\0# branch.head topic\0# branch.upstream gh/topic\0");
+        let st = parse_status(b"# branch.oid abc\0# branch.head topic\0# branch.upstream gh/topic\0".to_vec());
         assert_eq!((st.upstream, st.gone.as_deref()), (None, Some("gh/topic")));
     }
 
@@ -297,7 +306,8 @@ mod tests {
     fn status_reads_conflicts_and_skips_rename_sources() {
         let st = parse_status(
             b"u UU N... 100644 100644 100644 100644 h1 h2 h3 both sides.txt\0\
-              2 R. N... 100644 100644 100644 h1 h2 R100 new.txt\0? old looks untracked\0? real.txt\0",
+              2 R. N... 100644 100644 100644 h1 h2 R100 new.txt\0? old looks untracked\0? real.txt\0"
+                .to_vec(),
         );
         assert_eq!(st.unmerged, ["both sides.txt"]);
         assert_eq!(st.sources, ["? old looks untracked"]);
@@ -308,7 +318,8 @@ mod tests {
     fn status_keeps_a_modified_copy_source_independent() {
         let st = parse_status(
             b"1 MM N... 100644 100644 100644 h1 h2 ? original\0\
-              2 C. N... 100644 100644 100644 h1 h1 C100 copy\0? original\0? loose.txt\0",
+              2 C. N... 100644 100644 100644 h1 h1 C100 copy\0? original\0? loose.txt\0"
+                .to_vec(),
         );
         assert_eq!(st.tracked_uncommitted, ["? original", "copy"]);
         assert!(st.sources.is_empty());
@@ -320,7 +331,8 @@ mod tests {
         let st = parse_status(
             b"1 .M N... 100644 100644 100644 h1 h2 src/a b.rs\0\
               2 R. N... 100644 100644 100644 h1 h2 R100 new name.txt\0old name.txt\0\
-              u UU N... 100644 100644 100644 100644 h1 h2 h3 both.txt\0? loose.txt\0",
+              u UU N... 100644 100644 100644 100644 h1 h2 h3 both.txt\0? loose.txt\0"
+                .to_vec(),
         );
         assert_eq!(st.tracked_uncommitted, ["src/a b.rs", "new name.txt", "old name.txt", "both.txt"]);
     }
@@ -365,7 +377,8 @@ mod tests {
     fn invalid_path_bytes_do_not_alias_a_replacement_character() {
         let st = parse_status(
             b"? path\xff\0? path\xef\xbf\xbd\0\
-              2 R. N... 100644 100644 100644 h1 h2 R100 new.txt\0old\xff\0? last.txt\0",
+              2 R. N... 100644 100644 100644 h1 h2 R100 new.txt\0old\xff\0? last.txt\0"
+                .to_vec(),
         );
         assert_eq!(st.untracked, ["path\u{fffd}", "last.txt"]);
         assert!(st.tracked_uncommitted.is_empty());

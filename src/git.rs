@@ -191,16 +191,10 @@ pub struct Commit {
 }
 
 /// The local tip and, when it is ahead, the commit used as the comparison base.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 struct Ends {
     base: Option<String>,
     tip: String,
-}
-
-impl Ends {
-    fn has_commit(&self) -> bool {
-        !self.tip.is_empty() && self.tip != UNBORN
-    }
 }
 
 /// The default branch to try in place of an upstream, even before it exists.
@@ -232,8 +226,7 @@ impl Comparison {
 /// A poll keeps the same status and comparison for the subsequent read.
 #[derive(Clone)]
 struct Snapshot {
-    raw: Vec<u8>,
-    status: Option<Status>,
+    status: Option<Arc<Status>>,
     comparison: Comparison,
     shallow: Option<DiffStamp>,
 }
@@ -257,7 +250,7 @@ pub struct HistoryVersion {
 
 impl HistoryVersion {
     pub fn matches(&self, repo: &Repo) -> bool {
-        self.tip == repo.ends().tip
+        self.tip == repo.status.tip
             && self.branch == repo.branch()
             && self.target.as_deref() == repo.history_target()
             && self.shallow == repo.shallow
@@ -302,9 +295,10 @@ pub struct Repo {
     /// When set, status is limited to this path.
     file: Option<String>,
     comparison: Comparison,
-    /// The status last read, as git printed it and as parsed.
-    raw: Vec<u8>,
-    status: Status,
+    /// Past status stays readable while a worker takes a new sample.
+    status: Arc<Status>,
+    /// Only pending file diffs use a merge base, which is not part of status.
+    base: Option<String>,
     /// Shared with the watcher until Git reports different ignored paths.
     watch_ignored: Arc<Ignored>,
     /// A status `poll` found to differ, kept for `read` to take in.
@@ -347,7 +341,28 @@ pub(crate) fn root_commit(root: &Path) -> Option<String> {
     if run::output(root, &[], &["rev-parse", "--is-shallow-repository"])?.as_slice() != b"false\n" {
         return None;
     }
+    first_visible_commit(root)
+}
+
+fn first_visible_commit(root: &Path) -> Option<String> {
+    // In a shallow checkout Git stops at the local boundary, not the root on another host.
     run::optional_oid(root, &[], &["rev-list", "--max-parents=0", "--max-count=1", "HEAD"])?
+}
+
+/// Identity for reviewing an explicit mapping on this host, never for matching a repo across hosts.
+/// The Git directory distinguishes two unborn repositories installed in the same worktree directory.
+pub(crate) fn mapped_checkout(root: &Path) -> Option<(u64, u64, Option<String>)> {
+    let raw = discovery_output(root, &["rev-parse", "--absolute-git-dir"]).ok()??;
+    let git = Path::new(OsStr::from_bytes(&raw));
+    if !git.is_absolute() {
+        return None;
+    }
+    let directory = git.metadata().ok()?;
+    let first = first_visible_commit(root);
+    if first.is_none() && run::optional_oid(root, &[], &["rev-parse", "--verify", "--quiet", "HEAD"])?.is_some() {
+        return None; // HEAD exists but its history could not be read.
+    }
+    Some((directory.dev(), directory.ino(), first))
 }
 
 /// What people call a checkout: its repository and, in a linked worktree, that worktree's folder.
@@ -538,10 +553,6 @@ impl Repo {
         self.ok.get()
     }
 
-    fn ends(&self) -> &Ends {
-        &self.status.ends
-    }
-
     /// The empty tree depends on the repository's object format.
     fn empty_tree(&self) -> Option<&str> {
         if let Some(oid) = self.empty_tree.get() {
@@ -553,10 +564,9 @@ impl Repo {
 
     /// Compare pending files to the base when there is one, otherwise to the sampled tip.
     fn against(&self) -> Option<&str> {
-        let ends = self.ends();
-        match ends.base.as_deref() {
+        match self.base.as_deref() {
             Some(base) => Some(base),
-            None if ends.has_commit() => Some(&ends.tip),
+            None if self.status.has_commit() => Some(&self.status.tip),
             None => self.empty_tree(),
         }
     }
@@ -676,9 +686,9 @@ impl Repo {
     fn snapshot(&mut self) -> Option<Snapshot> {
         let shallow = self.shallow_file.as_deref().map(DiffStamp::at);
         let raw = self.status_raw()?;
-        let status = (raw != self.raw).then(|| parse_status(&raw));
+        let status = (raw != self.status.raw).then(|| Arc::new(parse_status(raw)));
         let comparison = self.comparison(status.as_ref().unwrap_or(&self.status))?;
-        Some(Snapshot { raw, status, comparison, shallow })
+        Some(Snapshot { status, comparison, shallow })
     }
 
     /// Asks git whether the repository state has moved and checks tracked file stamps.
@@ -732,27 +742,30 @@ impl Repo {
         if !self.git {
             return;
         }
-        let Some(Snapshot { raw, status, comparison, shallow }) = self.polled.take().or_else(|| self.snapshot()) else {
+        let Some(Snapshot { status, comparison, shallow }) = self.polled.take().or_else(|| self.snapshot()) else {
             return;
         };
         let current = status.as_ref().unwrap_or(&self.status);
-        let tip_changed = current.ends.tip != self.ends().tip;
+        let tip_changed = current.tip != self.status.tip;
         let graph_changed = shallow != self.shallow;
         let basis_changed = tip_changed || graph_changed || comparison.oid() != self.comparison.oid();
-        let base = match self.read_for {
-            ReadFor::History => None,
+        let base_changed = match self.read_for {
+            ReadFor::History => self.base.take().is_some(),
             ReadFor::Pending if basis_changed => {
-                let Some(base) = self.merge_base(&current.ends.tip, comparison.oid()) else { return };
-                base
+                let Some(base) = self.merge_base(&current.tip, comparison.oid()) else { return };
+                let changed = base != self.base;
+                self.base = base;
+                changed
             }
-            ReadFor::Pending => self.status.ends.base.take(),
+            ReadFor::Pending => false,
         };
-        let base_changed = (basis_changed || matches!(self.read_for, ReadFor::History)) && base != self.ends().base;
         if self.pending_tracked.is_some()
             && (!self.ok()
                 || base_changed
                 || tip_changed
-                || (status.is_some() && !tracked_records(&raw).eq(tracked_records(&self.raw))))
+                || status
+                    .as_ref()
+                    .is_some_and(|status| !tracked_records(&status.raw).eq(tracked_records(&self.status.raw))))
         {
             self.invalidate_tracked_diff();
         }
@@ -760,15 +773,14 @@ impl Repo {
             if status.ignored_dirs != self.status.ignored_dirs || status.ignored_files != self.status.ignored_files {
                 self.watch_ignored = self.exclusions(&status);
             }
-            (self.raw, self.status) = (raw, status);
+            self.status = status;
         }
-        self.status.ends.base = base;
         (self.comparison, self.shallow) = (comparison, shallow);
         self.ok.set(true);
     }
 
     fn comparison(&self, status: &Status) -> Option<Comparison> {
-        if !status.ends.has_commit() {
+        if !status.has_commit() {
             return Some(Comparison::default());
         }
         if status.upstream.is_some() {
@@ -804,10 +816,11 @@ impl Repo {
         if !self.ok() {
             return None;
         }
-        let ends = self.ends().clone();
-        let unpushed_moved = ends != self.unpushed.ends;
-        let unpushed = ends.base.as_deref().filter(|_| unpushed_moved);
-        let unpushed = unpushed.map(|base| ["diff", base, &ends.tip, "-M", "--raw", "--numstat", "-z", "--"]);
+        let ends = (self.base != self.unpushed.ends.base || self.status.tip != self.unpushed.ends.tip)
+            .then(|| Ends { base: self.base.clone(), tip: self.status.tip.clone() });
+        let unpushed = ends
+            .as_ref()
+            .and_then(|ends| Some(["diff", ends.base.as_deref()?, &ends.tip, "-M", "--raw", "--numstat", "-z", "--"]));
         // Stamp the index before Git lists it, so a later change is listed again.
         let index = self.diff_index();
         let list = index.is_none() || index != self.tracked.index;
@@ -817,8 +830,8 @@ impl Repo {
         let (files, [diff, listed]) = run::alongside(&root, &guard, ahead, || self.tracked_uncommitted());
         let mut files = files?;
         files.extend(self.status.untracked.iter().map(|path| PendingFile::new(path, Kind::Untracked)));
-        if unpushed_moved {
-            let diff = if unpushed.is_some() { parse_files(&self.require(diff)?) } else { DiffFiles::default() };
+        if let Some(ends) = ends {
+            let diff = if ends.base.is_some() { parse_files(&self.require(diff)?) } else { DiffFiles::default() };
             self.unpushed = Unpushed { ends, diff };
         }
         files.extend(self.unpushed.diff.files.iter().cloned().map(|mut file| {
@@ -955,7 +968,7 @@ impl Repo {
     pub fn history_version(&self) -> HistoryVersion {
         HistoryVersion {
             branch: self.branch().to_owned(),
-            tip: self.ends().tip.clone(),
+            tip: self.status.tip.clone(),
             target: self.history_target().map(str::to_owned),
             shallow: self.shallow,
             ahead: self.upstream_ahead(),
@@ -963,7 +976,7 @@ impl Repo {
     }
 
     fn history_target(&self) -> Option<&str> {
-        self.comparison.oid().filter(|&oid| oid != self.ends().tip)
+        self.comparison.oid().filter(|&oid| oid != self.status.tip)
     }
 
     /// Finds the full object name and date without reading the work tree.
@@ -1012,11 +1025,11 @@ impl Repo {
         if !self.ok() {
             return None;
         }
-        if !self.ends().has_commit() {
+        if !self.status.has_commit() {
             return Some(Vec::new());
         }
         let limit = limit.to_string();
-        let tip = &self.ends().tip;
+        let tip = &self.status.tip;
         let range = self.history_target().map(|target| format!("{target}..{tip}"));
         let unpushed = range.as_ref().map(|range| ["rev-list", "-n", &limit, "--end-of-options", range]);
         let log = [
@@ -1209,6 +1222,30 @@ mod tests {
     }
 
     #[test]
+    fn a_history_refresh_takes_in_a_new_sample_without_changing_the_old_one() {
+        let f = Fixture::new();
+        f.write("page.txt", "first\n");
+        let mut shown = Repo::open(&f.root).unwrap().for_history();
+        shown.read();
+        let version = shown.history_version();
+        let mut refresh = shown.clone();
+
+        assert!(Arc::ptr_eq(&shown.status, &refresh.status));
+        assert!(!refresh.poll(&[]));
+        assert_eq!(shown.uncommitted_count(), 1);
+        assert!(shown.history(1).unwrap().is_empty());
+
+        f.commit("first");
+        assert!(refresh.poll(&[]));
+        assert!(version.matches(&refresh), "poll does not take in the new sample");
+        refresh.read();
+        assert_eq!(refresh.uncommitted_count(), 0);
+        assert_eq!(refresh.history(1).unwrap()[0].subject, "first");
+        assert_eq!(shown.uncommitted_count(), 1);
+        assert!(shown.history(1).unwrap().is_empty());
+    }
+
+    #[test]
     fn moving_an_upstream_with_the_same_ahead_count_refreshes_pending_and_history() {
         let f = Fixture::new();
         f.write("base.txt", "base\n");
@@ -1236,10 +1273,10 @@ mod tests {
         f.git(&["update-ref", "refs/remotes/origin/main", "right"]);
         assert!(!is_unpushed(&repo, "left"), "history should use the sampled upstream until the next read");
 
-        let before = repo.raw.clone();
+        let before = Arc::clone(&repo.status);
         assert!(repo.poll(&pending), "the upstream moved but the ahead/behind counts did not");
         repo.read();
-        assert_eq!(repo.raw, before);
+        assert!(Arc::ptr_eq(&repo.status, &before), "the upstream moved without changing the worktree status");
         assert!(!version.matches(&repo));
         assert!(is_unpushed(&repo, "left"));
         assert!(!is_unpushed(&repo, "right"));
@@ -1277,7 +1314,7 @@ mod tests {
         assert!(repo.paths_incomplete());
 
         let (cancel, _keep_open) = std::io::pipe().unwrap();
-        let diff = repo.commit_files().at(&repo.ends().tip, cancel.as_fd()).unwrap();
+        let diff = repo.commit_files().at(&repo.status.tip, cancel.as_fd()).unwrap();
         assert_eq!(diff.unrepresented, 1);
         assert_eq!(diff.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["page\u{fffd}.txt"]);
 
@@ -1602,7 +1639,7 @@ mod tests {
         f.write("page.txt", "stored content\n");
         f.commit("add two files");
         let repo = read_repo(&f);
-        let hash = &repo.ends().tip;
+        let hash = &repo.status.tip;
         let oid = repo.git(&["rev-parse", "HEAD:unrelated.txt"]).unwrap();
         let oid = std::str::from_utf8(&oid).unwrap().trim();
         // Prevent Git from reading the unrelated blob from disk or the work tree.

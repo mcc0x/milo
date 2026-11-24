@@ -202,8 +202,10 @@ fn a_project_follows_its_repository_to_another_path_and_never_a_name_alone() {
     let mut b = Host::new();
     b.worktree = Some(second.root.clone());
     let plan_b = b.with(|place| plan(place, &bundle, &[])).unwrap();
-    let Destination::Worktree { root, why } = &plan_b.sections[0].destination else { panic!("{}", plan_b.report("f")) };
-    assert_eq!((root, *why), (&second.root, "same repository"));
+    let Destination::Worktree { root, matched } = &plan_b.sections[0].destination else {
+        panic!("{}", plan_b.report("f"))
+    };
+    assert_eq!((root, matched.reason()), (&second.root, "same repository"));
     assert_eq!(b.with(|place| apply(place, plan_b)).unwrap(), 3);
     assert_eq!(b.worktree_layer(&second.root), "icons = off\nchanges_only = true\n");
     assert!(b.read("preferences.conf").is_none(), "the global defaults were not touched");
@@ -226,8 +228,10 @@ fn a_project_follows_its_repository_to_another_path_and_never_a_name_alone() {
     // Only the person can say that it is the same project after all.
     let maps = [("project".to_owned(), unrelated.root.join("."))];
     let chosen = c.with(|place| plan(place, &bundle, &maps)).unwrap();
-    let Destination::Worktree { root, why } = &chosen.sections[0].destination else { panic!("{}", chosen.report("f")) };
-    assert_eq!((root, *why), (&unrelated.root, "chosen by you"));
+    let Destination::Worktree { root, matched } = &chosen.sections[0].destination else {
+        panic!("{}", chosen.report("f"))
+    };
+    assert_eq!((root, matched.reason()), (&unrelated.root, "chosen by you"));
     let missing = [("other".to_owned(), unrelated.root.clone())];
     assert!(c.with(|place| plan(place, &bundle, &missing)).is_err());
     let outside = [("project".to_owned(), c.folder.root.clone())];
@@ -241,11 +245,11 @@ fn an_import_stops_when_the_host_changed_after_its_preview() {
     b.write("preferences.conf", "icons = off\n");
     let bundle = a.with(|place| export(place, &Group::ALL, Scopes::Global)).unwrap();
     let reviewed = b.with(|place| plan(place, &bundle, &[])).unwrap();
-    let basis = reviewed.basis();
+    let basis = reviewed.basis().unwrap();
     // Another editor saves on host B before the import is applied.
     b.write("preferences.conf", "icons = nerd\nstatic_marks = true\n");
     let later = b.with(|place| plan(place, &bundle, &[])).unwrap();
-    assert_ne!(later.basis(), basis, "a new preview is a new plan");
+    assert_ne!(later.basis().unwrap(), basis, "a new preview is a new plan");
     assert_eq!(b.with(|place| apply(place, reviewed)).err().as_deref(), Some(STALE));
     assert_eq!(b.read("preferences.conf").unwrap(), "icons = nerd\nstatic_marks = true\n");
     assert!(b.read("layouts/global").is_none(), "none of the import was kept");

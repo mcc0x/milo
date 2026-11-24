@@ -307,6 +307,66 @@ fn every_generation_of_opencode_tables_says_when_a_step_dated_ahead_comes_due() 
 }
 
 #[test]
+fn opencode_reads_the_earliest_legacy_message_dated_ahead_with_or_without_a_time_index() {
+    if !sqlite_installed() {
+        return;
+    }
+    let now = local_noon();
+    let alternate_indexes = [
+        None,
+        Some(""),
+        Some("CREATE INDEX message_session_idx ON message(session_id);"),
+        Some("CREATE INDEX message_time_idx ON message(session_id COLLATE NOCASE, time_created);"),
+        Some("CREATE INDEX message_time_idx ON message(session_id, time_created) WHERE time_created > 0;"),
+    ];
+    for release in [RELEASES[1], RELEASES[4]] {
+        for alternate in alternate_indexes {
+            let f = Fixture::folder();
+            let db = busy_day(&f, release, now);
+            if let Some(create) = alternate {
+                exec(&db.path, &format!("DROP INDEX message_session_time_created_id_idx; {create}"));
+            } else {
+                // An orphan cannot affect totals, even though it comes due first.
+                exec(
+                    &db.path,
+                    &format!(
+                        "PRAGMA foreign_keys=OFF;
+                         INSERT INTO message(id,session_id,time_created,time_updated,data)
+                         VALUES ('orphan','no-session',{at},{at},'{{\"role\":\"assistant\"}}');",
+                        at = (now + 25) * 1000,
+                    ),
+                );
+            }
+            // The first row is in a different session from the next message due.
+            // Neither session has been migrated: this makes 2.x totals unknown only once it is due.
+            exec(
+                &db.path,
+                &format!(
+                    "INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated)
+                     VALUES ('old-a','global','old-a','/work','Synthetic','1.19.6',{created},{created}),
+                            ('old-b','global','old-b','/work','Synthetic','1.19.6',{created},{created});
+                     INSERT INTO message(id,session_id,time_created,time_updated,data)
+                     VALUES ('old-a','old-a',{later},{later},'{{\"role\":\"assistant\",\"tokens\":{{\"input\":99}}}}'),
+                            ('old-b','old-b',{first},{first},'{{\"role\":\"assistant\",\"tokens\":{{\"input\":99}}}}');",
+                    created = (now - MINUTE) * 1000,
+                    later = (now + 80) * 1000,
+                    first = (now + 50) * 1000 + 494,
+                ),
+            );
+            last_written(&db.path, now - 60);
+            let mut looks = Looks::new(opencode::poll(Some(db.path.clone()), TEST_WAIT));
+            assert_eq!(steps_today(looks.look(now)), Some(2));
+            assert!(looks.look(now + 49).is_none());
+            let report = looks.look(now + 50).flatten().unwrap();
+            match release.2 {
+                opencode::Store::V1 => assert!(matches!(report, opencode::Report::Today(today) if today.steps == 3)),
+                opencode::Store::V2 { .. } => assert_eq!(report, opencode::Report::Unsupported),
+            }
+        }
+    }
+}
+
+#[test]
 fn totals_are_read_again_when_the_time_zone_moves_midnight_within_the_same_date() {
     // The zone belongs to the whole process, so the check runs in one of its own.
     const CHILD: &str = "MILO_TEST_USAGE_ZONE";
