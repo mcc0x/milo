@@ -1,6 +1,7 @@
 //! Checks bundles, project matching, conflicts and undo with throwaway settings folders.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::*;
@@ -282,13 +283,61 @@ fn undo_puts_back_exactly_what_the_last_import_replaced_unless_it_was_changed_ag
 }
 
 #[test]
+fn a_truncated_undo_record_leaves_the_import_and_its_journal_untouched() {
+    let host = Host::new();
+    host.write("preferences.conf", "icons = off\ncustom_choice = kept\n");
+    host.write("worktrees/unrelated.conf", "static_marks = true\n");
+    let before = host.snapshot();
+    let bundle = format!("milo-settings 1\n[global]\nicons = plain\nlayout = {RAIL}\n");
+    host.with(|place| apply(place, plan(place, &bundle, &[]).unwrap())).unwrap();
+    let imported = host.snapshot();
+    let path = host.state().join(JOURNAL);
+    let complete = fs::read_to_string(&path).unwrap();
+    let first_record_end = complete.match_indices('\n').nth(1).unwrap().0 + 1;
+    for cut in [first_record_end - 13, first_record_end, complete.len() - 1] {
+        let truncated = &complete[..cut];
+        fs::write(&path, truncated).unwrap();
+        assert!(host.with(undo).is_err());
+        assert_eq!(host.snapshot(), imported);
+        assert_eq!(fs::read_to_string(&path).unwrap(), truncated);
+    }
+    fs::write(&path, complete).unwrap();
+    assert_eq!(host.with(undo).unwrap(), 2);
+    assert_eq!(host.snapshot(), before);
+    assert!(!path.exists());
+}
+
+#[test]
+fn an_older_undo_record_still_requires_a_complete_last_line() {
+    let host = Host::new();
+    host.write("preferences.conf", "icons = plain\n");
+    let previous = "icons = off\ncustom_choice = kept\n";
+    let record = format!(
+        "milo-settings-undo 1\n{}\t600:{}\t600:{}\n",
+        super::hex(host.config().join("preferences.conf").as_os_str().as_encoded_bytes()),
+        super::hex(b"icons = plain\n"),
+        super::hex(previous.as_bytes())
+    );
+    let file = host.config().join("preferences.conf");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::create_dir_all(host.state()).unwrap();
+    let path = host.state().join(JOURNAL);
+    fs::write(&path, &record[..record.len() - 13]).unwrap();
+    assert!(host.with(undo).is_err());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "icons = plain\n");
+    fs::write(&path, record).unwrap();
+    assert_eq!(host.with(undo).unwrap(), 1);
+    assert_eq!(fs::read_to_string(file).unwrap(), previous);
+}
+
+#[test]
 fn a_record_of_an_import_cannot_point_an_undo_outside_the_settings_folder() {
     let b = Host::new();
     let victim = b.folder.root.join("victim");
     fs::write(&victim, "written").unwrap();
     let record = |path: &Path| {
         format!(
-            "{JOURNAL_HEADER}\n{}\t600:{}\t-\n",
+            "{JOURNAL_HEADER}\n{}\t600:{}\t-\nend\n",
             super::hex(path.as_os_str().as_encoded_bytes()),
             super::hex(b"written")
         )

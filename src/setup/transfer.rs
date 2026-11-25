@@ -34,7 +34,7 @@ const HEADER: &str = "milo-settings";
 const VERSION: u32 = 1;
 const MAX_PROJECTS: usize = 16;
 const JOURNAL: &str = "settings-import-undo";
-const JOURNAL_HEADER: &str = "milo-settings-undo 1";
+const JOURNAL_HEADER: &str = "milo-settings-undo 2";
 const NOT_A_BUNDLE: &str = "This is not a Milo settings bundle. Export one with milo settings export.";
 const NEWER_BUNDLE: &str = "This bundle was written by a newer Milo. Update Milo on this host, then import it again.";
 pub(crate) const STALE: &str = "Settings on this host changed after the preview. Preview the import again.";
@@ -662,6 +662,7 @@ fn journal(changes: &[Change]) -> Vec<u8> {
         let (before, after) = change.images();
         writeln!(out, "{}\t{}\t{}", hex(change.path().as_os_str().as_bytes()), image(after), image(before)).unwrap();
     }
+    out.push_str("end\n");
     out.into_bytes()
 }
 
@@ -678,12 +679,14 @@ fn reversal(place: &Place<'_>, text: &str) -> Option<Vec<Change>> {
             mode: u32::from_str_radix(mode, 8).ok().filter(|mode| *mode <= 0o7777)?,
         }))
     };
-    let mut lines = text.lines();
-    if lines.next()? != JOURNAL_HEADER {
-        return None;
-    }
+    let (header, records) = text.split_once('\n')?;
+    let records = match header {
+        JOURNAL_HEADER => records.strip_suffix("end\n")?,
+        "milo-settings-undo 1" => records,
+        _ => return None,
+    };
     let mut changes = Vec::new();
-    for line in lines {
+    for line in records.strip_suffix('\n')?.split('\n') {
         let mut fields = line.split('\t');
         let (path, written, previous) = (fields.next()?, fields.next()?, fields.next()?);
         let path = PathBuf::from(OsString::from_vec(unhex(path)?));
