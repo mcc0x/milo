@@ -21,7 +21,14 @@ trap 'rm -rf "$tmp"' EXIT
 app="$tmp/Milo.app"
 resources=$app/Contents/Resources
 mkdir -p "$app/Contents/MacOS" "$resources/Tools" "$tmp/Milo.iconset"
-(cd "$repo" && cargo build --locked --release --target "$rust_target" --target-dir "$repo/target")
+rust_source=$(rustc --print sysroot)/lib/rustlib/src/rust
+build_cli() (
+    out=$1; shift
+    cd "$repo"
+    cargo rustc --locked --release --target "$rust_target" --target-dir "$out" --bin milo -- \
+        --remap-path-prefix "$repo=." --remap-path-prefix "$rust_source=/rustc" "$@"
+)
+build_cli "$repo/target"
 install -m 755 "$repo/target/$rust_target/release/milo" "$resources/Tools/milo"
 swiftc -O -swift-version 5 -parse-as-library -target "$arch-apple-macos$MACOSX_DEPLOYMENT_TARGET" "$repo"/macos/MenuBar/*.swift -o "$app/Contents/MacOS/Milo"
 cp "$repo"/src/usage/marks/*.png "$repo/src/usage/marks/LobeHub-LICENSE.txt" "$repo/site/src/images/milo-lockup.webp" "$resources/"
@@ -41,10 +48,12 @@ codesign --force --sign - "$app"
 codesign --verify --strict "$resources/Tools/milo"
 codesign --verify --deep --strict -R '=identifier "net.usemilo.usage.local"' "$app"
 # Produce a matching offline installer; the app's own reader stays lean.
-COPYFILE_DISABLE=1 /usr/bin/tar -czf "$tmp/menu.tar.gz" -C "$tmp" 'Milo.app'
-(cd "$repo" && MILO_MENU_ARCHIVE="$tmp/menu.tar.gz" MILO_MENU_HELPER_SHA="$(shasum -a 256 "$app/Contents/MacOS/Milo" | cut -d' ' -f1)" cargo rustc --locked --release --target "$rust_target" --target-dir "$base/cli-build" --bin milo -- --cfg milo_menu_payload)
+sh "$repo/macos/archive-menu.sh" "$tmp" "$tmp/menu.tar.gz"
+MILO_MENU_ARCHIVE="$tmp/menu.tar.gz" MILO_MENU_HELPER_SHA="$(shasum -a 256 "$app/Contents/MacOS/Milo" | cut -d' ' -f1)" \
+    build_cli "$base/cli-build" --cfg milo_menu_payload
 install -m 755 "$base/cli-build/$rust_target/release/milo" "$base/milo"
 # Replace only our generated bundle inside the ignored target directory.
 rm -rf "$base/Milo.app"
 mv "$app" "$base/Milo.app"
+mv "$tmp/menu.tar.gz" "$base/menu.tar.gz"
 printf '%s\n' "$base/Milo.app"

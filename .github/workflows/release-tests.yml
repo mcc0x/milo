@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      recipient:
+        description: Optional public X.509 PEM certificate (base64, one line) to retain the tested main binary encrypted
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -122,7 +127,7 @@ jobs:
     name: ${{ needs.macos-changes.outputs.needed == 'false' && 'macOS not needed for these paths' || 'Apple Silicon release tests' }}
     if: ${{ !cancelled() && (needs.macos-changes.result != 'success' || needs.macos-changes.outputs.needed != 'false') }}
     runs-on: macos-15
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -139,12 +144,35 @@ jobs:
           test "$(uname -m)" = arm64
           cargo test --release --locked
       - name: Smoke-test packaged settings in Chromium
+        env:
+          RUSTUP_TOOLCHAIN: 1.91.0
         run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustc -V
           sh macos/build-menu.sh --release
           test ! -e target/local-menu/Milo.app/Contents/Resources/ProfilePaths.plist
+          python3 tests/menu-archive.py
           sh tests/menubar.sh
           smoke_dir="$RUNNER_TEMP/milo-web-smoke"
           npm install --prefix "$smoke_dir" --no-save --no-audit --no-fund --ignore-scripts playwright-core@1.65.1
           export PLAYWRIGHT_BROWSERS_PATH="$smoke_dir/browsers"
           node "$smoke_dir/node_modules/playwright-core/cli.js" install --only-shell chromium
           NODE_PATH="$smoke_dir/node_modules" node tests/web-smoke.cjs target/local-menu/milo
+      - name: Seal the tested binary for offline qualification
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.recipient != ''
+        env:
+          RECIPIENT: ${{ inputs.recipient }}
+        run: |
+          printf '%s' "$RECIPIENT" | /usr/bin/base64 -D > "$RUNNER_TEMP/recipient.pem"
+          openssl smime -encrypt -aes256 -binary -outform DER -in target/local-menu/milo \
+            -out "$RUNNER_TEMP/milo.p7m" "$RUNNER_TEMP/recipient.pem"
+          swiftc --version
+          xcrun --sdk macosx --show-sdk-version
+          shasum -a 256 target/local-menu/milo target/local-menu/menu.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.recipient != ''
+        with:
+          name: milo-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/milo.p7m
+          if-no-files-found: error
+          retention-days: 14
