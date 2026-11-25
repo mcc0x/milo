@@ -13,7 +13,7 @@
 
 ## Install
 
-The [v0.1.7 release](docs/releases/v0.1.7.md) is available for Apple Silicon Macs running macOS 13 or later. Install it with Homebrew:
+The [v0.1.8 release](docs/releases/v0.1.8.md) is available for Apple Silicon Macs running macOS 13 or later. Install it with Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -22,7 +22,7 @@ brew install mcc0x/milo/milo
 Without Homebrew, download and run the installer from the release tag:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.7/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.8/install.sh &&
   sh milo-install.sh
 ```
 
@@ -92,7 +92,7 @@ To review an agent’s edits without mixing in your own uncommitted work, have i
 
 ## Agent tasks
 
-In Rex, start a coding agent on a task without leaving your pane. `milo task new --branch fix/login --base origin/main --agent claude --prompt "Fix the login redirect"` adds a Git worktree for the branch and opens Claude Code, Codex, oh-my-pi or OpenCode there, in a new Rex session that starts in the background with the agent's full interactive screen. **Milo: New Agent Task…** in the command palette asks the same questions. Milo starts only the agent you name, never switches your checkout, and never pushes, merges or cleans up. See [starting an agent task](docs/setup.md#start-an-agent-task). This is on `main` and not in the v0.1.7 release.
+In Rex, start a coding agent on a task without leaving your pane. `milo task new --branch fix/login --base origin/main --agent claude --prompt "Fix the login redirect"` adds a Git worktree for the branch and opens Claude Code, Codex, oh-my-pi or OpenCode there, in a new Rex session that starts in the background with the agent's full interactive screen. **Milo: New Agent Task…** in the command palette asks the same questions. Milo starts only the agent you name, never switches your checkout, and never pushes, merges or cleans up. See [starting an agent task](docs/setup.md#start-an-agent-task).
 
 ## What works in each terminal
 
