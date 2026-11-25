@@ -1206,7 +1206,7 @@ fn help_and_version_write_to_stdout_and_argument_errors_write_to_stderr() {
         (&["usage", "--help"][..], "Usage: milo usage [--menu-stream]"),
         (&["menubar", "--help"][..], "Usage: milo menubar install | uninstall"),
         (&["setup", "--help"][..], "Usage: milo setup"),
-        (&["view", "--help"][..], "Usage: milo view FILE [--commit ID | --edit]"),
+        (&["view", "--help"][..], "Usage: milo view FILE [--commit ID | --edit | --line LINE[:COLUMN]]"),
         (&["listen", "--help"][..], "Usage: milo listen [--stop]"),
         (&["claude-status", "--help"][..], "Usage: milo claude-status"),
     ] {
@@ -1217,7 +1217,9 @@ fn help_and_version_write_to_stdout_and_argument_errors_write_to_stderr() {
     }
     for (args, message) in [
         (&["not-a-milo-command"][..], "milo: not-a-milo-command is not a directory; see milo --help for commands\n"),
-        (&["view"][..], "milo: missing file; use milo view FILE [--commit ID | --edit]\n"),
+        (&["view"][..], "milo: missing file; use milo view FILE [--commit ID | --edit | --line LINE[:COLUMN]]\n"),
+        (&["view", "page.txt", "--line", "0"][..], "milo: --line requires LINE or LINE:COLUMN, counted from 1\n"),
+        (&["view", "page.txt", "--line", "3:x"][..], "milo: --line requires LINE or LINE:COLUMN, counted from 1\n"),
     ] {
         let output = run(args);
         assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
@@ -1878,6 +1880,25 @@ fn claude_status_starts_fresh_when_the_account_changes_in_the_same_profile() {
 }
 
 #[test]
+fn the_reader_opens_at_a_named_line_and_edits_from_its_column() {
+    let project = Project::new();
+    let file = project.0.join("project/long.txt");
+    let lines: String = (1..=200).map(|n| format!("line {n}\n")).collect();
+    fs::write(&file, &lines).unwrap();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut tty = Terminal::run(command.args(["view", "long.txt", "--line", "120:6"]));
+    tty.shows("Line 120:6");
+    let screen = tty.screen();
+    assert!(screen[1].contains("117   line 117") && screen[4].contains("120   line 120"), "{screen:?}");
+
+    tty.master.write_all(b"e").unwrap();
+    tty.shows("^S save");
+    tty.master.write_all(b"here \x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read_to_string(&file).unwrap(), lines.replace("line 120\n", "line here 120\n"));
+}
+
+#[test]
 fn the_reader_edits_a_file_and_asks_before_ctrl_c_can_lose_the_draft() {
     let project = Project::new();
     let file = project.0.join("project/page.txt");
@@ -1959,7 +1980,7 @@ fn view_edit_opens_a_read_only_file_for_reading_and_says_why() {
 
     let both = project.command(env!("CARGO_BIN_EXE_milo")).args(["view", "x", "--edit", "--commit"]).output().unwrap();
     assert!(!both.status.success());
-    assert!(String::from_utf8_lossy(&both.stderr).contains("[--commit ID | --edit]"));
+    assert!(String::from_utf8_lossy(&both.stderr).contains("[--commit ID | --edit | --line LINE[:COLUMN]]"));
 }
 
 #[test]
