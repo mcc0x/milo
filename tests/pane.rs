@@ -2122,8 +2122,14 @@ fn a_reader_ended_from_outside_says_which_tabs_drafts_it_kept() {
     tty.master.write_all(b"one ").unwrap();
     tty.shows("unsaved");
 
-    // What a pane writes to ask for a second file: its path, and no commit.
-    let pipe = fs::read_dir(project.0.join("state/milo/readers")).unwrap().next().unwrap().unwrap().path();
+    // What a pane writes to ask for a second file: its path, and no commit. The reader's
+    // pipe is the one entry that is a pipe; its note of the project lies beside it.
+    let pipe = fs::read_dir(project.0.join("state/milo/readers"))
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .find(|entry| std::os::unix::fs::FileTypeExt::is_fifo(&entry.file_type().unwrap()))
+        .expect("the reader listens on a pipe")
+        .path();
     let request = format!("{}\0\0", project.0.join("project/b.txt").display());
     fs::OpenOptions::new().write(true).open(pipe).unwrap().write_all(request.as_bytes()).unwrap();
     tty.shows("*a.txt  b.txt ×");
