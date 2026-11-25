@@ -969,6 +969,22 @@ fn formatting_changes_the_draft_and_undo_takes_it_back_before_anything_is_saved(
 }
 
 #[test]
+fn redoing_a_format_keeps_typing_at_the_formatted_cursor() {
+    let f = Fixture::folder();
+    f.write("main.go", "package main\nshort\nlast\n");
+    let (mut reader, bin) = with_tools(&f, "main.go");
+    crate::format::tests::stand_in(&bin, "gofmt", "sed 's/short/é/'");
+    reader.key(Key::Char('e'));
+    reader.key(Key::Down);
+    reader.key(Key::End);
+    format(&mut reader);
+    reader.key(Key::Ctrl(b'z'));
+    reader.key(Key::Ctrl(b'y'));
+    typed(&mut reader, "!");
+    assert_eq!(draft(&reader), "package main\né!\nlast\n");
+}
+
+#[test]
 fn formatted_text_can_be_discarded_with_the_draft() {
     use crate::format::tests::stand_in;
 
@@ -1140,6 +1156,22 @@ fn a_file_that_cannot_be_written_does_not_offer_editing() {
         assert_eq!(reader.key(Key::Char('a')), After::Ignored);
     }
     assert_eq!(refusal(&mut reader), " Read-only: no write permission · ? help");
+}
+
+#[test]
+fn redoing_a_draft_restore_keeps_typing_at_the_restored_cursor() {
+    let f = Fixture::folder();
+    f.write("notes.txt", "first\nlast\n");
+    let mut reader = editing(&f, "notes.txt");
+    typed(&mut reader, "kept ");
+    drop(reader);
+
+    let mut reader = editing(&f, "notes.txt");
+    reader.key(Key::Char('r'));
+    reader.key(Key::Ctrl(b'z'));
+    reader.key(Key::Ctrl(b'y'));
+    typed(&mut reader, "!");
+    assert_eq!(draft(&reader), "!kept first\nlast\n");
 }
 
 #[test]

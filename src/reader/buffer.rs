@@ -55,8 +55,8 @@ struct Change {
     from: Pos,
     removed: String,
     inserted: String,
-    /// Where the inserted text ends.
-    end: Pos,
+    /// Where the edit left the cursor.
+    after: Pos,
     /// Where the cursor was before the change.
     cursor: Pos,
 }
@@ -243,7 +243,7 @@ impl Buffer {
         let end = self.splice(from, to, text);
         self.size = self.size + text.len() - removed.len();
         self.changes += 1;
-        self.record(Change { id: self.changes, from, removed, inserted: text.to_owned(), end, cursor });
+        self.record(Change { id: self.changes, from, removed, inserted: text.to_owned(), after: end, cursor });
         self.typing = false;
         end
     }
@@ -251,6 +251,16 @@ impl Buffer {
     /// The number of the change made last.
     pub(super) fn last_change(&self) -> u64 {
         self.changes
+    }
+
+    pub(super) fn replace_all(&mut self, text: &str, before: Pos, after: Pos) -> Replay {
+        let old_end = self.end();
+        let end = self.edit(Pos::default(), old_end, text, before);
+        let row = after.row.min(end.row);
+        let col = self.row(row).floor_char_boundary(after.col);
+        let cursor = Pos { row, col };
+        self.undo.last_mut().expect("the replacement was recorded").after = cursor;
+        Replay { first_row: 0, old_last_row: old_end.row, last_row: end.row, cursor }
     }
 
     /// Whether a change is part of the text now: made, and not undone.
@@ -265,7 +275,7 @@ impl Buffer {
         let joins = self.typing
             && self.dirty()
             && self.undo.last().is_some_and(|last| {
-                last.end == at && (!ch.is_whitespace() || last.inserted.ends_with(char::is_whitespace))
+                last.after == at && (!ch.is_whitespace() || last.inserted.ends_with(char::is_whitespace))
             });
         if !joins {
             let end = self.edit(at, at, text, at);
@@ -276,7 +286,7 @@ impl Buffer {
         self.size += text.len();
         let last = self.undo.last_mut().expect("a joined change follows another");
         last.inserted.push(ch);
-        last.end = end;
+        last.after = end;
         end
     }
 
@@ -292,7 +302,7 @@ impl Buffer {
     /// Makes the last undone change again and returns its first row and resulting cursor.
     pub(super) fn redo(&mut self) -> Option<Replay> {
         let change = self.redo.pop()?;
-        let replay = self.rewrite(change.from, change.removed.len(), &change.inserted, change.end);
+        let replay = self.rewrite(change.from, change.removed.len(), &change.inserted, change.after);
         self.undo.push(change);
         self.typing = false;
         Some(replay)
