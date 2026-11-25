@@ -17,7 +17,7 @@ milo writes to the project it displays only when you save a file you edited in i
 - [Keys and marks](docs/keys.md): Keyboard shortcuts and what the panes show.
 - [Usage limits](docs/usage.md): Provider quotas and activity, plus optional local CPU or memory indicators in the Mac menu bar.
 - [Discord presence](docs/presence.md): The optional, off-by-default Discord Rich Presence for Rex: what becomes public, the opt-in session and project names, Milo's Discord application or your own, `milo presence`, and its limits.
-- [Using the panes](docs/panes.md): Outline search, History, floating Reader tabs, opening a document in its Mac app or revealing it in Finder, media and Markdown viewing, patch review, and editing working files.
+- [Using the panes](docs/panes.md): Outline search, History, floating Reader tabs, opening a file named in a Rex pane's output at its line, opening a document in its Mac app or revealing it in Finder, media and Markdown viewing, patch review, and editing working files.
 
 ## Developing milo
 

@@ -24,6 +24,11 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   `milo_name_session` renames the session it is run in after the project of
   the given shell. It creates and switches to nothing. Run it only when the
   user asks for that name.
+- `milo_open_output` (**Milo: Open File from Terminal Output…**) lets the user
+  open a project file named in a pane's recent output, at its line. Write
+  locations as `path:line` or `path:line:column`, relative to the project, so
+  that it can find them. It opens a floating reader and takes focus, so leave
+  running it to the user unless they ask.
 - Use `milo setup --repair` or `--remove` only when asked to change the
   integration. Do not change Rex's global theme, font or keyboard shortcuts.
 - Discord presence is off unless the user turned it on, and it publishes on
@@ -42,7 +47,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo outline [PATH]` | Shows a live file tree with changes to commit or push. |
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
-| `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
+| `milo view FILE [--commit ID \| --edit \| --line LINE[:COLUMN]]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. `--line` opens a working file at that line. |
 | `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. |
 | `milo setup` | Opens terminal settings. In Rex it can also manage the sidebar layout. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. |

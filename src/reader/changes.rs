@@ -55,6 +55,12 @@ impl Folds {
         if line < fold.end { fold.row } else { line - fold.skipped() }
     }
 
+    /// Whether `line` is among the lines a fold stands for.
+    pub(super) fn hides(&self, line: usize) -> bool {
+        let before = self.0.partition_point(|fold| fold.start <= line);
+        self.0[..before].last().is_some_and(|fold| line < fold.end)
+    }
+
     fn line_before(&self, row: usize, before: usize) -> usize {
         row + self.0[..before].last().map_or(0, |fold| fold.skipped())
     }
@@ -115,6 +121,11 @@ impl Review {
 
     pub(super) fn is_compact(&self) -> bool {
         self.compact.is_some()
+    }
+
+    /// Leaves the compact view for the whole file.
+    pub(super) fn show_whole(&mut self) {
+        self.compact = None;
     }
 
     pub(super) fn folds(&self) -> &Folds {

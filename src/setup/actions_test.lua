@@ -35,19 +35,32 @@ local named, title_reply, rename_reply, rename_error = {}, { ok = true, stdout =
 local running = { child = { path = "/test/bin/milo", pid = 80 } }
 local processes = { [outline.block_id] = running, [history.block_id] = running, [usage.block_id] = running }
 local pick_answer, on_close, ps_reply
+-- What the stand-in terminal holds and what Milo answers about it, for the output action.
+local output = { runs = {}, reads = {} }
 rex = {
   action = function(action) actions[action.name] = action.run end,
-  exec = function(argv)
+  exec = function(argv, options)
     if argv[1] == "/bin/ps" then return ps_reply end
+    if argv[2] == "output-files" then
+      output.runs[#output.runs + 1] = { argv = argv, stdin = options.stdin }
+      return argv[3] == "list" and output.listed or output.opened
+    end
     commands[#commands + 1] = argv
     if argv[2] == "tab-title" then return title_reply end
     return argv[3] == "read" and profile_reply or { ok = true, stdout = "" }
   end,
   call = function(name, args)
     if name == terminal .. ".process" then
-      if args.block_id ~= shell.block_id then return processes[args.block_id] end
+      local known = processes[args.block_id]
+      if known ~= nil then return known or nil end
+      if args.block_id ~= shell.block_id then return end
       return { foreground = { argv0 = "editor", cwd = "/unrelated" },
         ancestors = { { argv0 = "-zsh", cwd = "/my project" } } }
+    elseif name == terminal .. ".format" or name == terminal .. ".blob_read" then
+      output.reads[#output.reads + 1] = { name = name:match("[^.]+$"), block = args.block_id, args = args.args }
+      return output[name:match("[^.]+$")](args.args)
+    elseif name == terminal .. ".write" then
+      error("an action typed into a terminal")
     elseif name == terminal .. ".size" then
       return sizes[args.block_id]
     elseif name == "block.close" then
@@ -542,3 +555,174 @@ near(1 - made.layout.ratio, .438)
 near(made.layout.before.ratio * made.layout.ratio, .27)
 assert(made.layout.before.before.label == usage.label and made.layout.before.after.label == history.label
   and made.layout.after.label == outline.label)
+
+-- Open File from Terminal Output reads the pane it was run in, once, and only then.
+assert(#output.reads == 0 and #output.runs == 0)
+tiled.layout, tiled.blocks = tree("vertical", 0.6, leaf(shell), leaf(editor)), { shell, editor }
+window.layers, window.focused_block_id = { tiled }, shell.block_id
+shell.host_id = "host:local"
+local build = { foreground = { name = "cargo", cwd = "/my project/crate", user_id = 501 },
+  ancestors = { { name = "zsh", argv0 = "-zsh", cwd = "/my project" } },
+  child = { name = "login", path = "/usr/bin/login", user_id = 0 } }
+processes[shell.block_id] = build
+local screen = "error[E0308]: mismatched types\n  --> src/disk.rs:184:17\n"
+output.format = function(args)
+  assert(args.format == "text" and args.unwrap and args.max_bytes == 262144)
+  return { content = screen, eof = true, total = #screen }
+end
+local function reply(text) return { ok = true, stdout = text } end
+local function opening(count)
+  assert(#floats == count, #floats .. " readers opened")
+  return floats[count] and floats[count].layout
+end
+local opened_before, closed_before, focus_before = #floats, #closed, #focus
+local function unchanged()
+  assert(#floats == opened_before and #closed == closed_before and #focus == focus_before)
+end
+
+-- One place opens at once, in a floating reader over the source's tab, at its line.
+output.listed = reply("found 1 outside 0\nsrc/disk.rs:184:17\terror[E0308]: mismatched types\n")
+output.opened = reply("view\t/my project\t/my project/src/disk.rs\t184:17\tdisk.rs\n")
+pick_answer = nil
+actions.milo_open_output(ctx, {})
+assert(#output.reads == 1 and output.reads[1].name == "format" and output.reads[1].block == shell.block_id)
+local list, open = output.runs[1].argv, output.runs[2].argv
+assert(list[3] == "list" and list[4] == "/my project/crate" and #list == 4 and output.runs[1].stdin == screen)
+assert(open[3] == "open" and open[4] == "/my project/crate" and open[5] == "src/disk.rs:184:17" and #open == 5)
+local reader_pane = opening(opened_before + 1)
+local view = reader_pane.options.command
+assert(view[1] == "/usr/bin/env" and view[2] == "MILO_PREVIEW_SOURCE=session:1 window:work shell block:shell")
+assert(view[3] == "/test/bin/milo" and view[4] == "view" and view[5] == "/my project/src/disk.rs")
+assert(view[6] == "--line" and view[7] == "184:17" and #view == 7)
+assert(reader_pane.label == "disk.rs" and reader_pane.options.cwd == "/my project" and reader_pane.options.shell == "none")
+assert(floats[#floats].window_id == window.window_id and floats[#floats].focus)
+opened_before = #floats
+
+-- Several places ask in the palette, most recent first, each with what was said about it.
+-- Moving the focus while the palette is open changes neither the pane read nor the tab used.
+output.listed = reply("found 2 outside 1\ndocs/migration.md\tI updated docs/migration.md.\nsrc/disk.rs:184:17\t\n")
+output.opened = reply("view\t/my project\t/my project/docs/migration.md\t-\tmigration.md\n")
+local asked
+pick_answer = function(prompt)
+  asked = prompt
+  window.focused_block_id, session.active_window_id = editor.block_id, "window:elsewhere"
+  processes[shell.block_id] = { foreground = { name = "zsh", cwd = "/elsewhere" } }
+  return "docs/migration.md"
+end
+actions.milo_open_output(ctx, {})
+assert(asked.title == "Open file from terminal output" and #asked.items == 2)
+assert(asked.items[1].id == "docs/migration.md" and asked.items[1].subtitle == "I updated docs/migration.md.")
+assert(asked.items[2].title == "src/disk.rs:184:17" and asked.items[2].subtitle == nil)
+open = output.runs[#output.runs].argv
+assert(open[4] == "/my project/crate" and open[5] == "docs/migration.md" and #output.reads == 2)
+view = opening(opened_before + 1).options.command
+assert(view[5] == "/my project/docs/migration.md" and #view == 5 and floats[#floats].window_id == window.window_id)
+window.focused_block_id, session.active_window_id, processes[shell.block_id] = shell.block_id, window.window_id, build
+opened_before = #floats
+
+-- Closing the palette opens nothing; no connected app is said; a choice can be passed instead.
+pick_answer = function() return nil, "cancelled" end
+assert(actions.milo_open_output(ctx, {}) == nil)
+pick_answer = function() return nil, "no_client" end
+ok, why = pcall(actions.milo_open_output, ctx, {})
+assert(not ok and why:find("or pass choice", 1, true))
+pick_answer = nil
+ok, why = pcall(actions.milo_open_output, ctx, { choice = "/etc/passwd" })
+assert(not ok and why == "That file is not in this pane's recent output.")
+unchanged()
+actions.milo_open_output(ctx, { choice = "src/disk.rs:184:17" })
+assert(output.runs[#output.runs].argv[5] == "src/disk.rs:184:17")
+opening(opened_before + 1)
+opened_before = #floats
+
+-- Every floating terminal of the tab that is not a Milo rail or peek is offered to Milo, which
+-- asks the readers among them; the one that took the file is brought forward.
+-- Nothing is closed for it: a reader with a draft keeps it.
+local reader = { block_id = "block:reader", label = "notes.md", creator_name = terminal }
+local scratch = { block_id = "block:scratch", creator_name = terminal }
+local peek_pane = { block_id = "block:peek", label = "milo:peek:outline", creator_name = terminal }
+local browser = { block_id = "block:browser", creator_name = "browser" }
+window.layers[2] = { kind = "floating", layer_id = "layer:reader", blocks = { reader, peek_pane } }
+window.layers[3] = { kind = "floating", layer_id = "layer:other", blocks = { browser, scratch } }
+output.listed = reply("found 1 outside 0\nsrc/disk.rs:9\tsrc/disk.rs:9: warning: unused\n")
+output.opened = reply("shown\tblock:reader\tdisk.rs\n")
+actions.milo_open_output(ctx, {})
+open = output.runs[#output.runs].argv
+assert(#open == 7 and open[6] == reader.block_id and open[7] == scratch.block_id)
+assert(#floats == opened_before and #closed == closed_before)
+assert(#focus == focus_before + 1 and focus[#focus] == reader.block_id)
+assert(relabeled[#relabeled].block_id == reader.block_id and relabeled[#relabeled].label == "disk.rs")
+focus_before = #focus
+-- An answer naming a pane that was not offered opens nothing.
+output.opened = reply("shown\tblock:peek\tdisk.rs\n")
+ok, why = pcall(actions.milo_open_output, ctx, {})
+assert(not ok and why == "Rex could not open the reader.")
+unchanged()
+window.layers[2], window.layers[3] = nil, nil
+
+-- No file of the worktree says so, with Milo's reason where it gave one, and opens nothing.
+local function refused(message, args)
+  local runs = #output.runs
+  local done, err = pcall(actions.milo_open_output, ctx, args or {})
+  assert(not done and err == message, tostring(err))
+  unchanged()
+  return #output.runs - runs
+end
+output.listed = reply("found 0 outside 0\n")
+assert(refused("No project files found in this pane's recent output.") == 1)
+output.listed = reply("found 0 outside 2\n")
+assert(refused("This pane's recent output names only files outside its worktree, so Milo opened nothing.") == 1)
+output.listed = { ok = false, stdout = "", stderr = "Milo could not find the folder this pane is working in.\n" }
+assert(refused("Milo could not find the folder this pane is working in.") == 1)
+output.listed = reply("found 1 outside 0\nsrc/disk.rs\t\n")
+output.opened = { ok = false, stdout = "", stderr = "That is not a file of this pane's worktree.\n" }
+assert(refused("That is not a file of this pane's worktree.") == 2)
+
+-- A pane whose files Milo cannot place is not read at all.
+local reads = #output.reads
+local function unread(message)
+  assert(refused(message) == 0 and #output.reads == reads)
+end
+ctx.block_id = editor.block_id
+unread("Focus the terminal whose output names the file, then try again.")
+ctx.block_id = outline.block_id
+table.insert(tiled.blocks, outline)
+unread("This is a Milo pane. Focus the terminal whose output names the file, then try again.")
+table.remove(tiled.blocks)
+ctx.block_id = shell.block_id
+shell.host_id = "host:remote"
+unread("This pane's output may name files on another computer, so Milo opened nothing.")
+shell.host_id = "host:local"
+processes[shell.block_id] = { foreground = { name = "ssh", cwd = "/my project" }, ancestors = build.ancestors }
+unread("This pane's output may name files on another computer, so Milo opened nothing.")
+processes[shell.block_id] = { foreground = { name = "vim", cwd = "/my project" },
+  ancestors = { { name = "zsh", cwd = "/home/me" }, { name = "mosh-client" } } }
+unread("This pane's output may name files on another computer, so Milo opened nothing.")
+processes[shell.block_id] = { foreground = { name = "sudo", user_id = 0 } }
+unread("Milo could not tell which folder this pane is working in, so it opened nothing.")
+processes[shell.block_id] = false
+unread("Milo could not tell which folder this pane is working in, so it opened nothing.")
+processes[shell.block_id] = build
+
+-- Long output is read from its end, in the parts Rex returns, and never past the limit.
+local long = string.rep("old line\n", 40000) .. "src/disk.rs:3: recent\n"
+output.format = function() return { content = long:sub(1, 100), id = 7, total = #long } end
+output.blob_read = function(args)
+  assert(args.id == 7 and args.offset >= #long - 262144)
+  local data = long:sub(args.offset + 1, args.offset + 100000)
+  return { data = data, eof = args.offset + #data == #long }
+end
+output.listed = reply("found 1 outside 0\nsrc/disk.rs:3\tsrc/disk.rs:3: recent\n")
+output.opened = reply("view\t/my project\t/my project/src/disk.rs\t3\tdisk.rs\n")
+actions.milo_open_output(ctx, {})
+local sent = output.runs[#output.runs - 1].stdin
+assert(#sent < 262144 and #sent > 262144 - 10 and sent:sub(1, 9) == "old line\n" and sent:sub(-22) == "src/disk.rs:3: recent\n")
+assert(#output.reads == reads + 4 and output.reads[reads + 2].args.offset == #long - 262144)
+opening(opened_before + 1)
+opened_before, reads = #floats, #output.reads
+-- A read that stops short of the end would hide what was printed last.
+output.blob_read = function() return { data = "", eof = false } end
+assert(refused("Milo could not read this pane's recent output.") == 0)
+output.format = function() end
+assert(refused("Milo could not read this pane's recent output.") == 0)
+assert(#closed == closed_before)
