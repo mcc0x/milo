@@ -40,6 +40,36 @@ Low-quota notifications are **off by default**. In **More options → Low-quota 
 
 Choose **Browser settings…** to open the [local browser editor](setup.md#browser-editor). To change a specific worktree instead, run `milo web` from that project.
 
+### Rex panes that need you
+
+The menu can list the Rex panes whose program is waiting for you, so you can see it from another app. It is **off by default** and separate from [alert forwarding](setup.md#mirror-rex-alerts) and low-quota notifications: it needs no Telegram or Discord setup, sends nothing anywhere, and raises no sound or notification.
+
+In **More options → Needs you**, choose **In this menu** to list the panes when you open the menu, or **In this menu, with a menu bar dot** to also put a small dot beside Milo while any pane is listed. The dot sits next to the quota, CPU or memory indicator you already chose; it doesn’t replace it. Under **Include**, switch each state on its own:
+
+| State | Listed when a program in the pane reports | Default |
+| --- | --- | --- |
+| Waiting for input | It can’t go on until you answer: a permission, a question or a sign-in. | On |
+| Errors | It failed and stopped. | On |
+| Finished work | It finished and you haven’t looked. | Off |
+
+From a shell, `milo menubar attention` prints the choice, `milo menubar attention off`, `menu` or `dot` sets where panes are shown, and `milo menubar attention states waiting,errors,done` sets what is listed. Like the indicator, the choice is saved for this Milo profile and doesn’t install the app.
+
+![Milo’s menu with a Needs you section above Usage: one pane waiting for permission, one that reported an error and one that finished, each with how long ago](img/menu-needs-you.png)
+
+Each row names the session, the tab if you named it, what the program reported and for how long. The rows are what is true now, not a history:
+
+- A row leaves by itself when its program goes back to work, clears its status or its pane closes.
+- **Finished work** and **errors** stay until the program reports something else, so each has a **Mark seen** button. It hides that one row until the program reports again. A wait can’t be marked seen; it ends when you answer.
+- If Rex stops, the section says so and counts nothing, and the dot goes out. When Rex is back, Milo lists only what Rex reports then. A row you marked seen stays hidden unless its program has reported again.
+
+Click a row to go to that pane. Milo first checks that the Rex server on this Mac is still the one that reported the pane and that the pane is still a terminal in one of its tabs. Then Rex focuses that pane, and the Rex app on this Mac is asked to show its session. Only the row you clicked is affected, and a finished or failed row is marked seen once Rex shows it.
+
+Rex takes requests to switch sessions only when **Remote Control** is on in Rex (**Settings → General → Client Info**). It is off unless you turn it on, and Milo never changes it. With it off, with no Rex app connected, with several connected on this Mac, or when Milo can’t tell which app is yours, the pane is still focused in its session and the menu tells you to open that session in Rex. If the pane has closed or another Rex server now answers, nothing is changed and the menu says why.
+
+**What Milo reads.** Only what the program reported through Rex’s [program status](https://www.superlogical.com/rex/docs/build/program-status): the state, what kind of answer it waits for, the program’s short name and the time. It also reads the session’s and tab’s labels. Milo doesn’t read the status message or title, a terminal’s screen, its scrollback or a transcript. It asks only the Rex server on this Mac for the terminals that server runs; a server on another host is not asked and its panes are not guessed at. While the section is off, Milo starts no process for it and doesn’t ask Rex anything.
+
+The menu app runs the `rex` command that Rex installs for your account on this Mac. If the section says Rex wasn’t found, install Rex for Mac; nothing else needs setting up.
+
 ## Which tools appear
 
 Milo gives a tool a place once it has a figure, and no place before that. If you use Codex and Claude Code but not OpenCode, the pane has two places and nothing for OpenCode: no label, no dash and no empty row. Each tool has its own choice under **Appearance** in `milo setup` or **Usage** in `milo web`, saved globally or for a worktree like the other pane preferences. Reopen the pane to apply a change.

@@ -66,6 +66,7 @@ Usage: milo
        milo usage [--menu-stream]
        milo menubar install | uninstall
        milo menubar indicator quota | cpu | memory
+       milo menubar attention [off | menu | dot | states LIST]
        milo setup
        milo web [--port PORT] [--no-open]
        milo web --host HOST [--project DIR] [--port PORT] [--no-open]
@@ -208,7 +209,7 @@ fn command_help(name: &str) -> Option<&'static str> {
             "Usage: milo usage [--menu-stream]\n\nSee Codex and Claude Code limits and OpenCode activity.\n--menu-stream prints one JSON snapshot per line using global preferences. It refreshes about every 30 seconds or on a newline from stdin, and exits at EOF."
         }
         "menubar" => {
-            "Usage: milo menubar install | uninstall\n       milo menubar indicator quota | cpu | memory\n\nInstall and open the optional macOS usage app, or remove it without changing Milo settings.\nThe indicator command saves what the menu bar shows without opening the app."
+            "Usage: milo menubar install | uninstall\n       milo menubar indicator quota | cpu | memory\n       milo menubar attention [off | menu | dot | states LIST]\n\nInstall and open the optional macOS usage app, or remove it without changing Milo settings.\nThe indicator command saves what the menu bar shows without opening the app.\n\nattention saves whether the menu lists Rex panes whose program waits for you, failed or finished: off (the default), menu, or dot for a dot in the menu bar as well. states takes the ones to list, from waiting, errors and done, separated by commas. Without a word it prints the choice. While off, Milo does not watch Rex for it."
         }
         "view" => {
             "Usage: milo view FILE [--commit ID | --edit | --line LINE[:COLUMN]]\n\nRead a file now or as it was at a Git commit. --edit starts editing a working text file; in the reader, e does the same. --line opens a working file at that line, counted from one, with its number marked."
@@ -339,6 +340,7 @@ enum Command<'a> {
     UsageMenuStream,
     MenuBar(menubar::Action),
     MenuIndicator(menubar::Indicator),
+    MenuAttention(menubar::AttentionCommand),
     Home,
     Setup,
     Web(web::Start<'a>),
@@ -410,6 +412,9 @@ fn command<'a>(
                     _ => None,
                 };
                 Command::MenuIndicator(indicator.ok_or("expected milo menubar indicator quota | cpu | memory")?)
+            }
+            (Some("attention"), args) => {
+                Command::MenuAttention(menubar::AttentionCommand::parse(args).ok_or(menubar::ATTENTION_USAGE)?)
             }
             _ => return Err("see milo menubar --help for commands".into()),
         },
@@ -562,6 +567,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             let config = paths::config_dir().ok_or("Milo's configuration directory is unavailable")?;
             print_line(indicator.save(&config)?)
         }
+        Command::MenuAttention(command) => menubar::attention(command),
         Command::Outline(path) => run(Start::Reading(project_path(path)), &|| open_outline(path)),
         Command::Path(path) => run(Start::Reading(Path::new(path)), &|| {
             open_outline(Some(path)).map_err(|why| match instead_of(path) {

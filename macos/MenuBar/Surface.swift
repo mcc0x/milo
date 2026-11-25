@@ -7,6 +7,8 @@ struct UsageSnapshot: Codable, Equatable {
     let providers: [UsageProvider]
     var indicator: String? = nil
     var indicatorAck: Bool? = nil
+    var attention: String? = nil
+    var attentionStates: String? = nil
 
     func orderedProviders(pinning badge: BadgeReading?) -> some RandomAccessCollection<UsageProvider> {
         pinnedIndices(providers.indices, first: badge?.providerIndex).lazy.map { providers[$0] }
@@ -131,6 +133,12 @@ struct UsagePanel: View {
     let monitor: ResourceMonitor
     @Binding var alertThreshold: UsageAlertThreshold
     let alertIssue: String?
+    let attention: AttentionWatch
+    let attentionChoice: AttentionChoice
+    let savingAttention: Bool
+    let setAttentionShow: (AttentionShow) -> Void
+    let setAttentionState: (AttentionState, Bool) -> Void
+    let jump: (AttentionEntry) -> Void
     let refresh: () -> Void
     let openSettings: () -> Void
     let quit: () -> Void
@@ -162,6 +170,10 @@ struct UsagePanel: View {
                 }
             }
             .padding(.vertical, 10)
+            if attentionChoice.show != .off {
+                AttentionSection(watch: attention, now: now, jump: jump)
+                Divider().padding(.bottom, 10)
+            }
             if indicator != .quota {
                 ResourceSection(monitor: monitor)
                 Divider().padding(.bottom, 10)
@@ -335,6 +347,24 @@ struct UsagePanel: View {
                     }
                 }
                 .pickerStyle(.menu)
+                Divider()
+                Menu("Needs you") {
+                    Picker("Show Rex panes that need you", selection: Binding(get: { attentionChoice.show }, set: setAttentionShow)) {
+                        ForEach(AttentionShow.allCases, id: \.self) { show in
+                            Text(show.title).tag(show)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    Section("Include") {
+                        ForEach(AttentionState.allCases, id: \.self) { state in
+                            let included = attentionChoice.states.contains(state)
+                            Toggle(state.title, isOn: Binding(get: { included }, set: { setAttentionState(state, $0) }))
+                                // At least one state stays chosen; turn the section off to list none.
+                                .disabled(included && attentionChoice.states.count == 1)
+                        }
+                    }
+                }
+                .disabled(savingAttention)
                 Divider()
                 Toggle("Launch at Login", isOn: Binding(
                     get: { loginStatus == .enabled || loginStatus == .requiresApproval },
