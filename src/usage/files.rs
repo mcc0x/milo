@@ -76,6 +76,7 @@ impl FileVersion {
 pub(super) struct SnapshotVersion {
     file: FileVersion,
     changed: (i64, i64),
+    mode: u32,
 }
 
 impl SnapshotVersion {
@@ -93,6 +94,7 @@ impl SnapshotVersion {
                 len: metadata.len(),
             },
             changed: (metadata.ctime(), metadata.ctime_nsec()),
+            mode: metadata.mode(),
         })
     }
 }
@@ -830,6 +832,23 @@ pub(super) fn has_marker(line: &[u8], marker: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
+
+    #[test]
+    fn a_snapshot_distinguishes_permission_changes_with_the_same_change_time() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = Fixture::folder();
+        fixture.write("limits.json", "{}");
+        let path = fixture.root.join("limits.json");
+        let version = |mode| {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            SnapshotVersion::regular(&path.symlink_metadata().unwrap()).unwrap()
+        };
+        let before = version(0o600);
+        let mut after = version(0o400);
+        after.changed = before.changed;
+        assert!(before != after);
+    }
 
     #[test]
     fn the_cache_reloads_a_same_size_rewrite_with_a_restored_mtime() {

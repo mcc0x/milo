@@ -125,6 +125,7 @@ impl LookupError {
 pub(super) struct Stamp {
     identity: (i128, i128),
     changed: (i128, i128),
+    file_type: libc::mode_t,
 }
 
 impl Stamp {
@@ -132,6 +133,7 @@ impl Stamp {
         Self {
             identity: (stat.st_dev.into(), stat.st_ino.into()),
             changed: (stat.st_ctime.into(), stat.st_ctime_nsec.into()),
+            file_type: stat.st_mode & libc::S_IFMT,
         }
     }
 
@@ -147,6 +149,7 @@ impl Stamp {
         stat.is_file().then(|| Self {
             identity: (stat.dev().into(), stat.ino().into()),
             changed: (stat.ctime().into(), stat.ctime_nsec().into()),
+            file_type: libc::S_IFREG,
         })
     }
 }
@@ -301,4 +304,22 @@ fn link_at(dir: &File, name: &CStr) -> io::Result<PathBuf> {
         return Err(io::Error::from_raw_os_error(libc::ENAMETOOLONG));
     }
     Ok(PathBuf::from(OsString::from_vec(target[..len].to_vec())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::Fixture;
+
+    #[test]
+    fn the_stamp_distinguishes_file_types_with_the_same_identity_and_change_time() {
+        let fixture = Fixture::folder();
+        fixture.write("notes.md", "# Notes");
+        let dir = File::open(&fixture.root).unwrap();
+        let mut stat = stat_at(&dir, c"notes.md").unwrap();
+        let regular = Stamp::of_stat(&stat);
+        assert!(Stamp::at(&fixture.root.join("notes.md")) == Some(regular));
+        stat.st_mode = (stat.st_mode & !libc::S_IFMT) | libc::S_IFLNK;
+        assert!(regular != Stamp::of_stat(&stat));
+    }
 }
