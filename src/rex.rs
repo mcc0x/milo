@@ -3,6 +3,7 @@
 mod attention;
 mod preview;
 mod server;
+pub(crate) mod task;
 
 pub(crate) use attention::{AttentionWatch, jump};
 pub(crate) use preview::{available as preview_available, launch as preview, preview_anchor};

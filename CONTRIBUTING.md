@@ -69,11 +69,11 @@ On pushes and pull requests, website-, docs-, relay- and Railway-only changes sk
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture/sips.rs`, FFmpeg and FFprobe through `src/reader/video/decode.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, the login shell that is asked for its search path through `src/task/harness.rs`, `/usr/bin/sips` through `src/picture/sips.rs`, FFmpeg and FFprobe through `src/reader/video/decode.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
-**It writes to a project only when the user saves.** Every git command milo runs only reads. The one thing that changes a project is `Ctrl-S` in the reader's editor, and it goes through `src/reader/disk.rs`: the file is opened without following a link, read again, and written only if it is still what the edit started from or the user says to overwrite it. Do not add a second way to write, and do not let anything else (a formatter, a cache, a temporary file) write into the project. What milo keeps for itself, such as a draft from a reader that was ended, goes in its state folder.
+**It writes to a project only when the user saves or starts a task.** Every git command milo runs only reads, except the `git worktree add` of `milo task new`, which goes through `change` in `src/git/run.rs` and has no other caller. The one thing that changes a project's files is `Ctrl-S` in the reader's editor, and it goes through `src/reader/disk.rs`: the file is opened without following a link, read again, and written only if it is still what the edit started from or the user says to overwrite it. Do not add a second way to write, and do not let anything else (a formatter, a cache, a temporary file) write into the project. What milo keeps for itself, such as a draft from a reader that was ended, goes in its state folder.
 
-**It starts no program the user did not ask for.** Opening and showing a file never run anything from the project or for it. A formatter runs only on `Ctrl-F`, is found by a fixed name in the folders of `PATH` written in full, and is given the draft on standard input. Never install, download or run a tool through a package runner.
+**It starts no program the user did not ask for.** Opening and showing a file never run anything from the project or for it. A coding agent starts only from `milo task new` or its Rex action, by the name the person gave, and never another in its place. A formatter runs only on `Ctrl-F`, is found by a fixed name in the folders of `PATH` written in full, and is given the draft on standard input. Never install, download or run a tool through a package runner.
 
 ## Style
 
@@ -121,6 +121,9 @@ a save replaces only files it recognises as Milo's. Before changing
 the list beside it, or installations holding that version are told their file
 was left alone. `listener_0_1_2.lua` is the listener of releases 0.1.1 and
 0.1.2, kept so that a test can save over it.
+
+The task launcher (`src/task.rs`) is the only code that creates a session, and
+only when someone starts a task. It shows, selects and renames none.
 
 `titles.rs` names tabs and sessions for the listener and the session action,
 and keeps the titles Milo set by Rex window ID in the state folder. A title
@@ -267,6 +270,18 @@ The patch is untrusted and the review writes nothing. Paths go through `safe` in
 
 `cargo test --bin milo handoff:: review::` runs the unit tests and the pane tests, which mix a person's, the agent's and another agent's uncommitted edits in one file. With Rex installed, `cargo test --test rex_lab -- --ignored a_floating_review` opens the floating review on a disposable Rex server.
 
+### Changing the task launcher
+
+[Starting an agent task](docs/setup.md#start-an-agent-task) says what a person sees. `milo task new` and the Rex action **Milo: New Agent Task…** both end in `launch` in `src/task.rs`. Keep it that way: the action in `src/setup/actions.lua` only asks for what was not passed, through `rex.ui`, and runs `milo task new` with each answer as an argument of its own. Do not give the launcher a pane, a Home entry or a page in the browser editor.
+
+Keep the order. Everything that can be refused is checked before anything is created; then the worktree is added, then the session. Nothing that was made is removed, and a failure after the worktree exists says what exists. A person closing a question in Rex ends the action before Milo is run. Never switch the checkout the task was asked from, reuse a worktree that was not named, or choose a branch's starting commit for the person.
+
+The session starts in the background. Do not select it, focus it, rename another session, type into it or answer an agent's trust question. Do not push, open a pull request, merge or remove a worktree.
+
+A harness goes in `HARNESSES` in `src/task/harness.rs` only with the interactive invocation its documentation gives, checked against a real install: that the agent's full screen appears in the worktree, that a prompt with shell syntax and a leading dash arrives as written, and that a follow-up can be typed. Never use a print, headless or one-shot mode, and never start one harness in place of another. Add the version to the table in `docs/setup.md`. An online usage account is not a harness.
+
+`cargo test --bin milo task:: worktrees::` runs the unit tests and `cargo test --test task` runs the real `milo task new` beside stand-ins for `rex` and the agents. With Lua 5.1, the fixtures above cover the action's questions, including closing each one. With Rex installed, `cargo test --test rex_lab -- --ignored a_task_starts` starts tasks from the command line and through the action on a disposable server. No test starts a real agent: do that by hand on a disposable Rex server and repository, and say in the pull request which agents and versions you ran. Only a Rex app can answer `rex.ui` questions, so say whether you answered them in an app or passed every choice as an argument.
+
 ### Adding a language to the reader
 
 Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for language tables, and `src/syntax/delimiters.rs` for strings and comments whose closing marks depend on the opener. `src/syntax/markup.rs` reads HTML and XML, and `src/syntax/markdown.rs` reads Markdown; those two are not code and have walkers of their own. Adding a language normally means changing only the tables:
@@ -387,7 +402,8 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/git.rs` | Finds repositories and keeps their status, file lists, and history. |
 | `src/git/parse.rs` | Reads Git status, diff, and log output. |
 | `src/git/pending.rs` | Counts lines in pending changes and reuses tracked-file counts across unrelated edits. |
-| `src/git/run.rs` | Runs bounded, read-only Git commands with unsafe settings overridden. |
+| `src/git/run.rs` | Runs bounded, read-only Git commands with unsafe settings overridden, and the one command that adds a worktree. |
+| `src/git/worktrees.rs` | Lists a repository's worktrees and branches, and adds a worktree for a task. |
 | `src/handoff.rs` | Works out what a handed-over patch changed in a file as it is now, or why that cannot be told. |
 | `src/handoff/fit.rs` | Finds a patch's lines in the file and takes them back out in memory, within a fixed amount of work. |
 | `src/handoff/patch.rs` | Reads the files and hunks of a unified diff and refuses names that could leave the project. |
@@ -442,6 +458,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/host.rs` | Names the computer Milo runs on and says whether its Rex server and command are ones Milo was checked with. |
 | `src/review.rs` | Runs `milo review`: a read-only reader over each file of a handed-over patch, and its floating form for a program with no terminal. |
 | `src/rex.rs` | Calls Rex for setup, floating readers, the listener, and the presence helper's watch. |
+| `src/rex/task.rs` | Creates a task's background session, watches for an agent that exits at once, and runs the launcher on another host. |
 | `src/rex/attention.rs` | Starts the script that reports terminals needing the person, and shows one pane in Rex after checking its host and block. |
 | `src/rex/server.rs` | Asks a Rex server for its version, host ID and connected apps, and starts, forwards and ends another host's settings editor. |
 | `src/rex_attention.lua` | Tells the menu's watch which terminals of the local Rex server hold a blocked, failed or finished program status, never its text. |
@@ -452,6 +469,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/rex_shell.lua` | Reports the directory of the one shell a managed pane follows, and nothing from other terminals. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Runs the setup screen: its choices, layout trials, scoped saves, and maintenance. |
+| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes, name a session for its project, or ask for a new agent task. |
 | `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes, name a session for its project, or open a file named in a pane's recent output. |
 | `src/setup/actions_test.lua` | Checks those actions with a stand-in for Rex. |
 | `src/setup/claude.rs` | Plans changes to the Claude Code status line and tracks ownership. |
@@ -478,6 +496,9 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/syntax/markdown.rs` | Colours Markdown headings, code, links, list marks and quotes. |
 | `src/syntax/markup.rs` | Colours HTML and XML tags, and the scripts and styles inside them. |
 | `src/syntax/langs.rs` | Defines language rules and maps them to file names and extensions. |
+| `src/task.rs` | Runs `milo task new`: checks a request, adds or finds the worktree, starts the agent's session, and tells the Rex action what it can offer. |
+| `src/task/harness.rs` | Lists the coding agents a task can start, finds their programs, and gives each its interactive invocation. |
+| `src/task/tests.rs` | Checks requests, worktree plans and refusals, another host's reply, and what the action is told. |
 | `src/term.rs` | Sets and restores terminal modes and waits for events. |
 | `src/titles.rs` | Names Rex tabs and sessions after a Git project and remembers the titles Milo set. |
 | `src/tree.rs` | Builds file and folder rows, folds, and changed-file counts. |
@@ -558,8 +579,10 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
 | `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
 | `tests/rex_hosts.rs` | Follows Doctor, a forwarded settings editor and a settings bundle across two disposable Rex servers, and checks the first host's files stay as they were. |
+| `tests/rex_lab.rs` | Exercises Rex layouts and presence on a disposable server, edits files in floating reader tabs, opens a floating review of an agent-supplied patch, and starts agent tasks from the command line and the Rex action. |
 | `tests/rex_lab.rs` | Exercises Rex layouts and presence on a disposable server, edits files in floating reader tabs, opens a floating review of an agent-supplied patch, and opens files named in a pane's output. |
 | `tests/settings-bench.py` | Times settings requests, a competing save and first state beside a responding Rex stand-in. |
+| `tests/task.rs` | Runs `milo task new` beside stand-ins for Rex and the four agents: the session asked for, literal prompts, refusals that create nothing, and what a late failure reports. |
 | `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |

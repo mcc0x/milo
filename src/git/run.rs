@@ -1,4 +1,5 @@
-//! Runs read-only git commands without letting a repository run its own programs.
+//! Runs read-only git commands without letting a repository run its own programs,
+//! and the one command that adds a worktree for a task.
 
 use std::cell::Cell;
 use std::ffi::OsStr;
@@ -247,6 +248,23 @@ pub(super) fn optional_oid(root: &Path, guard: &[String], args: &[&str]) -> Opti
     } else {
         (status.code() == Some(1) && raw.is_empty()).then_some(None)
     }
+}
+
+/// Runs the one kind of Git command that changes a repository, and gives
+/// Git's own reason when it fails. Only `worktrees::add` calls this, when a
+/// person starts a task: the new checkout is theirs to work in, so it is made
+/// as their own `git worktree add` would make it, with their hooks and
+/// filters. It may take as long as a checkout takes.
+pub(super) fn change(root: &Path, args: &[&OsStr]) -> Result<(), String> {
+    let mut c = isolated(Command::new(&*GIT));
+    c.arg("-C").arg(root).args(args).env("GIT_TERMINAL_PROMPT", "0").stdout(Stdio::null()).stderr(Stdio::piped());
+    let done = c.output().map_err(|_| "Git could not be started".to_string())?;
+    if done.status.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&done.stderr);
+    let reason = said.lines().rev().find_map(|line| line.strip_prefix("fatal: ")).unwrap_or("Git gave no reason");
+    Err(reason.chars().filter(|c| !c.is_control()).collect())
 }
 
 #[derive(Clone, Default)]

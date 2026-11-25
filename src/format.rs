@@ -132,7 +132,7 @@ pub fn known(name: &str) -> bool {
 /// The first program of this name in a folder that `PATH` names in full. A
 /// folder named from wherever the command happens to run, such as `.` or
 /// `node_modules/.bin`, would let the project being read choose the program.
-fn find(program: &str, path: &OsStr) -> Option<PathBuf> {
+pub(crate) fn find(program: &str, path: &OsStr) -> Option<PathBuf> {
     std::env::split_paths(path).filter(|dir| dir.is_absolute()).map(|dir| dir.join(program)).find(|file| {
         let Ok(name) = std::ffi::CString::new(file.as_os_str().as_bytes()) else { return false };
         // SAFETY: The path is a live NUL-terminated string; access only reports on it.

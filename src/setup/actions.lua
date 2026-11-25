@@ -1169,6 +1169,126 @@ rex.action{ name = "milo_open_output", title = "Milo: Open File from Terminal Ou
   description = "Open a project file, at the line printed with it, from this pane's recent output.",
   keywords = "error diagnostic compiler path line reader",
   run = function(ctx, args) return open_output(ctx, args or {}) end }
+-- Starts a coding agent on a task. `milo task new` does all of it: this
+-- action only asks for what was not passed and hands the answers over, each
+-- as an argument of its own. Closing any question ends the action before
+-- Milo is asked to start anything, so nothing has been created.
+local function unhex(code)
+  return (code:gsub("%x%x", function(byte) return string.char(tonumber(byte, 16)) end))
+end
+
+local function first_line(reply, fallback)
+  local said = reply and reply.stderr and reply.stderr:match("[^\r\n]+")
+  return said and said:gsub("^milo: ", "") or fallback
+end
+
+local function task_options(cwd)
+  local reply = profile_exec({ milo, "task-options", cwd }, 10)
+  if not reply or not reply.ok then raise(first_line(reply, "Could not read this project.")) end
+  local found = { agents = {}, worktrees = {}, bases = {}, free = {} }
+  for line in reply.stdout:gmatch("[^\n]+") do
+    local id, name = line:match("^agent (%S+) (.+)$")
+    local path, branch, here = line:match("^worktree (%x+) (%S+) (%S+)$")
+    local base, free = line:match("^base (%x+)$"), line:match("^branch (%x+)$")
+    if id then
+      found.agents[#found.agents + 1] = { id = id, name = name }
+    elseif path then
+      found.worktrees[#found.worktrees + 1] = { path = unhex(path), branch = branch ~= "-" and unhex(branch) or nil,
+        here = here == "here" }
+    elseif base then
+      found.bases[#found.bases + 1] = unhex(base)
+    elseif free then
+      found.free[unhex(free)] = true
+    end
+  end
+  return found
+end
+
+-- An answer, or nothing when the person closed the question. Any other
+-- reason for having no answer is an error: the action never guesses one.
+local function answered(value, why)
+  if value ~= nil then return value end
+  if why == "cancelled" then return nil end
+  raise("Answer in a connected Rex app, or pass every choice as an argument.")
+end
+
+local function task_agent(found)
+  if #found.agents == 0 then
+    raise("None of Claude Code, Codex, oh-my-pi and OpenCode is installed on this host.")
+  end
+  -- With one agent installed there is nothing to choose.
+  if #found.agents == 1 then return found.agents[1].id end
+  local items = {}
+  for i, agent in ipairs(found.agents) do
+    items[i] = { id = agent.id, title = agent.name, subtitle = agent.id, icon = "terminal" }
+  end
+  return answered(rex.ui.pick{ title = "New agent task", placeholder = "Choose a coding agent", items = items })
+end
+
+-- The worktree to use, or the branch to add one for and where that branch starts.
+local function task_place(found)
+  local items = { { id = "new", title = "New worktree…", subtitle = "On a branch you name", icon = "plus" } }
+  for i, tree in ipairs(found.worktrees) do
+    items[#items + 1] = { id = tostring(i), title = tree.branch or "No branch", subtitle = tree.path,
+      icon = "folder", detail = tree.here and "this checkout" or nil }
+  end
+  local picked = answered(rex.ui.pick{ title = "Where the agent works", placeholder = "Choose a worktree",
+    items = items })
+  if not picked then return end
+  if picked ~= "new" then return { worktree = found.worktrees[tonumber(picked)].path } end
+  local branch = answered(rex.ui.input{ title = "Branch for the new worktree", placeholder = "feature/…",
+    confirm = "Use this branch" })
+  if not branch then return end
+  branch = branch:match("^%s*(.-)%s*$")
+  if branch == "" then raise("A new worktree needs a branch name.") end
+  -- A branch that exists and has no worktree is used as it is.
+  if found.free[branch] then return { branch = branch } end
+  local bases = {}
+  for i, base in ipairs(found.bases) do
+    bases[i] = { id = base, title = base, icon = "branch" }
+  end
+  local base = answered(rex.ui.pick{ title = "Start " .. branch .. " from", items = bases, allow_other = true,
+    placeholder = "A branch, tag or commit" })
+  if not base then return end
+  if type(base) == "table" then base = base.text:match("^%s*(.-)%s*$") end
+  if base == "" then raise("A new branch needs a commit to start from.") end
+  return { branch = branch, base = base }
+end
+
+local function new_task(ctx, args)
+  local window = tab(ctx)
+  if not window then raise("no_tab") end
+  local _, cwd = anchor(ctx, window, true)
+  if not cwd then raise("no_shell") end
+  local found = task_options(cwd)
+  local agent = args.agent or task_agent(found)
+  if not agent then return end
+  local place = (args.worktree or args.branch) and { worktree = args.worktree, branch = args.branch, base = args.base }
+    or task_place(found)
+  if not place then return end
+  local name = agent
+  for _, known in ipairs(found.agents) do
+    if known.id == agent then name = known.name end
+  end
+  local prompt = args.prompt or answered(rex.ui.input{ title = "Task for " .. name, confirm = "Start " .. name,
+    placeholder = "What should it do? Leave this empty to start without a task." })
+  if not prompt then return end
+  local argv = { milo, "task", "new", "--project", cwd, "--agent", agent }
+  for _, flag in ipairs{ "worktree", "branch", "base" } do
+    if place[flag] then argv[#argv + 1], argv[#argv + 2] = "--" .. flag, place[flag] end
+  end
+  if prompt ~= "" then argv[#argv + 1], argv[#argv + 2] = "--prompt", prompt end
+  local reply = profile_exec(argv, 20)
+  if reply and reply.timed_out then
+    raise("Milo did not finish in time. Run git worktree list to see whether a worktree was added.")
+  end
+  local path, session = (reply and reply.ok and reply.stdout or ""):match("^worktree ([^\n]+)\nsession (session:[%x%-]+)\n$")
+  if not session then raise(first_line(reply, "Could not start the task.")) end
+  return { worktree = path, session_id = session }
+end
+rex.action{ name = "milo_new_agent_task", title = "Milo: New Agent Task…",
+  args = { agent = "string?", worktree = "string?", branch = "string?", base = "string?", prompt = "string?" },
+  run = function(ctx, args) return new_task(ctx, args or {}) end }
 rex.action{
   name = "milo_close", title = "Milo: Close Panes in This Tab",
   run = function(ctx)

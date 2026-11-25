@@ -33,6 +33,7 @@ mod rex;
 mod screen;
 mod setup;
 mod syntax;
+mod task;
 mod term;
 mod titles;
 mod tree;
@@ -77,6 +78,8 @@ Usage: milo
        milo presence details DETAILS | application ID
        milo view FILE [--commit ID | --edit | --line LINE[:COLUMN]]
        milo review PATCH [--from NAME] [--float]
+       milo task new --agent AGENT --branch NAME [--base REF] [--prompt TEXT]
+       milo task new --agent AGENT --worktree DIR [--prompt TEXT]
        milo PATH
        milo [setup] --skip-onboarding
        milo listen [--stop]
@@ -106,6 +109,8 @@ milo presence shows or changes the optional Discord Rich Presence, which is off
   until you turn it on.
 milo settings copies chosen pane settings to another host as a file, shows what
   an import would change, and undoes it.
+milo task new starts Claude Code, Codex, oh-my-pi or OpenCode on a task, in a
+  Git worktree and a background Rex session of its own. See milo task --help.
 milo listen and milo claude-status are used by Rex and Claude Code.
 To open a directory named like a command, use a path such as ./history.
 In a git repository the outline shows the whole project and history shows
@@ -228,6 +233,7 @@ fn command_help(name: &str) -> Option<&'static str> {
         }
         "presence" => presence::HELP,
         "settings" => setup::transfer::HELP,
+        "task" => task::HELP,
         "listen" => {
             "Usage: milo listen [--stop]\n\nStart or stop the Rex listener that remembers sidebar sizes, arranges new tabs and titles tabs."
         }
@@ -238,9 +244,9 @@ fn command_help(name: &str) -> Option<&'static str> {
 }
 
 /// Every word `command_help` knows, in the order `--help` lists them.
-const COMMANDS: [&str; 14] = [
+const COMMANDS: [&str; 15] = [
     "outline", "history", "usage", "menubar", "setup", "web", "settings", "doctor", "presence", "view", "review",
-    "listen", "alerts", "claude-status",
+    "task", "listen", "alerts", "claude-status",
 ];
 const OPTIONS: [&str; 3] = ["--help", "--version", "--skip-onboarding"];
 
@@ -352,6 +358,7 @@ enum Command<'a> {
     Alerts(Option<&'a OsStr>, &'a [OsString]),
     Presence(presence::Request),
     Settings(setup::transfer::Request<'a>),
+    Task(task::Request<'a>),
     ClaudeStatus,
     Help(&'static str),
     Version,
@@ -392,7 +399,7 @@ fn command<'a>(
         });
     }
     if !rest.is_empty()
-        && !matches!(name, Some("view" | "review" | "web" | "alerts" | "presence" | "settings" | "menubar"))
+        && !matches!(name, Some("view" | "review" | "web" | "alerts" | "presence" | "settings" | "menubar" | "task"))
     {
         return Err(format!("too many arguments; see {}", guide(name)));
     }
@@ -517,6 +524,7 @@ fn command<'a>(
         (Some("usage"), Some(flag)) if flag == "--menu-stream" => Command::UsageMenuStream,
         (Some("presence"), action) => Command::Presence(presence::Request::parse(action, rest)?),
         (Some("settings"), action) => Command::Settings(setup::transfer::Request::parse(action, rest)?),
+        (Some("task"), action) => Command::Task(task::Request::parse(action, rest)?),
         (Some("listen"), None) => Command::Listen(false),
         (Some("listen"), Some(flag)) if flag == "--stop" => Command::Listen(true),
         (Some("listen"), _) => return Err("expected milo listen [--stop]".to_string()),
@@ -642,6 +650,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         Command::Alerts(action, rest) => alerts::command(action, rest),
         Command::Presence(request) => print_report(presence::command(request)),
         Command::Settings(request) => print_report(setup::transfer::command(request)),
+        Command::Task(request) => print_report(task::command(&request)),
         Command::Listen(stop) => {
             if !stop {
                 // Rex runs this as it starts, which is when presence should come up too.
@@ -737,6 +746,9 @@ fn main() {
     }
     if first.as_deref() == Some(OsStr::new("tab-title")) {
         exit(titles::command(&args.collect::<Vec<_>>()));
+    }
+    if first.as_deref() == Some(OsStr::new("task-options")) {
+        exit(task::options(&args.collect::<Vec<_>>()));
     }
     if first.as_deref() == Some(OsStr::new(presence::HELPER_COMMAND)) {
         exit(presence::helper(&args.collect::<Vec<_>>()));
