@@ -140,6 +140,19 @@ pub(crate) fn stop_alerts_worker(dir: &Path) -> io::Result<()> {
     stop_holder(dir, ALERTS_LOCK)
 }
 
+/// Sent to the alerts worker when Rex starts its listener. A process ignores
+/// this signal unless it asked for it, so a worker of an earlier build, or
+/// another process that was given the worker's PID, is left as it was.
+pub(crate) const REX_STARTED: libc::c_int = libc::SIGURG;
+
+/// Tells the alerts worker, if one is running, that Rex has started.
+pub(crate) fn tell_alerts_worker_rex_started(dir: &Path) -> io::Result<()> {
+    match alerts_worker(dir)? {
+        Some(pid) => signal(pid, REX_STARTED),
+        None => Ok(()),
+    }
+}
+
 /// A process started in the background needs a moment to take its lock.
 pub(crate) fn wait_alerts_supervised(dir: &Path) -> io::Result<bool> {
     wait_held(dir, ALERTS_SUPERVISOR_LOCK, START)
@@ -236,15 +249,15 @@ pub(crate) fn signal_holder(dir: &Path, name: &CStr) -> io::Result<()> {
     if let Some(lock) = existing(dir, name)?
         && let Some(pid) = holder(&lock)?
     {
-        signal(pid)?;
+        signal(pid, libc::SIGTERM)?;
     }
     Ok(())
 }
 
-fn signal(pid: libc::pid_t) -> io::Result<()> {
+fn signal(pid: libc::pid_t, number: libc::c_int) -> io::Result<()> {
     // SAFETY: The system has just identified the holder of the lock.
     // The only race is PID reuse before the signal arrives.
-    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+    if unsafe { libc::kill(pid, number) } != 0 {
         let error = io::Error::last_os_error();
         if error.raw_os_error() != Some(libc::ESRCH) {
             return Err(error);
@@ -257,7 +270,7 @@ fn stop_when(dir: &Path, name: &CStr, mut expired: impl FnMut(Instant) -> bool) 
     let Some(lock) = existing(dir, name)? else { return Ok(()) };
     for _ in 0..2 {
         let Some(listener) = holder(&lock)? else { return Ok(()) };
-        signal(listener)?;
+        signal(listener, libc::SIGTERM)?;
         let asked = Instant::now();
         loop {
             match holder(&lock)? {

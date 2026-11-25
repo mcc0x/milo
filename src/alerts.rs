@@ -424,11 +424,13 @@ impl Summary {
 }
 
 /// Start supervision when Rex loads its settings at login or server startup,
-/// but only if the user's current choices call for forwarding.
+/// but only if the user's current choices call for forwarding. A worker that
+/// is waiting for Rex is told to look for it now.
 pub(crate) fn resume() {
     if let Some(alerts) = Alerts::real()
         && alerts.set_up()
     {
+        let _ = lock::tell_alerts_worker_rex_started(&alerts.state);
         let _ = alerts.locked(|edit| {
             if edit.settings().is_ok_and(|settings| settings.has_active())
                 && !lock::alerts_supervised(&alerts.state).unwrap_or(true)

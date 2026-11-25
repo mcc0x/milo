@@ -250,6 +250,14 @@ extern "C" fn end_worker(_: libc::c_int) {
     unsafe { libc::kill(0, libc::SIGKILL) };
 }
 
+/// Set when Rex has started its listener, which a Rex that had gone away does
+/// as it comes back.
+static REX_STARTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn rex_started(_: libc::c_int) {
+    REX_STARTED.store(true, Ordering::Relaxed);
+}
+
 pub(super) fn run(alerts: &Alerts, parent: libc::pid_t, mut recovery: Recovery) -> io::Result<()> {
     // SAFETY: getppid reads this process's parent without taking any pointers.
     let actual_parent = unsafe { libc::getppid() };
@@ -260,6 +268,10 @@ pub(super) fn run(alerts: &Alerts, parent: libc::pid_t, mut recovery: Recovery) 
     }
     // SAFETY: The process group check above makes end_worker safe.
     if unsafe { libc::signal(libc::SIGTERM, end_worker as *const () as libc::sighandler_t) } == libc::SIG_ERR {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: The handler only stores an atomic.
+    if unsafe { libc::signal(lock::REX_STARTED, rex_started as *const () as libc::sighandler_t) } == libc::SIG_ERR {
         return Err(io::Error::last_os_error());
     }
     let Some(_lock) = lock::hold_alerts(alerts.state_dir())? else { return Ok(()) };
@@ -283,7 +295,7 @@ pub(super) fn run(alerts: &Alerts, parent: libc::pid_t, mut recovery: Recovery) 
             recovery.refresh(settings.active_revisions());
             recovery.lost();
             status.update(Health::WaitingForRex, recovery);
-            wait_for_rex(alerts, &settings, retry.next());
+            wait_for_rex(alerts, &settings, &mut retry);
             continue;
         }
         if changed(alerts, &settings).is_some() {
@@ -518,7 +530,7 @@ fn follow(
         recovery.refresh(now.active_revisions());
         recovery.lost();
         status.update(Health::WaitingForRex, *recovery);
-        if let Some(ended) = wait_for_rex(alerts, settings, retry.next()) {
+        if let Some(ended) = wait_for_rex(alerts, settings, retry) {
             return ended;
         }
         source = rex::AlertSource::select(settings.origin);
@@ -526,11 +538,18 @@ fn follow(
     }
 }
 
-fn wait_for_rex(alerts: &Alerts, settings: &Settings, wait: Duration) -> Option<Ended> {
-    let until = Instant::now() + wait;
+/// Waits out the next retry, or only until Rex starts its listener. Rex is
+/// then back, and it repeats nothing it reports before the stream is open
+/// again, so the retries start over from the shortest wait.
+fn wait_for_rex(alerts: &Alerts, settings: &Settings, retry: &mut Backoff) -> Option<Ended> {
+    let until = Instant::now() + retry.next();
     while let Some(left) = until.checked_duration_since(Instant::now()) {
         if let Some(ended) = changed(alerts, settings) {
             return Some(ended);
+        }
+        if REX_STARTED.swap(false, Ordering::Relaxed) {
+            *retry = Backoff::new();
+            return None;
         }
         std::thread::sleep(left.min(TICK));
     }
