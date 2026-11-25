@@ -391,7 +391,7 @@ fn write_png_pixels(
 }
 
 /// Standard base64, with padding.
-fn append_base64(data: &[u8], out: &mut Vec<u8>) {
+pub(crate) fn append_base64(data: &[u8], out: &mut Vec<u8>) {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let encode = |a: u8, b: u8, c: u8| {
         [

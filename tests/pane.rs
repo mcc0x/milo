@@ -2404,3 +2404,49 @@ fn menu_indicator_cli_updates_a_running_stream_for_only_its_own_profile() {
     drop(requests);
     assert!(stream.wait().unwrap().success());
 }
+
+/// A note on a handed-over patch is text: `q`, `?` and a paste go into it, and
+/// Ctrl-C asks before it or a kept note is dropped. Its copy goes to this
+/// terminal as a clipboard request, and nothing is written to the project.
+#[test]
+fn a_review_note_takes_keys_as_text_and_leaves_only_as_a_clipboard_request() {
+    let project = Project::new();
+    let root = project.0.join("project");
+    project.git(&["init", "-q", "-b", "main"]);
+    fs::write(root.join("app.txt"), "one\ntwo\nthree\n").unwrap();
+    project.git(&["add", "-A"]);
+    project.git(&["commit", "-q", "-m", "base"]);
+    let now = "one\ntwo, by the agent\nthree\n";
+    fs::write(root.join("app.txt"), now).unwrap();
+    let patch = project.0.join("edits.patch");
+    fs::write(&patch, "--- a/app.txt\n+++ b/app.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+two, by the agent\n three\n")
+        .unwrap();
+
+    let mut tty = Terminal::run(project.standalone().arg("review").arg(&patch).args(["--from", "the agent"]));
+    tty.shows("patch from the agent");
+    tty.master.write_all(b"i").unwrap();
+    tty.shows("Enter write");
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows("Note on app.txt, removed line 2 (old numbering)");
+    tty.master.write_all(b"q? \x1b[200~pasted\nwords\x1b[201~\x03").unwrap();
+    tty.shows("Discard this note? y discard");
+    tty.shows("q? pasted");
+    tty.master.write_all(b"n\r").unwrap();
+    tty.shows("Kept for review");
+    assert!(!tty.output().contains("\x1b]52;"), "a note was copied before anyone asked");
+
+    tty.master.write_all(b"\x03").unwrap();
+    tty.shows("1 note was not copied. y close anyway");
+    tty.master.write_all(b"p").unwrap();
+    tty.shows("Notes · 1 to copy · 0 copied");
+    tty.master.write_all(b"y").unwrap();
+    tty.shows("Notes · 0 to copy · 1 copied");
+    // "Review note\n\napp.txt, removed line 2 (old numbering):\n> 2 - two\nq? pasted\nwords\n", in base64.
+    let copy = "\x1b]52;c;UmV2aWV3IG5vdGUKCmFwcC50eHQsIHJlbW92ZWQgbGluZSAyIChvbGQgbnVtYmVyaW5nKToKPiAyIC0gdHdvCnE/IHBhc3RlZAp3b3Jkcwo=\x1b\\";
+    assert!(tty.output().contains(copy), "{:?}", tty.output());
+    tty.master.write_all(b"qq").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+    assert_eq!(fs::read_to_string(root.join("app.txt")).unwrap(), now);
+    assert!(!project.0.join("state").exists() && !project.0.join("config").exists());
+}

@@ -188,6 +188,8 @@ move between the patch's files and r reads them again. Milo checks that a
 file still holds the patch's lines, not who wrote them, and shows no diff
 for a file that no longer does. --from NAME says whose patch it is; --float
 opens the review in a floating Rex pane from a program with no terminal.
+i writes a note on its lines and p lists the notes to copy; Milo copies
+them to the terminal's clipboard and sends them to no one.
 The reader only reads until you press e. Edits are a draft until saved, and
 a save never replaces a file that changed on disk without asking. Files at
 a commit, links, pictures and files that are not UTF-8 text stay read-only.

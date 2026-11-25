@@ -233,7 +233,9 @@ It claims no more than it checked. Milo checks that a file still holds the patch
 
 The patch is untrusted and the review writes nothing. Paths go through `safe` in `patch.rs` before any file is looked for, and files are read through `src/reader/working_path.rs` with no link followed. Keep the work limit in `fit.rs`. Do not copy the patch into the state folder, run a program for it, or install anything into an agent's settings.
 
-`cargo test --bin milo handoff:: review::` runs the unit tests and the pane tests, which mix a person's, the agent's and another agent's uncommitted edits in one file. With Rex installed, `cargo test --test rex_lab -- --ignored a_floating_review` opens the floating review on a disposable Rex server.
+Notes leave only as a copy. A note on the patch's lines (`src/review/`) is kept in memory with the lines as they were shown, and `Screen::copy` asks the review's own terminal to put its text on the clipboard. Do not have the review type into a pane (`rex send`, `send-key`, a terminal's `write`, a paste event), press Return, or call a harness to deliver a note, and do not keep notes in the state folder: they quote the patch. A direct send needs two things shown in a disposable session first: the harness itself, not the patch, `--from`, the focused pane or a session's name, says which running agent handed the patch over; and the delivery cannot join, submit or replace words already typed at that agent's prompt, nor run when the agent is gone. [The record for each harness](docs/evidence/review-notes/README.md) says where each one fell short; add to it rather than to the code until one passes both.
+
+`cargo test --bin milo handoff::` and `cargo test --bin milo review::` run the unit tests and the pane tests, which mix a person's, the agent's and another agent's uncommitted edits in one file. `cargo test --test pane a_review_note` writes and copies a note through a real terminal. With Rex installed, `cargo test --test rex_lab -- --ignored a_floating_review` opens the floating review on a disposable Rex server, and `cargo test --test rex_lab -- --ignored review_notes` checks there that copied notes reach the review's clipboard and that panes holding a draft are left as they were.
 
 ### Adding a language to the reader
 
@@ -398,12 +400,17 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/reader/edit_tests.rs` | Checks editing, saving, conflicts, read-only files, kept drafts, and formatting. |
 | `src/reader/inbox.rs` | Carries a request to open one more file to a reader already running in a Rex block, through a pipe in the state folder. |
 | `src/reader/handed.rs` | Loads a file with only a handed-over patch's edits marked, through no link and never to edit. |
+| `src/reader/pick.rs` | Moves a line cursor over a handed-over patch and reports the lines under it, for a note. |
 | `src/reader/rescue.rs` | Keeps the draft of a reader ended from outside, and marks a Rex reader that has unsaved edits. |
 | `src/reader/tabs.rs` | Holds the files open in one reader as tabs, draws their strip, and asks about every unsaved draft before a tab or the reader closes. |
 | `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
 | `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
 | `src/host.rs` | Names the computer Milo runs on and says whether its Rex server and command are ones Milo was checked with. |
-| `src/review.rs` | Runs `milo review`: a read-only reader over each file of a handed-over patch, and its floating form for a program with no terminal. |
+| `src/review.rs` | Runs `milo review`: a read-only reader over each file of a handed-over patch, its notes, and its floating form for a program with no terminal. |
+| `src/review/compose.rs` | Holds the text of a note while it is written: wrapping, the cursor and its keys. |
+| `src/review/list.rs` | Lists a review's notes with the text each is copied as. |
+| `src/review/note_tests.rs` | Checks what notes hold, what is copied and when, and that the reading position survives. |
+| `src/review/notes.rs` | Keeps a review's notes with the lines they quote, and words them for copying. |
 | `src/rex.rs` | Calls Rex for setup, floating readers, the listener, and the presence helper's watch. |
 | `src/rex/server.rs` | Asks a Rex server for its version, host ID and connected apps, and starts, forwards and ends another host's settings editor. |
 | `src/rex_presence.lua` | Tells the presence helper whether any Rex app has a session open and, only for the names chosen, which session is in front. |
@@ -517,7 +524,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
 | `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
 | `tests/rex_hosts.rs` | Follows Doctor, a forwarded settings editor and a settings bundle across two disposable Rex servers, and checks the first host's files stay as they were. |
-| `tests/rex_lab.rs` | Exercises Rex layouts and presence on a disposable server, edits files in floating reader tabs, and opens a floating review of an agent-supplied patch. |
+| `tests/rex_lab.rs` | Exercises Rex layouts and presence on a disposable server, edits files in floating reader tabs, opens a floating review of an agent-supplied patch, and copies review notes without touching other panes. |
 | `tests/settings-bench.py` | Times settings requests, a competing save and first state beside a responding Rex stand-in. |
 | `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |

@@ -4,7 +4,7 @@ Milo only reads a project, with one exception: the reader writes a file when you
 
 The reader can show where a file link points without reading its target. It refuses a path through a folder link that leaves the project and does not read devices or pipes as files. Text from the project cannot send terminal controls.
 
-`milo review` shows a patch that a program handed over. The patch's text is untrusted: its paths are refused unless they can only mean a file below the project folder and outside `.git`, each file is opened from the held project folder through no link, and its lines are found in the file in memory within a fixed amount of work. No program runs and nothing is written. See [reviewing an agent's edits](panes.md#reviewing-an-agents-edits).
+`milo review` shows a patch that a program handed over. The patch's text is untrusted: its paths are refused unless they can only mean a file below the project folder and outside `.git`, each file is opened from the held project folder through no link, and its lines are found in the file in memory within a fixed amount of work. No program runs and nothing is written. Notes on its lines are kept in memory and leave only when the person copies them, as a clipboard request to the review's own terminal: no pane is typed into and no agent is sent anything. See [reviewing an agent's edits](panes.md#reviewing-an-agents-edits).
 
 ## Writing
 
