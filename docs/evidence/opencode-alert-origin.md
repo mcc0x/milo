@@ -1,0 +1,7 @@
+# What an OpenCode alert origin identifies
+
+An alert origin identifies a Rex **session**, not the program that wrote the event. With origin sharing on, a session named `project/feature · opencode` can contribute `feature` after Milo verifies the local host, session, and unique terminal block. The project, suffix, tab title, and private program text are not part of that origin. With sharing off, the same event contributes no label.
+
+The [real Rex fixture](../../tests/alerts/real_rex.rs) exercises both choices on a disposable server. A shell writes a synthetic OSC 7501 permission event; the real Milo workers post to loopback Telegram and Discord substitutes. Restarting Rex and pausing Telegram leaves Discord delivering alone. This does not test either external service.
+
+**Automatic OpenCode tab suffix deferred.** In a disposable Rex preview.23 terminal on macOS, a harmless `/bin/sleep` process started with `argv0=opencode` reported `name=sleep`, `path=/bin/sleep`, `invoked_path=/bin/sleep`, and `argv0=opencode` for both child and foreground. The existing title matcher accepts any one matching basename, so adding an allowlist entry would misidentify that process. The [OpenCode launch checks](agent-task-launcher/README.md) establish interactivity, not a stable executable identity for native and wrapped installs. Revisit with process snapshots from real supported builds and a rule that declines ambiguous or conflicting metadata. Do not use terminal titles, prompts, or foreground focus as substitutes.

@@ -60,7 +60,7 @@ fn label_text(label: Cow<'_, str>) -> Option<String> {
     // Recognize only `project[/worktree] · agent` in the verified session's
     // structured label. Disclose one slug, not a path or a terminal title.
     if let Some((checkout, agent)) = label.split_once(" · ") {
-        if !matches!(agent, "claude" | "codex" | "omp") {
+        if !matches!(agent, "claude" | "codex" | "omp" | "opencode") {
             return None;
         }
         let (project, worktree) = checkout.split_once('/').unwrap_or((checkout, checkout));
@@ -171,6 +171,9 @@ mod tests {
             ("Release_Review-2", Some("Release_Review-2")),
             ("project · omp", Some("project")),
             ("project/worktree · codex", Some("worktree")),
+            ("project/feature-2 · opencode", Some("feature-2")),
+            ("private/path/deeper · opencode", None),
+            ("project/worktree · opencode extra", None),
             ("secret/worktree · not-ours", None),
             ("/private/file · claude", None),
             ("project/worktree", None),
@@ -188,5 +191,17 @@ mod tests {
         let longest = "a".repeat(LABEL_LIMIT);
         assert_eq!(resolve(view(&longest, false)).as_deref(), Some(longest.as_str()));
         assert_eq!(resolve(view(&(longest + "a"), false)), None);
+    }
+
+    #[test]
+    fn an_opencode_shaped_tab_or_ambiguous_block_cannot_supply_an_origin() {
+        let name = "project/worktree · opencode";
+        assert_eq!(resolve(view("/private/path", false).replace("Run Tab", name)), None);
+        let duplicate = view(name, false).replace(
+            r#""blocks":[]"#,
+            &format!(r#""blocks":[{{"block_id":"{BLOCK}","creator_name":"{TERMINAL}","host_id":"{HOST}"}}]"#),
+        );
+        assert_eq!(resolve(duplicate), None);
+        assert_eq!(resolve(view(name, false).replace(HOST, "different-host")), None);
     }
 }
