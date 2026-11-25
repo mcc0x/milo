@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use crate::rex::{self, CommandVersion, Server, Viewers};
 
 /// The revision of Rex's control API that Milo's Lua files and calls were checked against.
-pub(crate) const CHECKED_API: u64 = 18;
+pub(crate) const CHECKED_API: u64 = 19;
 
 const OLDER: &str = "This Rex server is older than the Rex Milo was checked with. Update Rex on this host.";
 const COMMAND_DIFFERS: &str =

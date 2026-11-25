@@ -139,8 +139,10 @@ milo review "$record/edits.patch" --from "Claude Code" --float
 ```
 
 `--float` opens a floating reader over the Rex tab you run in and needs
-`REX_SESSION` and `REX_BLOCK` in your environment. It prints how many files
-it shows and one `Not shown:` line with the reason for each file it cannot
+`REX_BLOCK` in your environment, which Rex sets in every terminal. Rex before
+preview.23 also set `REX_SESSION`, and Milo uses it when it is there. It
+prints how many files it shows and one `Not shown:` line with the reason for
+each file it cannot
 show; pass those on to the user as they are. Without Rex, or if `--float`
 fails, give the user `milo review PATCH` to run in their terminal. Keep the
 patch outside the project and leave it in place while the review is open.

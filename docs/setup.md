@@ -67,7 +67,7 @@ Turn on **Arrange new shell tabs** to apply the layout to new shell tabs, includ
 
 Use the appearance choices to preview icons, choose text change marks, and turn animated activity marks off. Usage shows Codex, Claude Code and OpenCode only while each has a figure to show; choose **Always show** or **Hide** for a tool to [decide that yourself](usage.md#which-tools-appear). Use the workflow choices to pin Outline and History to the starting project or follow the shell they were opened beside. Milo does not change Rex's font, theme, shortcuts or notification settings.
 
-**After Rex restarts, a sidebar can come back as shells instead of Milo.** The dividers and pane labels survive, but on Rex preview.21 (server API 18) the running programs do not. To restore the sidebar, focus its tab’s working shell and run **Milo: Arrange This Tab** in the Rex app. Milo checks what’s running before it offers to rebuild. New shell tabs are arranged as before.
+**After Rex restarts, a sidebar can come back as shells instead of Milo.** The dividers and pane labels survive, but on Rex preview.23 (server API 19) the running programs do not. To restore the sidebar, focus its tab’s working shell and run **Milo: Arrange This Tab** in the Rex app. Milo checks what’s running before it offers to rebuild. New shell tabs are arranged as before.
 
 **Text zoom is separate from split size.** On Rex preview.21 (server API 18), Milo can read a terminal's cell dimensions, but creating or resizing a terminal does not set the font the Mac app renders. The app exposes relative font actions and an app-wide [starting font size](https://www.superlogical.com/rex/docs/reference/mac-settings.md#setting-typography-font-size), not an absolute per-pane zoom setting. Milo therefore remembers divider positions, not text zoom, for Outline, History and Usage.
 
@@ -171,12 +171,14 @@ Several Rex apps attached to one server, such as a Mac and a phone, are one host
 
 ```
 Host: studio (Rex host d4744373)
-Rex server: 0.1.0-preview.21, API 18; rex command: the same
-Rex compatibility: checked with API 18. This is the Rex API Milo was checked with.
+Rex server: 0.1.0-preview.23, API 19; rex command: the same
+Rex compatibility: checked with API 19. This is the Rex API Milo was checked with.
 Rex apps: open on this computer
 ```
 
-Milo’s Rex files are checked against API revision 18. A newer server is noted and is no warning, because Rex keeps older calls working. Health warns in two cases: the server is older than that revision, or the `rex` command and the server are different versions. In the second case, restart or update Rex before saving a layout, because Milo validates its Rex files with the command and the server is what reads them.
+Milo’s Rex files are checked against API revision 19, which is Rex Server & CLI 0.1.0-preview.23. A newer server is noted and is no warning, because Rex keeps older calls working. Health warns in two cases: the server is older than that revision, or the `rex` command and the server are different versions. In the second case, restart or update Rex before saving a layout, because Milo validates its Rex files with the command and the server is what reads them.
+
+Milo acts on the pane it was run in, never on whichever pane has focus. It knows that pane from `REX_BLOCK`, which Rex sets in every terminal, and lets Rex find the session that holds it. Rex before preview.23 also set `REX_SESSION`; where a terminal still has it, Milo uses that session as before.
 
 The computer’s name stays on that computer and in the pages its editor serves. It is not sent to Telegram, Discord or the relay.
 
@@ -348,7 +350,7 @@ Deduplication lasts for one continuous Rex subscription. Changing the label or c
 
 **When things go wrong.** Ordinary alerts are spaced about a second apart and limited to 20 a minute. Milo drops excess alerts and says how many were omitted in the next message. If a destination asks it to slow down, Milo waits and retries the alert if the requested wait is within a minute. A failing destination gets up to three attempts per alert. After a confirmed credential refusal, Milo stops automatic sends to that destination, including notices. Check the connection, then re-save it or turn that provider off and on to retry. A refusal by Telegram does not pause Discord, or vice versa. `milo alerts` reports the last outcome.
 
-**When Rex goes away.** Milo keeps your forwarding choices. One worker listens for fresh events; if it exits unexpectedly, Milo retries it, and if Rex disconnects, Milo waits and reconnects. Repeated failures increase the wait up to 30 seconds. `milo alerts` and Settings distinguish waiting for Rex or retrying the worker from a user pause. `milo alerts off` pauses both destinations, even during a retry. Use `milo alerts off discord` (or `telegram`) to pause just one. Reconnecting Rex or starting the login listener does not undo a pause.
+**When Rex goes away.** Milo keeps your forwarding choices. One worker listens for fresh events; if it exits unexpectedly, Milo retries it, and if Rex disconnects, Milo waits and reconnects. Repeated failures increase the wait up to 30 seconds. When Rex starts again and starts Milo’s [saved layout listener](#in-rex), a waiting worker reconnects within a few seconds instead of finishing that wait; without the layout integration it reconnects at its next retry. Rex does not repeat an alert raised before Milo reconnects. `milo alerts` and Settings distinguish waiting for Rex or retrying the worker from a user pause. `milo alerts off` pauses both destinations, even during a retry. Use `milo alerts off discord` (or `telegram`) to pause just one. Reconnecting Rex or starting the login listener does not undo a pause.
 
 Use **Refresh status** in the browser or `r` in the setup panel to check again without changing forwarding. See [Waiting for Rex and per-destination lifecycle notices](img/alert-forwarding-after.webp) in desktop and mobile Settings.
 
