@@ -52,6 +52,51 @@ pub use pick::{Picked, PickedLine, Viewed};
 const LEAD: usize = 3;
 const CHANGE_NOTICE: Duration = Duration::from_secs(4);
 
+/// A place in a file as tools print it: a line and sometimes a column, both counted from one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Spot {
+    pub line: u32,
+    pub column: Option<u32>,
+}
+
+impl Spot {
+    /// Reads `LINE` or `LINE:COLUMN`. There is no line zero; a column of zero is no column.
+    pub fn parse(text: &str) -> Option<Self> {
+        let number = |digits: &str| {
+            (!digits.is_empty() && digits.len() <= 9 && digits.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| digits.parse::<u32>().ok())
+                .flatten()
+        };
+        let (line, column) = match text.split_once(':') {
+            Some((line, column)) => (line, Some(number(column)?)),
+            None => (text, None),
+        };
+        let line = number(line).filter(|&line| line > 0)?;
+        Some(Self { line, column: column.filter(|&column| column > 0) })
+    }
+}
+
+impl std::fmt::Display for Spot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.column {
+            Some(column) => write!(f, "{}:{column}", self.line),
+            None => write!(f, "{}", self.line),
+        }
+    }
+}
+
+/// Asks the reader running in the Rex block `block` to show `file` of `project`, at `spot`
+/// if one is given. False if no reader there took the request: a reader keeps to the
+/// project it was opened for, so one that noted another project is not asked.
+pub fn show_in(block: &str, project: &Path, file: &Path, spot: Option<Spot>) -> bool {
+    rescue::state_dir().is_some_and(|state| ask_reader(&state, block, project, file, spot))
+}
+
+fn ask_reader(state: &Path, block: &str, project: &Path, file: &Path, spot: Option<Spot>) -> bool {
+    inbox::project(state, block).is_some_and(|held| held == project)
+        && inbox::send(state, block, file, inbox::At::from(spot))
+}
+
 /// The file open in a pane and the position from which it is shown.
 pub struct Reader {
     source: Source,
@@ -75,6 +120,10 @@ pub struct Reader {
     /// The current change can share its viewport top with other changes.
     current_change: Option<usize>,
     change_notice: Option<(JumpNotice, Instant)>,
+    /// The line the reader was asked to show, which stays marked.
+    spot: Option<Spot>,
+    /// That line has yet to be brought into view: the file's lines or the pane's size were not known.
+    placing: bool,
     /// Display columns skipped on the left.
     pan: usize,
     /// Rows of content on screen, set by the last draw.
@@ -117,6 +166,8 @@ enum JumpNotice {
         lead: &'static str,
         text: &'static str,
     },
+    /// The place the reader was asked to show.
+    Spot(Spot),
 }
 
 /// A working file can change; a commit needs only its name and date.
@@ -190,7 +241,8 @@ impl Floated {
     /// Offers a file of the project at `root` to this reader. A reader keeps to
     /// the project it was opened for, so another project's file is never a tab of it.
     fn offer(&self, state: &Path, root: &Path, file: &Path, commit: Option<&str>) -> Offer {
-        if self.root == root && inbox::send(state, &self.block, file, commit) {
+        let at = commit.map_or(inbox::At::Now, inbox::At::Commit);
+        if self.root == root && inbox::send(state, &self.block, file, at) {
             Offer::Taken
         } else if rescue::block_has_draft(state, &self.block) {
             Offer::Unsaved
@@ -470,6 +522,15 @@ impl Reader {
         self.source.working().ok().map(|work| &work.repo)
     }
 
+    /// The project whose files this reader was opened to show, where it has one.
+    pub(super) fn project(&self) -> Option<&Path> {
+        match &self.source {
+            Source::Working(work) => Some(&work.repo.root),
+            Source::Committed { project, .. } => Some(project),
+            Source::Handed(_) => None,
+        }
+    }
+
     fn new(path: String, source: Source, icons: IconMode, preference_note: Option<&'static str>) -> Self {
         Self {
             source,
@@ -486,6 +547,8 @@ impl Reader {
             review: Review::default(),
             current_change: None,
             change_notice: None,
+            spot: None,
+            placing: false,
             pan: 0,
             rows: 0,
             columns: 0,
@@ -528,12 +591,47 @@ impl Reader {
         self.folds().row_count(self.body.lines().len()).saturating_sub(self.rows.max(1))
     }
 
-    /// Forgets the position among the changes. What was said about the file itself stays its full time.
+    /// Forgets the position among the changes. What was said about the file itself, or about
+    /// the place it was opened at, stays its full time.
     fn clear_change(&mut self) {
         self.current_change = None;
-        if !matches!(self.change_notice, Some((JumpNotice::Said { .. }, _))) {
+        if !matches!(self.change_notice, Some((JumpNotice::Said { .. } | JumpNotice::Spot(_), _))) {
             self.change_notice = None;
         }
+    }
+
+    /// Shows the file at `spot`. A draft keeps its text and gets its cursor there; while
+    /// reading, the line is marked and brought into view once it can be.
+    pub fn go_to(&mut self, spot: Spot, now: Instant) {
+        if let Some(editor) = &mut self.editor {
+            editor.go_to(spot);
+            return;
+        }
+        self.spot = Some(spot);
+        self.placing = true;
+        self.change_notice = Some((JumpNotice::Spot(spot), now + CHANGE_NOTICE));
+    }
+
+    /// Brings the line asked for into view, with a few lines above it, once the file's lines are loaded.
+    fn place_spot(&mut self) {
+        let (true, Some(spot), Body::Text(text)) = (self.placing, self.spot, &self.body) else { return };
+        self.placing = false;
+        let line = spot.line as usize - 1;
+        if !self.markdown_source && text.markdown.is_some() {
+            if let (Some(MarkdownBody::Populated), Some(preview)) = (text.markdown, &mut self.markdown_preview) {
+                preview.go_to_line(line);
+            }
+            return;
+        }
+        let row = self.source_row(line);
+        if self.folds().hides(row) {
+            // A line folded away among unchanged ones is shown in the full file.
+            self.review.show_whole();
+        }
+        self.opening = false;
+        self.current_change = None;
+        self.pan = 0;
+        self.set_source_top(row.saturating_sub(self.lead()));
     }
 
     fn scroll(&mut self, delta: isize) {
@@ -930,7 +1028,12 @@ impl Reader {
     /// Starts editing the file, or says why it is read-only.
     pub fn edit(&mut self, now: Instant) -> After {
         match self.open_editor() {
-            Ok(editor) => {
+            Ok(mut editor) => {
+                // A draft that opens on the marked line starts there, not at the top of the view.
+                let shown = editor.top()..editor.top() + self.rows.max(1);
+                if let Some(spot) = self.spot.filter(|spot| shown.contains(&(spot.line as usize - 1))) {
+                    editor.go_to(spot);
+                }
                 if let Some(preview) = &mut self.markdown_preview {
                     preview.stop_follow();
                 }

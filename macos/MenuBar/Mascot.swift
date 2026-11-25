@@ -4,9 +4,11 @@ import AppKit
 enum MiloMark {
     static let awake = draw(blinking: false)
     static let blink = draw(blinking: true)
+    /// The mascot with a small dot beside it, for a Rex pane that needs the person.
+    static let needed = draw(blinking: false, dot: true)
 
-    private static func draw(blinking: Bool) -> NSImage {
-        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { _ in
+    private static func draw(blinking: Bool, dot: Bool = false) -> NSImage {
+        let image = NSImage(size: NSSize(width: dot ? 24 : 18, height: 18), flipped: true) { _ in
             let face = NSBezierPath()
             face.move(to: NSPoint(x: 2, y: 8))
             face.line(to: NSPoint(x: 3.5, y: 1.6)); face.line(to: NSPoint(x: 8, y: 5))
@@ -16,6 +18,8 @@ enum MiloMark {
             face.curve(to: NSPoint(x: 3, y: 14), controlPoint1: NSPoint(x: 13, y: 17.7), controlPoint2: NSPoint(x: 6, y: 17.5))
             face.curve(to: NSPoint(x: 2, y: 8), controlPoint1: NSPoint(x: 1, y: 12.6), controlPoint2: NSPoint(x: 1, y: 10))
             face.close(); NSColor.black.setFill(); face.fill()
+            // A template image takes the menu bar's own colour, so the dot never stands out more than the mascot.
+            if dot { NSBezierPath(ovalIn: NSRect(x: 19, y: 2, width: 5, height: 5)).fill() }
             guard let cg = NSGraphicsContext.current?.cgContext else { return false }
             cg.setBlendMode(.clear)
             for x in [8.0, 13.0] {

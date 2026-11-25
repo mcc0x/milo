@@ -1,6 +1,6 @@
 # How milo works
 
-Milo only reads a project, with one exception: the reader writes a file when you save an edit of it. It keeps the user's Git settings, such as global ignore rules, but overrides settings that could run a program. That includes hooks, content filters, external diff and text converters, file-system monitors and on-demand fetching. It caps Git's time and output. Git reports a change to the commit recorded for a submodule; milo does not inspect uncommitted or untracked files inside it.
+Milo only reads a project, with two exceptions, each of which you ask for: the reader writes a file when you save an edit of it, and `milo task new` adds a Git worktree for a task. It keeps the user's Git settings, such as global ignore rules, but overrides settings that could run a program. That includes hooks, content filters, external diff and text converters, file-system monitors and on-demand fetching. It caps Git's time and output. Git reports a change to the commit recorded for a submodule; milo does not inspect uncommitted or untracked files inside it.
 
 The reader can show where a file link points without reading its target. It refuses a path through a folder link that leaves the project and does not read devices or pipes as files. Text from the project cannot send terminal controls.
 
@@ -13,6 +13,14 @@ An edit is a draft in memory. A save opens the file from the project folder the 
 A formatter is a program of a fixed name, found in the folders of `PATH` that are written in full. It runs only when asked for, in a process group of its own, for at most ten seconds, with the draft on its standard input. It is not given the file to write. See [formatting](panes.md#formatting).
 
 Outside the project, milo keeps three things in its state folder for the editor: the draft of a reader that was ended with unsaved changes; in Rex, a mark that a floating reader has unsaved changes in some tab so that another pane does not replace it; and, also in Rex, a pipe under `readers` named after the reader's block, on which the pane that opened it asks for one more file as a tab. The mark names the reader's process and is ignored once that process is gone. The pipe is in a folder only you can use, carries a path and an optional commit ID and nothing back, and is removed when its reader ends. A request is read the way `milo view`'s own arguments are, so it can open a file for reading and nothing more.
+
+## Starting a task
+
+`milo task new` is the one place Milo changes a repository and starts a session. It checks everything it can refuse before it creates anything: that the folder is in a Git project, that the agent's program is installed, that the branch, its starting commit and the worktree's folder are usable, and that a Rex server answers. Then it runs `git worktree add` when a new worktree was asked for, and asks Rex for a session whose terminal runs the agent in that worktree. The Rex action **Milo: New Agent Task…** collects the same choices in Rex's own prompts and runs the same command, so there is one way a task starts.
+
+The worktree is added as your own `git worktree add` would add it, with your Git settings, including checkout hooks and content filters: it is a checkout you will work in, and without them it would not hold the project's files. The new branch starts at the full commit ID Milo resolved, so it tracks no remote branch. The checkout the command was run from is never switched.
+
+The agent is found by its fixed name in a folder that the search path names in full, first on the path of the process that asked and then on the one your login shell sets up, which Milo asks that shell for once, apart from your terminal. The prompt goes from Milo to Rex to the agent as one argument and is never read by a shell. The session is created on the server and no app is asked to show it. See [starting an agent task](setup.md#start-an-agent-task).
 
 ## Updates and drawing
 

@@ -13,6 +13,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use super::Spot;
 use super::buffer::{Buffer, Pos};
 use super::content::LIMIT;
 use super::disk::{self, BOM, Original, SaveError, Snapshot};
@@ -337,6 +338,21 @@ impl Editor {
     /// The line at the top of the view, counted from the top of the file.
     pub(super) fn top(&self) -> usize {
         self.top
+    }
+
+    /// Puts the cursor at `spot`, as near as the draft's lines allow. The draft's
+    /// text is untouched, and a question that is waiting keeps the cursor where it is.
+    pub(super) fn go_to(&mut self, spot: Spot) {
+        if self.prompt.is_some() {
+            return;
+        }
+        let row = (spot.line as usize - 1).min(self.buffer.len() - 1);
+        let text = self.buffer.row(row);
+        let column = spot.column.map_or(0, |column| column as usize - 1);
+        let col = text.char_indices().nth(column).map_or(text.len(), |(at, _)| at);
+        self.cursor = Pos { row, col };
+        self.column = None;
+        self.follow = true;
     }
 
     /// Whether the draft differs from what was last saved.

@@ -1,8 +1,11 @@
 //! Calls Rex for floating readers, Markdown previews, setup, and the new-tab listener.
 
+mod attention;
 mod preview;
 mod server;
+pub(crate) mod task;
 
+pub(crate) use attention::{AttentionWatch, jump};
 pub(crate) use preview::{available as preview_available, launch as preview, preview_anchor};
 
 #[cfg(target_os = "macos")]
@@ -38,9 +41,9 @@ pub(crate) fn layout_available() -> Option<bool> {
 }
 
 fn layout_catalog(output: &[u8]) -> Option<bool> {
-    const ACTIONS: [&str; 10] = [
+    const ACTIONS: [&str; 11] = [
         "milo_layout", "milo_outline", "milo_history", "milo_usage", "milo_close", "milo_peek_outline",
-        "milo_close_peek", "milo_remember_layout", "milo_reset_layout", "milo_name_session",
+        "milo_close_peek", "milo_remember_layout", "milo_reset_layout", "milo_name_session", "milo_open_output",
     ];
     let [actions] = crate::json::Value::parse(output)?.fields(["actions"]);
     let mut missing = (1u16 << ACTIONS.len()) - 1;
@@ -728,6 +731,11 @@ fn uuid(id: &str) -> bool {
         })
 }
 
+/// Whether this program runs in the Rex terminal that `block` names in full.
+pub(crate) fn runs_in(block: &str) -> bool {
+    term::host() == term::Host::Rex && exact_block(OsStr::new(block)).is_some()
+}
+
 /// What an observer script prints: an update a line, of which the latest counts.
 trait Report: Sized {
     const UNCHANGED: Self;
@@ -883,9 +891,10 @@ mod tests {
         let released = r#"{"actions":[
             {"name":"milo_layout"},{"name":"milo_outline"},{"name":"milo_history"},{"name":"milo_usage"},
             {"name":"milo_close"},{"name":"milo_peek_outline"},{"name":"milo_close_peek"},
-            {"name":"milo_remember_layout"},{"name":"milo_reset_layout"},{"name":"an_unrelated_action"}]}"#;
+            {"name":"milo_remember_layout"},{"name":"milo_reset_layout"},{"name":"milo_name_session"},
+            {"name":"an_unrelated_action"}]}"#;
         assert_eq!(layout_catalog(released.as_bytes()), Some(false));
-        let current = released.replace("an_unrelated_action", "milo_name_session");
+        let current = released.replace("an_unrelated_action", "milo_open_output");
         assert_eq!(layout_catalog(current.as_bytes()), Some(true));
         let partial = current.replace("milo_close_peek", "milo_close");
         assert_eq!(layout_catalog(partial.as_bytes()), Some(false));

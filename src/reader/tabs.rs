@@ -81,15 +81,17 @@ pub struct Tabs {
 impl Tabs {
     /// A reader of one file, which in a Rex block takes requests to show more.
     pub fn new(reader: Reader) -> Self {
-        let block = std::env::var("REX_BLOCK").ok().filter(|_| !cfg!(test) && rex::inside());
+        // Rex names the block in every terminal it starts. Listening there needs no session.
+        let block = std::env::var("REX_BLOCK").ok().filter(|id| !cfg!(test) && (rex::inside() || rex::runs_in(id)));
         Self::placed(reader, rescue::state_dir().zip(block).map(|(state, block)| Place { state, block }))
     }
 
     pub(super) fn placed(reader: Reader, place: Option<Place>) -> Self {
+        let inbox = place.as_ref().and_then(|place| Inbox::open(&place.state, &place.block, reader.project()));
         Self {
             tabs: vec![reader],
             shown: 0,
-            inbox: place.as_ref().and_then(|place| Inbox::open(&place.state, &place.block)),
+            inbox,
             place,
             mark: None,
             strip_rows: 0,
@@ -107,7 +109,8 @@ impl Tabs {
         &mut self.tabs[self.shown]
     }
 
-    /// Shows the file asked for: in the tab that has it, or in a new one.
+    /// Shows the file asked for: in the tab that has it, or in a new one, and at
+    /// the place asked for. A tab's draft stays as it is.
     /// Returns false if it could not be opened, which the shown tab then says.
     pub(super) fn open(&mut self, request: &Request, now: Instant) -> bool {
         let opened = if let Some(id) = &request.commit {
@@ -123,6 +126,9 @@ impl Tabs {
             WorkingTarget::resolve(&request.file).ok_or("That file is not in a folder.").map(|target| {
                 if !self.select_existing(|tab| target.matches(tab)) {
                     self.add(|| target.load());
+                }
+                if let Some(spot) = request.spot {
+                    self.reader_mut().go_to(spot, now);
                 }
             })
         };
@@ -534,7 +540,7 @@ mod tests {
     /// Asks for one more file, as the outline does.
     fn ask(tabs: &mut Tabs, f: &Fixture, path: &str) {
         drawn(tabs, 80, 8);
-        assert!(tabs.open(&Request { file: f.root.join(path), commit: None }, Instant::now()));
+        assert!(tabs.open(&Request { file: f.root.join(path), commit: None, spot: None }, Instant::now()));
         tabs.reader_mut().state = Some(state(f));
     }
 
@@ -616,6 +622,30 @@ mod tests {
         // No filesystem event: the pane's post-open reconciliation must see it.
         assert!(tabs.check());
         assert!(drawn(&mut tabs, 64, 10).iter().any(|row| row.ends_with("saved in the gap")));
+    }
+
+    #[test]
+    fn a_pane_that_did_not_open_a_reader_reaches_it_only_for_the_readers_own_project() {
+        use super::super::ask_reader;
+
+        let f = Fixture::new();
+        f.write("a.txt", "first\n");
+        f.write("b.txt", "one\ntwo\nthree\n");
+        f.commit("two files");
+        let other = Fixture::new();
+        other.write("b.txt", "another project\n");
+        let root = f.root.canonicalize().unwrap();
+        let place = Place { state: state(&f), block: BLOCK.into() };
+        let mut tabs = Tabs::placed(reader(&f, "a.txt"), Some(place));
+        let spot = Some(crate::reader::Spot { line: 2, column: None });
+
+        let elsewhere = other.root.canonicalize().unwrap();
+        assert!(!ask_reader(&state(&f), BLOCK, &elsewhere, &elsewhere.join("b.txt"), spot));
+        assert!(matches!(tabs.check_external(), External::Unchanged));
+        assert!(ask_reader(&state(&f), BLOCK, &root, &root.join("b.txt"), spot));
+        assert!(matches!(tabs.check_external(), External::NewScope));
+        let rows = drawn(&mut tabs, 40, 8);
+        assert_eq!((rows[0].as_str(), rows[7].as_str()), (" a.txt  b.txt ×", " Line 2 · ? help"));
     }
 
     #[test]
@@ -756,7 +786,7 @@ mod tests {
         assert_eq!(drawn(&mut tabs, 40, 6)[0], " *a.txt  b.txt ×");
 
         // The same file by another spelling of its path is still the same file.
-        let again = Request { file: f.root.join("src/../src/./a.txt"), commit: None };
+        let again = Request { file: f.root.join("src/../src/./a.txt"), commit: None, spot: None };
         assert!(tabs.open(&again, Instant::now()));
         let rows = drawn(&mut tabs, 40, 6);
         assert_eq!(rows[0], " *a.txt ×  b.txt");
@@ -766,17 +796,59 @@ mod tests {
         let mut repo = crate::git::Repo::open(&f.root).unwrap();
         repo.read();
         let hash = repo.history(1).unwrap()[0].hash.clone();
-        let at_commit = Request { file: f.root.join("b.txt"), commit: Some(hash.clone()) };
+        let at_commit = Request { file: f.root.join("b.txt"), commit: Some(hash.clone()), spot: None };
         for _ in 0..2 {
             assert!(tabs.open(&at_commit, Instant::now()));
         }
         assert_eq!(drawn(&mut tabs, 60, 6)[0], format!(" *a.txt  b.txt  b.txt@{} ×", &hash[..7]));
 
         // What cannot be opened is said, and no tab is made for it.
-        assert!(!tabs.open(&Request { file: "b.txt".into(), commit: Some("not hex".into()) }, Instant::now()));
+        let not_hex = Request { file: "b.txt".into(), commit: Some("not hex".into()), spot: None };
+        assert!(!tabs.open(&not_hex, Instant::now()));
         let rows = drawn(&mut tabs, 60, 6);
         assert_eq!(rows[5], " That is not a commit ID. · ? help");
         assert_eq!(rows[0].matches("b.txt").count(), 2);
+    }
+
+    #[test]
+    fn a_file_asked_for_at_a_line_shows_that_line_and_leaves_a_draft_as_it_was() {
+        let f = Fixture::new();
+        let numbered: String = (1..=60).map(|n| format!("line {n}\n")).collect();
+        f.write("long.txt", &numbered);
+        f.write("b.txt", "second\n");
+        f.commit("first");
+        let mut tabs = opened(&f, &["b.txt"]);
+        let at = |line, column| {
+            let spot = Some(crate::reader::Spot { line, column });
+            Request { file: f.root.join("long.txt"), commit: None, spot }
+        };
+
+        // A new tab opens with the line in view, a few lines above it, and says where it was sent.
+        assert!(tabs.open(&at(40, Some(3)), Instant::now()));
+        tabs.reader_mut().state = Some(state(&f));
+        let rows = drawn(&mut tabs, 40, 9);
+        assert_eq!(rows[0], " b.txt  long.txt ×");
+        assert!(rows[2].trim_start().starts_with("37   line 37") && rows[5].trim_start().starts_with("40   line 40"));
+        assert_eq!(rows[8], " Line 40:3 · ? help");
+
+        // Editing starts at the place. A draft keeps its text and unsaved mark when the file
+        // is asked for again; only its cursor goes to the new place.
+        tabs.key(Key::Char('e'));
+        typed(&mut tabs, "draft ");
+        tabs.key(Key::Ctrl(b'p'));
+        assert!(tabs.open(&at(2, Some(6)), Instant::now()));
+        let rows = drawn(&mut tabs, 40, 9);
+        assert_eq!(rows[0], " b.txt  *long.txt ×");
+        typed(&mut tabs, "!");
+        tabs.key(Key::Ctrl(b's'));
+        let saved = fs::read_to_string(f.root.join("long.txt")).unwrap();
+        assert!(saved.starts_with("line 1\nline !2\n") && saved.contains("\nlidraft ne 40\n"), "{saved}");
+
+        // A line past the end of the file shows the end.
+        tabs.key(Key::Esc);
+        assert!(tabs.open(&at(900, None), Instant::now()));
+        let rows = drawn(&mut tabs, 40, 9);
+        assert!(rows[7].contains("60   line 60") && rows[8].starts_with(" Line 900"), "{rows:?}");
     }
 
     #[test]
@@ -810,7 +882,7 @@ mod tests {
         let f = Fixture::folder();
         f.write("page\u{fffd}.txt", "body of the UTF-8 file\n");
         let mut tabs = Tabs::placed(reader(&f, "page\u{fffd}.txt"), None);
-        let request = Request { file: f.root.join(OsStr::from_bytes(b"page\xff.txt")), commit: None };
+        let request = Request { file: f.root.join(OsStr::from_bytes(b"page\xff.txt")), commit: None, spot: None };
         for _ in 0..2 {
             assert!(tabs.open(&request, Instant::now()));
         }
@@ -858,7 +930,8 @@ mod tests {
         put_commit("original commit body\n", "ca3065e5729199ac4562442eea80513faff45a76", "First 21709");
         let mut tabs = Tabs::placed(reader(&f, "page.txt"), None);
         let open = |tabs: &mut Tabs, id: &str| {
-            tabs.open(&Request { file: f.root.join("page.txt"), commit: Some(id.into()) }, Instant::now())
+            let request = Request { file: f.root.join("page.txt"), commit: Some(id.into()), spot: None };
+            tabs.open(&request, Instant::now())
         };
         assert!(open(&mut tabs, SHORT));
         assert!(open(&mut tabs, FIRST));
@@ -888,7 +961,8 @@ mod tests {
         other.git(&["clone", "-q", "--no-local", f.root.to_str().unwrap(), "other"]);
         let mut tabs = Tabs::placed(reader(&f, "page.txt"), None);
         let open = |tabs: &mut Tabs, root: &Path| {
-            tabs.open(&Request { file: root.join("page.txt"), commit: Some(hash.clone()) }, Instant::now())
+            let request = Request { file: root.join("page.txt"), commit: Some(hash.clone()), spot: None };
+            tabs.open(&request, Instant::now())
         };
         assert!(open(&mut tabs, &f.root));
         assert!(open(&mut tabs, &other.root.join("other")));

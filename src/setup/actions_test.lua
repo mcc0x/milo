@@ -35,19 +35,35 @@ local named, title_reply, rename_reply, rename_error = {}, { ok = true, stdout =
 local running = { child = { path = "/test/bin/milo", pid = 80 } }
 local processes = { [outline.block_id] = running, [history.block_id] = running, [usage.block_id] = running }
 local pick_answer, on_close, ps_reply
+local input_answer, options_reply, task_reply
+-- What the stand-in terminal holds and what Milo answers about it, for the output action.
+local output = { runs = {}, reads = {} }
 rex = {
   action = function(action) actions[action.name] = action.run end,
-  exec = function(argv)
+  exec = function(argv, options)
     if argv[1] == "/bin/ps" then return ps_reply end
+    if argv[2] == "output-files" then
+      output.runs[#output.runs + 1] = { argv = argv, stdin = options.stdin }
+      return argv[3] == "list" and output.listed or output.opened
+    end
     commands[#commands + 1] = argv
     if argv[2] == "tab-title" then return title_reply end
+    if argv[2] == "task-options" then return options_reply end
+    if argv[2] == "task" then return task_reply end
     return argv[3] == "read" and profile_reply or { ok = true, stdout = "" }
   end,
   call = function(name, args)
     if name == terminal .. ".process" then
-      if args.block_id ~= shell.block_id then return processes[args.block_id] end
+      local known = processes[args.block_id]
+      if known ~= nil then return known or nil end
+      if args.block_id ~= shell.block_id then return end
       return { foreground = { argv0 = "editor", cwd = "/unrelated" },
         ancestors = { { argv0 = "-zsh", cwd = "/my project" } } }
+    elseif name == terminal .. ".format" or name == terminal .. ".blob_read" then
+      output.reads[#output.reads + 1] = { name = name:match("[^.]+$"), block = args.block_id, args = args.args }
+      return output[name:match("[^.]+$")](args.args)
+    elseif name == terminal .. ".write" then
+      error("an action typed into a terminal")
     elseif name == terminal .. ".size" then
       return sizes[args.block_id]
     elseif name == "block.close" then
@@ -61,7 +77,10 @@ rex = {
     end
     return {}
   end,
-  ui = { pick = function(args) return assert(pick_answer, "unexpected picker")(args) end },
+  ui = {
+    pick = function(args) return assert(pick_answer, "unexpected picker")(args) end,
+    input = function(args) return assert(input_answer, "unexpected question")(args) end,
+  },
   session = {
     view = function() return session end,
     new_split = function(args)
@@ -422,6 +441,112 @@ title_reply.stdout, rename_reply, rename_error = "milo\n", nil, "not_found"
 ok, why = pcall(actions.milo_name_session, ctx)
 assert(not ok and why == "not_found" and #named == 3)
 
+-- A new agent task asks for what is missing and hands every answer to one
+-- `milo task new`, each as an argument of its own. It creates no session itself.
+local function hex(text)
+  return (text:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+end
+local two_agents = "project " .. hex("/my project") .. "\nagent claude Claude Code\nagent opencode OpenCode\n"
+  .. "worktree " .. hex("/my project") .. " " .. hex("main") .. " here\n"
+  .. "worktree " .. hex("/my project-worktrees/fix it") .. " " .. hex("fix/it") .. " -\n"
+  .. "worktree " .. hex("/elsewhere") .. " - -\n"
+  .. "branch " .. hex("parked") .. "\nbase " .. hex("main") .. "\nbase " .. hex("origin/main") .. "\n"
+local started_reply = { ok = true, stdout = "worktree /my project-worktrees/feature-x\n"
+  .. "session session:01a212ce-82f4-7ed0-bdb4-88aa2edd12fa\n" }
+local function task_commands()
+  local found = {}
+  for _, command in ipairs(commands) do
+    if command[2] == "task" then found[#found + 1] = command end
+  end
+  return found
+end
+local function words(command)
+  return table.concat(command, "\0", 2)
+end
+local literal = '--print $(touch /tmp/x); `id` "q"'
+local questions = {}
+local function answers(picks, inputs)
+  questions = {}
+  pick_answer = function(prompt)
+    questions[#questions + 1] = prompt
+    local answer = table.remove(picks, 1)
+    if answer == nil then return nil, "cancelled" end
+    return answer
+  end
+  input_answer = function(prompt)
+    questions[#questions + 1] = prompt
+    local answer = table.remove(inputs, 1)
+    if answer == nil then return nil, "cancelled" end
+    return answer
+  end
+end
+options_reply, task_reply = { ok = true, stdout = two_agents }, started_reply
+answers({ "claude", "new", { text = " origin/main " } }, { " feature/x ", literal })
+local result = actions.milo_new_agent_task(ctx, {})
+assert(result.worktree == "/my project-worktrees/feature-x")
+assert(result.session_id == "session:01a212ce-82f4-7ed0-bdb4-88aa2edd12fa")
+assert(#task_commands() == 1)
+assert(words(task_commands()[1]) == table.concat({ "task", "new", "--project", "/my project", "--agent", "claude",
+  "--branch", "feature/x", "--base", "origin/main", "--prompt", literal }, "\0"))
+assert(#questions == 5 and #questions[1].items == 2 and questions[1].items[2].title == "OpenCode")
+-- The worktree question lists a new worktree first, then each worktree with its branch and folder.
+local places = questions[2].items
+assert(#places == 4 and places[1].id == "new" and places[2].title == "main" and places[2].detail == "this checkout")
+assert(places[3].title == "fix/it" and places[3].subtitle == "/my project-worktrees/fix it")
+assert(places[4].title == "No branch" and places[4].subtitle == "/elsewhere")
+assert(questions[4].allow_other and questions[4].items[1].id == "main" and questions[4].items[2].id == "origin/main")
+assert(questions[5].title == "Task for Claude Code")
+
+-- With one agent installed nobody is asked which. An existing worktree takes
+-- no branch, and an empty task starts the agent with no prompt.
+options_reply = { ok = true, stdout = two_agents:gsub("agent opencode OpenCode\n", "") }
+answers({ "2" }, { "" })
+actions.milo_new_agent_task(ctx, {})
+assert(#questions == 2 and questions[1].title == "Where the agent works")
+assert(words(task_commands()[2]) == table.concat({ "task", "new", "--project", "/my project", "--agent", "claude",
+  "--worktree", "/my project-worktrees/fix it" }, "\0"))
+
+-- A branch that exists without a worktree is used as it is: no commit is asked for.
+answers({ "new" }, { "parked", "go" })
+actions.milo_new_agent_task(ctx, {})
+assert(#questions == 3)
+assert(words(task_commands()[3]):match("%-%-agent%z" .. "claude%z%-%-branch%zparked%z%-%-prompt%zgo$"))
+
+-- Closing any question starts nothing: no worktree and no session can exist.
+options_reply = { ok = true, stdout = two_agents }
+for _, given in ipairs{ { {}, {} }, { { "opencode" }, {} }, { { "opencode", "new" }, {} },
+  { { "opencode", "new" }, { "feature/y" } }, { { "opencode", "new", "main" }, { "feature/y" } },
+  { { "opencode", "1" }, {} } } do
+  answers(given[1], given[2])
+  assert(actions.milo_new_agent_task(ctx, {}) == nil and #task_commands() == 3)
+end
+
+-- Every choice passed as an argument asks nothing, as from `rex do` or a key binding.
+pick_answer, input_answer = nil, nil
+actions.milo_new_agent_task(ctx, { agent = "opencode", worktree = "/elsewhere", prompt = "tidy up" })
+assert(words(task_commands()[4]) == table.concat({ "task", "new", "--project", "/my project", "--agent", "opencode",
+  "--worktree", "/elsewhere", "--prompt", "tidy up" }, "\0"))
+
+-- No agent installed, no app to ask, and Milo's own refusals all end the action with a reason.
+options_reply = { ok = true, stdout = "project " .. hex("/my project") .. "\n" }
+ok, why = pcall(actions.milo_new_agent_task, ctx, {})
+assert(not ok and why:match("Claude Code, Codex, oh%-my%-pi and OpenCode") and #task_commands() == 4)
+options_reply = { ok = false, stdout = "", stderr = "This shell is not in a Git project.\n" }
+ok, why = pcall(actions.milo_new_agent_task, ctx, {})
+assert(not ok and why == "This shell is not in a Git project." and #task_commands() == 4)
+options_reply = { ok = true, stdout = two_agents }
+pick_answer = function() return nil, "no_client" end
+ok, why = pcall(actions.milo_new_agent_task, ctx, {})
+assert(not ok and why:match("connected Rex app") and #task_commands() == 4)
+task_reply = { ok = false, stdout = "", stderr = "milo: Codex (codex) is not installed on this computer; nothing was created\n" }
+ok, why = pcall(actions.milo_new_agent_task, ctx, { agent = "codex", branch = "b", base = "main", prompt = "" })
+assert(not ok and why == "Codex (codex) is not installed on this computer; nothing was created")
+assert(#task_commands() == 5 and not words(task_commands()[5]):match("%-%-prompt"))
+task_reply = { ok = false, timed_out = true, stdout = "", stderr = "" }
+ok, why = pcall(actions.milo_new_agent_task, ctx, { agent = "claude", worktree = "/elsewhere", prompt = "x" })
+assert(not ok and why:match("did not finish in time"))
+pick_answer, input_answer = nil, nil
+
 local function mac_shell(pid, login)
   local wrapper = { pid = login, name = "login", path = "/usr/bin/login", user_id = 0 }
   return { child = wrapper, ancestors = { wrapper },
@@ -542,3 +667,174 @@ near(1 - made.layout.ratio, .438)
 near(made.layout.before.ratio * made.layout.ratio, .27)
 assert(made.layout.before.before.label == usage.label and made.layout.before.after.label == history.label
   and made.layout.after.label == outline.label)
+
+-- Open File from Terminal Output reads the pane it was run in, once, and only then.
+assert(#output.reads == 0 and #output.runs == 0)
+tiled.layout, tiled.blocks = tree("vertical", 0.6, leaf(shell), leaf(editor)), { shell, editor }
+window.layers, window.focused_block_id = { tiled }, shell.block_id
+shell.host_id = "host:local"
+local build = { foreground = { name = "cargo", cwd = "/my project/crate", user_id = 501 },
+  ancestors = { { name = "zsh", argv0 = "-zsh", cwd = "/my project" } },
+  child = { name = "login", path = "/usr/bin/login", user_id = 0 } }
+processes[shell.block_id] = build
+local screen = "error[E0308]: mismatched types\n  --> src/disk.rs:184:17\n"
+output.format = function(args)
+  assert(args.format == "text" and args.unwrap and args.max_bytes == 262144)
+  return { content = screen, eof = true, total = #screen }
+end
+local function reply(text) return { ok = true, stdout = text } end
+local function opening(count)
+  assert(#floats == count, #floats .. " readers opened")
+  return floats[count] and floats[count].layout
+end
+local opened_before, closed_before, focus_before = #floats, #closed, #focus
+local function unchanged()
+  assert(#floats == opened_before and #closed == closed_before and #focus == focus_before)
+end
+
+-- One place opens at once, in a floating reader over the source's tab, at its line.
+output.listed = reply("found 1 outside 0\nsrc/disk.rs:184:17\terror[E0308]: mismatched types\n")
+output.opened = reply("view\t/my project\t/my project/src/disk.rs\t184:17\tdisk.rs\n")
+pick_answer = nil
+actions.milo_open_output(ctx, {})
+assert(#output.reads == 1 and output.reads[1].name == "format" and output.reads[1].block == shell.block_id)
+local list, open = output.runs[1].argv, output.runs[2].argv
+assert(list[3] == "list" and list[4] == "/my project/crate" and #list == 4 and output.runs[1].stdin == screen)
+assert(open[3] == "open" and open[4] == "/my project/crate" and open[5] == "src/disk.rs:184:17" and #open == 5)
+local reader_pane = opening(opened_before + 1)
+local view = reader_pane.options.command
+assert(view[1] == "/usr/bin/env" and view[2] == "MILO_PREVIEW_SOURCE=session:1 window:work shell block:shell")
+assert(view[3] == "/test/bin/milo" and view[4] == "view" and view[5] == "/my project/src/disk.rs")
+assert(view[6] == "--line" and view[7] == "184:17" and #view == 7)
+assert(reader_pane.label == "disk.rs" and reader_pane.options.cwd == "/my project" and reader_pane.options.shell == "none")
+assert(floats[#floats].window_id == window.window_id and floats[#floats].focus)
+opened_before = #floats
+
+-- Several places ask in the palette, most recent first, each with what was said about it.
+-- Moving the focus while the palette is open changes neither the pane read nor the tab used.
+output.listed = reply("found 2 outside 1\ndocs/migration.md\tI updated docs/migration.md.\nsrc/disk.rs:184:17\t\n")
+output.opened = reply("view\t/my project\t/my project/docs/migration.md\t-\tmigration.md\n")
+local asked
+pick_answer = function(prompt)
+  asked = prompt
+  window.focused_block_id, session.active_window_id = editor.block_id, "window:elsewhere"
+  processes[shell.block_id] = { foreground = { name = "zsh", cwd = "/elsewhere" } }
+  return "docs/migration.md"
+end
+actions.milo_open_output(ctx, {})
+assert(asked.title == "Open file from terminal output" and #asked.items == 2)
+assert(asked.items[1].id == "docs/migration.md" and asked.items[1].subtitle == "I updated docs/migration.md.")
+assert(asked.items[2].title == "src/disk.rs:184:17" and asked.items[2].subtitle == nil)
+open = output.runs[#output.runs].argv
+assert(open[4] == "/my project/crate" and open[5] == "docs/migration.md" and #output.reads == 2)
+view = opening(opened_before + 1).options.command
+assert(view[5] == "/my project/docs/migration.md" and #view == 5 and floats[#floats].window_id == window.window_id)
+window.focused_block_id, session.active_window_id, processes[shell.block_id] = shell.block_id, window.window_id, build
+opened_before = #floats
+
+-- Closing the palette opens nothing; no connected app is said; a choice can be passed instead.
+pick_answer = function() return nil, "cancelled" end
+assert(actions.milo_open_output(ctx, {}) == nil)
+pick_answer = function() return nil, "no_client" end
+ok, why = pcall(actions.milo_open_output, ctx, {})
+assert(not ok and why:find("or pass choice", 1, true))
+pick_answer = nil
+ok, why = pcall(actions.milo_open_output, ctx, { choice = "/etc/passwd" })
+assert(not ok and why == "That file is not in this pane's recent output.")
+unchanged()
+actions.milo_open_output(ctx, { choice = "src/disk.rs:184:17" })
+assert(output.runs[#output.runs].argv[5] == "src/disk.rs:184:17")
+opening(opened_before + 1)
+opened_before = #floats
+
+-- Every floating terminal of the tab that is not a Milo rail or peek is offered to Milo, which
+-- asks the readers among them; the one that took the file is brought forward.
+-- Nothing is closed for it: a reader with a draft keeps it.
+local reader = { block_id = "block:reader", label = "notes.md", creator_name = terminal }
+local scratch = { block_id = "block:scratch", creator_name = terminal }
+local peek_pane = { block_id = "block:peek", label = "milo:peek:outline", creator_name = terminal }
+local browser = { block_id = "block:browser", creator_name = "browser" }
+window.layers[2] = { kind = "floating", layer_id = "layer:reader", blocks = { reader, peek_pane } }
+window.layers[3] = { kind = "floating", layer_id = "layer:other", blocks = { browser, scratch } }
+output.listed = reply("found 1 outside 0\nsrc/disk.rs:9\tsrc/disk.rs:9: warning: unused\n")
+output.opened = reply("shown\tblock:reader\tdisk.rs\n")
+actions.milo_open_output(ctx, {})
+open = output.runs[#output.runs].argv
+assert(#open == 7 and open[6] == reader.block_id and open[7] == scratch.block_id)
+assert(#floats == opened_before and #closed == closed_before)
+assert(#focus == focus_before + 1 and focus[#focus] == reader.block_id)
+assert(relabeled[#relabeled].block_id == reader.block_id and relabeled[#relabeled].label == "disk.rs")
+focus_before = #focus
+-- An answer naming a pane that was not offered opens nothing.
+output.opened = reply("shown\tblock:peek\tdisk.rs\n")
+ok, why = pcall(actions.milo_open_output, ctx, {})
+assert(not ok and why == "Rex could not open the reader.")
+unchanged()
+window.layers[2], window.layers[3] = nil, nil
+
+-- No file of the worktree says so, with Milo's reason where it gave one, and opens nothing.
+local function refused(message, args)
+  local runs = #output.runs
+  local done, err = pcall(actions.milo_open_output, ctx, args or {})
+  assert(not done and err == message, tostring(err))
+  unchanged()
+  return #output.runs - runs
+end
+output.listed = reply("found 0 outside 0\n")
+assert(refused("No project files found in this pane's recent output.") == 1)
+output.listed = reply("found 0 outside 2\n")
+assert(refused("This pane's recent output names only files outside its worktree, so Milo opened nothing.") == 1)
+output.listed = { ok = false, stdout = "", stderr = "Milo could not find the folder this pane is working in.\n" }
+assert(refused("Milo could not find the folder this pane is working in.") == 1)
+output.listed = reply("found 1 outside 0\nsrc/disk.rs\t\n")
+output.opened = { ok = false, stdout = "", stderr = "That is not a file of this pane's worktree.\n" }
+assert(refused("That is not a file of this pane's worktree.") == 2)
+
+-- A pane whose files Milo cannot place is not read at all.
+local reads = #output.reads
+local function unread(message)
+  assert(refused(message) == 0 and #output.reads == reads)
+end
+ctx.block_id = editor.block_id
+unread("Focus the terminal whose output names the file, then try again.")
+ctx.block_id = outline.block_id
+table.insert(tiled.blocks, outline)
+unread("This is a Milo pane. Focus the terminal whose output names the file, then try again.")
+table.remove(tiled.blocks)
+ctx.block_id = shell.block_id
+shell.host_id = "host:remote"
+unread("This pane's output may name files on another computer, so Milo opened nothing.")
+shell.host_id = "host:local"
+processes[shell.block_id] = { foreground = { name = "ssh", cwd = "/my project" }, ancestors = build.ancestors }
+unread("This pane's output may name files on another computer, so Milo opened nothing.")
+processes[shell.block_id] = { foreground = { name = "vim", cwd = "/my project" },
+  ancestors = { { name = "zsh", cwd = "/home/me" }, { name = "mosh-client" } } }
+unread("This pane's output may name files on another computer, so Milo opened nothing.")
+processes[shell.block_id] = { foreground = { name = "sudo", user_id = 0 } }
+unread("Milo could not tell which folder this pane is working in, so it opened nothing.")
+processes[shell.block_id] = false
+unread("Milo could not tell which folder this pane is working in, so it opened nothing.")
+processes[shell.block_id] = build
+
+-- Long output is read from its end, in the parts Rex returns, and never past the limit.
+local long = string.rep("old line\n", 40000) .. "src/disk.rs:3: recent\n"
+output.format = function() return { content = long:sub(1, 100), id = 7, total = #long } end
+output.blob_read = function(args)
+  assert(args.id == 7 and args.offset >= #long - 262144)
+  local data = long:sub(args.offset + 1, args.offset + 100000)
+  return { data = data, eof = args.offset + #data == #long }
+end
+output.listed = reply("found 1 outside 0\nsrc/disk.rs:3\tsrc/disk.rs:3: recent\n")
+output.opened = reply("view\t/my project\t/my project/src/disk.rs\t3\tdisk.rs\n")
+actions.milo_open_output(ctx, {})
+local sent = output.runs[#output.runs - 1].stdin
+assert(#sent < 262144 and #sent > 262144 - 10 and sent:sub(1, 9) == "old line\n" and sent:sub(-22) == "src/disk.rs:3: recent\n")
+assert(#output.reads == reads + 4 and output.reads[reads + 2].args.offset == #long - 262144)
+opening(opened_before + 1)
+opened_before, reads = #floats, #output.reads
+-- A read that stops short of the end would hide what was printed last.
+output.blob_read = function() return { data = "", eof = false } end
+assert(refused("Milo could not read this pane's recent output.") == 0)
+output.format = function() end
+assert(refused("Milo could not read this pane's recent output.") == 0)
+assert(#closed == closed_before)

@@ -1063,6 +1063,9 @@ fn a_floating_reader_holds_the_outlines_files_as_tabs_and_keeps_their_unsaved_ed
 #[path = "rex_lab/file_actions.rs"]
 mod file_actions;
 
+#[path = "rex_lab/output_files.rs"]
+mod output_files;
+
 #[cfg(target_os = "macos")]
 #[path = "rex_lab/rich_reader.rs"]
 mod rich_reader;
@@ -1267,4 +1270,112 @@ fn review_notes_are_copied_out_and_never_typed_into_another_pane() {
     assert!(soon(|| !lab.rex(&["block", "ls", "-s", &session, "--json"]).contains(&review)), "the review stayed open");
     assert_eq!(fs::read_to_string(dir.join("app.txt")).unwrap(), now);
     assert!(!lab.root.join("home/.local/state/milo").exists(), "the review kept something in Milo's state folder");
+}
+
+/// `milo task new` and the Rex action start an agent in a worktree and a
+/// session of its own, on a real server. The agent is a stand-in that records
+/// how it was started and stays, as an interactive agent does. A real app is
+/// needed to answer the action's questions, so here every choice is passed.
+#[test]
+#[ignore = "needs an installed Rex; starts a disposable server"]
+fn a_task_starts_its_agent_in_a_background_session_from_the_command_line_and_the_rex_action() {
+    let lab = Lab::start();
+    let [first, _] = lab.worktrees();
+    let [session, tab] = lab.new_session("lab", "caller", &first);
+    lab.check_terminals(&session);
+    // The server's settings hold the shipped actions under the values a save writes above them.
+    let above = format!(
+        "local column_width, outline_share, usage_rows = 0.2, 0.7, 2\nlocal chosen = {{ outline = true }}\n\
+         local milo = \"{}\"\n",
+        lab.milo.display()
+    );
+    let actions = include_str!("../src/setup/actions.lua");
+    fs::create_dir_all(lab.root.join("home/.config/rex")).unwrap();
+    fs::write(lab.root.join("home/.config/rex/init.lua"), above + actions).unwrap();
+    lab.rex(&["config", "reload"]);
+    let ran = |branch: &str| lab.root.join(format!("ran-{branch}"));
+    let agent = format!(
+        "#!/bin/sh\n{{ pwd; printf '%s\\n' \"$#\"; printf '%s\\n' \"$@\"; }} >'{}'/ran-\"$(basename \"$PWD\")\"\nexec sleep 600\n",
+        lab.root.display()
+    );
+    let program = lab.root.join("bin/codex");
+    fs::write(&program, agent).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    let shell = lab.view().tab(&tab).panes.iter().find(|pane| pane.program == "shell").unwrap().block.clone();
+    let front = || {
+        let caller = lab.rex(&["session", "inspect", &session, "--json"]);
+        (id(&caller, "active_window_id"), id(&caller, "focused_block_id"))
+    };
+    let before = front();
+    let sessions = || lab.rex(&["ls", "--json"]).matches("\"session_id\"").count();
+    let existing = sessions();
+    let prompt = "--print $(touch pwned); `touch pwned` \"q\" 'q' | & ;";
+    let started = |tree: &Path, id: &str, label: &str| {
+        let record = ran(tree.file_name().unwrap().to_str().unwrap());
+        assert!(soon(|| record.is_file()), "the agent did not start in {}", tree.display());
+        let expected = format!("{}\n2\n--\n{prompt}\n", tree.display());
+        assert!(soon(|| fs::read_to_string(&record).unwrap() == expected), "{:?}", fs::read_to_string(&record));
+        let made = lab.rex(&["session", "inspect", id, "--json"]);
+        assert!(made.contains(&format!("\"label\": \"{label}\"")), "{made}");
+        assert!(!tree.join("pwned").exists() && !first.join("pwned").exists());
+    };
+
+    // From a shell in the project, with no terminal of Rex's own to lean on.
+    let output = lab
+        .command(&lab.milo)
+        .current_dir(&first)
+        .args(["task", "new", "--agent", "codex", "--branch", "task/one", "--base", "main", "--prompt", prompt])
+        .output()
+        .unwrap();
+    let said = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success(), "{said}{}", String::from_utf8_lossy(&output.stderr));
+    let one = lab.root.join("first-worktrees/task-one");
+    let (worktree, made) = said.trim_end().split_once('\n').unwrap();
+    assert_eq!(worktree, format!("worktree {}", one.display()));
+    started(&one, made.strip_prefix("session ").unwrap(), "first/task-one");
+
+    // The same launch through the installed action, run by the server as the command palette runs it.
+    let reply = lab.rex(&[
+        "do",
+        "milo_new_agent_task",
+        "-s",
+        &session,
+        "-b",
+        &shell,
+        "--json",
+        "agent=codex",
+        "branch=task/two",
+        "base=main",
+        &format!("prompt={prompt}"),
+    ]);
+    let two = lab.root.join("first-worktrees/task-two");
+    assert!(reply.contains(&format!("\"worktree\": \"{}\"", two.display())), "{reply}");
+    started(&two, &id(&reply, "session_id"), "first/task-two");
+
+    // Neither launch moved the person: the caller's tab and pane are still in front of its session.
+    assert_eq!(front(), before);
+    assert_eq!(sessions(), existing + 2);
+    lab.git(&first, &["diff", "--quiet", "HEAD", "--", "shared.txt"]);
+    let branch = lab.command("git").current_dir(&first).args(["branch", "--show-current"]).output().unwrap();
+    assert_eq!(String::from_utf8(branch.stdout).unwrap().trim(), "main");
+
+    // An agent that is not installed, and a question nobody can be asked, each end with nothing made.
+    let action = |args: &[&str]| {
+        let base = ["do", "milo_new_agent_task", "-s", session.as_str(), "-b", shell.as_str()];
+        let output = lab.rex_output(&[&base[..], args].concat()).unwrap();
+        assert!(!output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        String::from_utf8(output.stderr).unwrap()
+    };
+    let missing = action(&["agent=claude", "branch=task/three", "base=main", "prompt=go on"]);
+    assert!(
+        missing.contains("Claude Code (claude) is not installed on this computer; nothing was created"),
+        "{missing}"
+    );
+    let unasked = action(&["agent=codex"]);
+    assert!(unasked.contains("Answer in a connected Rex app"), "{unasked}");
+    assert_eq!(sessions(), existing + 2);
+    let mut trees: Vec<_> =
+        fs::read_dir(lab.root.join("first-worktrees")).unwrap().map(|e| e.unwrap().file_name()).collect();
+    trees.sort();
+    assert_eq!(trees, ["task-one", "task-two"]);
 }

@@ -6,7 +6,7 @@ use std::time::Instant;
 use super::changes::{Fold, Row};
 use super::edit::Editor;
 use super::handed::Handed;
-use super::{Body, JumpNotice, MarkdownBody, Reader, Source, markdown};
+use super::{Body, JumpNotice, MarkdownBody, Reader, Source, Spot, markdown};
 use crate::diff::{Line, LineKind};
 use crate::git::Kind;
 use crate::icons;
@@ -261,6 +261,7 @@ impl Reader {
     }
 
     fn draw_body(&mut self, s: &mut Screen) {
+        self.place_spot();
         if !self.markdown_source
             && let Some(body) = self.markdown_body()
         {
@@ -310,6 +311,7 @@ impl Reader {
                     .saturating_sub(width);
                 self.pan = self.pan.min(self.pan_limit);
                 let mut painter = LinePainter { x, width, pan: self.pan, lang: text.lang, spans: &mut self.spans };
+                let marked = self.spot.map(|spot| spot.line);
                 let mut starts = text.starts.as_slice();
                 let mut state = &State::Code;
                 let mut skipped = true;
@@ -321,7 +323,12 @@ impl Reader {
                                 state = &starts[used - 1].1;
                                 starts = &starts[used..];
                             }
-                            painter.draw_line(s, i + 1, &text.lines[line], state);
+                            let shown = &text.lines[line];
+                            painter.draw_line(s, i + 1, shown, state);
+                            if x > 0 && shown.kind != LineKind::Del && marked == Some(shown.number) {
+                                // The line the reader was asked for keeps its number picked out.
+                                s.paint(x - 3 - text.digits, i + 1, text.digits, Style::PLAIN.bold().reverse());
+                            }
                             let shown = super::pick::Shown { line, gutter: x > 0 };
                             super::pick::draw_marks(self.pick, &self.noted, s, i + 1, shown);
                             skipped = false;
@@ -613,6 +620,30 @@ fn draw_fold(s: &mut Screen, y: usize, gutter: usize, fold: Fold, selected: bool
     }
 }
 
+/// Says the place the reader was asked to show, as `Line 184:17`, at the same edge as a change notice.
+fn draw_spot_notice(s: &mut Screen, y: usize, spot: Spot) -> Range<usize> {
+    const PREFIX: &str = "Line ";
+    let digits = |n: u32| n.ilog10() as usize + 1;
+    let line = digits(spot.line);
+    let full = PREFIX.len() + line + spot.column.map_or(0, |column| 1 + digits(column));
+    let margin = usize::from(s.w >= full + 2);
+    let room = s.w - margin * 2;
+    let width = full.min(room);
+    let x = if y == 0 { s.w - margin - width } else { margin };
+    let st = Style::PLAIN;
+    if full > room {
+        s.put_fit(x, y, width, "Line…", st);
+        return x..x + width;
+    }
+    let end = x + s.put(x, y, width, PREFIX, st) + line;
+    s.put_number(end, y, spot.line.into(), st);
+    if let Some(column) = spot.column {
+        s.put(end, y, 1, ":", st);
+        s.put_number(x + full, y, column.into(), st);
+    }
+    x..x + width
+}
+
 /// Uses the right edge of the heading or the left edge of the hint.
 fn draw_change_notice(s: &mut Screen, y: usize, notice: JumpNotice) -> Range<usize> {
     const PREFIX: &str = "Change ";
@@ -626,6 +657,7 @@ fn draw_change_notice(s: &mut Screen, y: usize, notice: JumpNotice) -> Range<usi
         }
         JumpNotice::NoChanges => ("No changes".len(), None, ("", "No changes")),
         JumpNotice::Said { lead, text } => (lead.len() + text.len(), None, (lead, text)),
+        JumpNotice::Spot(spot) => return draw_spot_notice(s, y, spot),
     };
     let margin = usize::from(s.w >= full + 2);
     let room = s.w - margin * 2;
