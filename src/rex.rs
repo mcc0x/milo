@@ -1,8 +1,10 @@
 //! Calls Rex for floating readers, Markdown previews, setup, and the new-tab listener.
 
+mod attention;
 mod preview;
 mod server;
 
+pub(crate) use attention::{AttentionWatch, jump};
 pub(crate) use preview::{available as preview_available, launch as preview, preview_anchor};
 
 #[cfg(target_os = "macos")]

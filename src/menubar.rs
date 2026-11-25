@@ -1,7 +1,61 @@
+mod attention;
+
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::preferences;
+
+pub(crate) use attention::{Attention, Command as AttentionCommand, USAGE as ATTENTION_USAGE, run as attention};
+
+/// What the menu app is told of its settings file with each frame of usage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Choices {
+    pub(crate) indicator: Indicator,
+    pub(crate) attention: Attention,
+}
+
+impl Choices {
+    /// Each choice that cannot be read is its default: the quota badge, and no watch on Rex.
+    pub(crate) fn load(file: Option<&Path>) -> Self {
+        let Some(file) = file else { return Self::default() };
+        Self {
+            indicator: Indicator::load(file).unwrap_or_default(),
+            attention: Attention::load(file).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<Indicator> for Choices {
+    fn from(indicator: Indicator) -> Self {
+        Self { indicator, attention: Attention::default() }
+    }
+}
+
+/// Everything in the menu's settings file is read in one piece of this size or less.
+const FILE_LIMIT: u64 = 4096;
+
+/// The settings file's text with `key` set to `value` and every other line as it was.
+fn with_value(text: &str, key: &str, value: &str) -> String {
+    let assigns = |line: &str| line.split_once('=').is_some_and(|(name, _)| name.trim() == key);
+    let mut kept: String = text.lines().filter(|line| !assigns(line)).flat_map(|line| [line, "\n"]).collect();
+    kept.push_str(&format!("{key} = {value}\n"));
+    kept
+}
+
+/// Sets one value in the menu's settings file under its lock. `choice` reads what is saved now.
+/// A file that cannot be read as settings is replaced, since nothing in it could be kept.
+fn save_value(config: &Path, key: &str, choice: impl FnOnce(&Path) -> io::Result<String>) -> io::Result<()> {
+    let path = Indicator::file(config);
+    preferences::locked(&path, |dir| {
+        let value = choice(&path)?;
+        let text = match preferences::read(&path, FILE_LIMIT) {
+            Ok(text) => text.unwrap_or_default(),
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => String::new(),
+            Err(error) => return Err(error),
+        };
+        preferences::replace(dir, &path, &with_value(&text, key, &value))
+    })
+}
 
 /// The global menu bar display choice, independent of pane drafts and the app's quota badge mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -43,10 +97,13 @@ impl Indicator {
     }
 
     pub(crate) fn load(file: &Path) -> io::Result<Self> {
-        let Some(text) = preferences::read(file, 4096)? else { return Ok(Self::default()) };
-        preferences::layer_value(&text, "indicator")
-            .and_then(Self::parse)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid menu bar indicator"))
+        let Some(text) = preferences::read(file, FILE_LIMIT)? else { return Ok(Self::default()) };
+        // A file that holds only other menu choices leaves the indicator at its default.
+        match preferences::layer_value(&text, "indicator") {
+            None => Ok(Self::default()),
+            Some(value) => Self::parse(value)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid menu bar indicator")),
+        }
     }
 
     pub(crate) fn save(self, config: &Path) -> Result<&'static str, String> {
@@ -72,11 +129,8 @@ impl Indicator {
     }
 
     fn update(config: &Path, choice: impl FnOnce(&Path) -> io::Result<Self>) -> Result<&'static str, String> {
-        let path = Self::file(config);
-        preferences::locked(&path, |dir| {
-            preferences::replace(dir, &path, &format!("indicator = {}\n", choice(&path)?.value()))
-        })
-        .map_err(|error| format!("Could not save the menu bar indicator: {error}"))?;
+        save_value(config, "indicator", |path| Ok(choice(path)?.value().to_owned()))
+            .map_err(|error| format!("Could not save the menu bar indicator: {error}"))?;
         Ok("Menu bar indicator saved.")
     }
 }
