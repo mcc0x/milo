@@ -4,7 +4,7 @@
 
 ## Install
 
-The [v0.1.7 prebuilt release](releases/v0.1.7.md) is for Apple Silicon Macs running macOS 13 or later. Use Homebrew:
+The [v0.1.8 prebuilt release](releases/v0.1.8.md) is for Apple Silicon Macs running macOS 13 or later. Use Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -13,7 +13,7 @@ brew install mcc0x/milo/milo
 Or download the versioned release installer from GitHub:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.7/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.8/install.sh &&
   sh milo-install.sh
 ```
 
@@ -91,7 +91,7 @@ Both need the installed Rex integration. After upgrading Milo, run `milo setup -
 
 ## Start an agent task
 
-`milo task new` starts a coding agent on a task from a shell in your project. It adds a Git worktree for the task, or uses one the project already has, and opens the agent in a new Rex session named after it, `project/worktree`. The session starts in the background: your pane keeps the focus, and no app is asked to show the new session. Visit it whenever you like. It shows the agent's own full screen, so you can read along, answer its questions and type a follow-up. On `main`; not in the v0.1.7 release.
+`milo task new` starts a coding agent on a task from a shell in your project. It adds a Git worktree for the task, or uses one the project already has, and opens the agent in a new Rex session named after it, `project/worktree`. The session starts in the background: your pane keeps the focus, and no app is asked to show the new session. Visit it whenever you like. It shows the agent's own full screen, so you can read along, answer its questions and type a follow-up.
 
 ```sh
 milo task new --branch perf/reader-scroll --base origin/main --agent claude --prompt "Speed up scrolling in large files"

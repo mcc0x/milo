@@ -21,7 +21,7 @@ Source: https://github.com/mcc0x/milo/blob/main/README.md
 
 ## Install
 
-The [v0.1.7 release](https://github.com/mcc0x/milo/blob/main/docs/releases/v0.1.7.md) is available for Apple Silicon Macs running macOS 13 or later. Install it with Homebrew:
+The [v0.1.8 release](https://github.com/mcc0x/milo/blob/main/docs/releases/v0.1.8.md) is available for Apple Silicon Macs running macOS 13 or later. Install it with Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -30,7 +30,7 @@ brew install mcc0x/milo/milo
 Without Homebrew, download and run the installer from the release tag:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.7/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.8/install.sh &&
   sh milo-install.sh
 ```
 
@@ -100,7 +100,7 @@ To review an agent’s edits without mixing in your own uncommitted work, have i
 
 ## Agent tasks
 
-In Rex, start a coding agent on a task without leaving your pane. `milo task new --branch fix/login --base origin/main --agent claude --prompt "Fix the login redirect"` adds a Git worktree for the branch and opens Claude Code, Codex, oh-my-pi or OpenCode there, in a new Rex session that starts in the background with the agent's full interactive screen. **Milo: New Agent Task…** in the command palette asks the same questions. Milo starts only the agent you name, never switches your checkout, and never pushes, merges or cleans up. See [starting an agent task](https://github.com/mcc0x/milo/blob/main/docs/setup.md#start-an-agent-task). This is on `main` and not in the v0.1.7 release.
+In Rex, start a coding agent on a task without leaving your pane. `milo task new --branch fix/login --base origin/main --agent claude --prompt "Fix the login redirect"` adds a Git worktree for the branch and opens Claude Code, Codex, oh-my-pi or OpenCode there, in a new Rex session that starts in the background with the agent's full interactive screen. **Milo: New Agent Task…** in the command palette asks the same questions. Milo starts only the agent you name, never switches your checkout, and never pushes, merges or cleans up. See [starting an agent task](https://github.com/mcc0x/milo/blob/main/docs/setup.md#start-an-agent-task).
 
 ## What works in each terminal
 
@@ -141,7 +141,7 @@ Source: https://github.com/mcc0x/milo/blob/main/docs/setup.md
 
 ## Install
 
-The [v0.1.7 prebuilt release](https://github.com/mcc0x/milo/blob/main/docs/releases/v0.1.7.md) is for Apple Silicon Macs running macOS 13 or later. Use Homebrew:
+The [v0.1.8 prebuilt release](https://github.com/mcc0x/milo/blob/main/docs/releases/v0.1.8.md) is for Apple Silicon Macs running macOS 13 or later. Use Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -150,7 +150,7 @@ brew install mcc0x/milo/milo
 Or download the versioned release installer from GitHub:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.7/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.8/install.sh &&
   sh milo-install.sh
 ```
 
@@ -228,7 +228,7 @@ Both need the installed Rex integration. After upgrading Milo, run `milo setup -
 
 ## Start an agent task
 
-`milo task new` starts a coding agent on a task from a shell in your project. It adds a Git worktree for the task, or uses one the project already has, and opens the agent in a new Rex session named after it, `project/worktree`. The session starts in the background: your pane keeps the focus, and no app is asked to show the new session. Visit it whenever you like. It shows the agent's own full screen, so you can read along, answer its questions and type a follow-up. On `main`; not in the v0.1.7 release.
+`milo task new` starts a coding agent on a task from a shell in your project. It adds a Git worktree for the task, or uses one the project already has, and opens the agent in a new Rex session named after it, `project/worktree`. The session starts in the background: your pane keeps the focus, and no app is asked to show the new session. Visit it whenever you like. It shows the agent's own full screen, so you can read along, answer its questions and type a follow-up.
 
 ```sh
 milo task new --branch perf/reader-scroll --base origin/main --agent claude --prompt "Speed up scrolling in large files"
@@ -1497,7 +1497,7 @@ Milo works in a supported terminal without Rex or a connected account. Pick the 
 | oh-my-pi (OMP) | Saved Codex and Claude limit reports contribute to those tools’ readings, not a separate OMP quota. |
 | OpenCode | Today’s recorded tokens, steps and estimated cost from its local database. Not a remaining quota. |
 
-**Agent tasks** are separate too. `milo task new`, or **Milo: New Agent Task…** in the Rex command palette, starts Claude Code, Codex, oh-my-pi or OpenCode in a Git worktree and a background Rex session of its own, with the agent's full interactive screen. It starts only the agent you name, only if it is installed, and passes your prompt as written. Online provider accounts are not agents and cannot be started. See [starting an agent task](https://github.com/mcc0x/milo/blob/main/docs/setup.md#start-an-agent-task). On `main`; not in v0.1.7.
+**Agent tasks** are separate too. `milo task new`, or **Milo: New Agent Task…** in the Rex command palette, starts Claude Code, Codex, oh-my-pi or OpenCode in a Git worktree and a background Rex session of its own, with the agent's full interactive screen. It starts only the agent you name, only if it is installed, and passes your prompt as written. Online provider accounts are not agents and cannot be started. See [starting an agent task](https://github.com/mcc0x/milo/blob/main/docs/setup.md#start-an-agent-task).
 
 **Agent patch review** is separate from usage detection: a harness that can hand over a recorded patch can use `milo review PATCH`. This shows that patch rather than treating every change in the worktree as the agent’s. See the [Milo agent skill](https://github.com/mcc0x/milo/blob/main/skills/milo/SKILL.md).
 
@@ -1527,7 +1527,7 @@ See [account setup](https://github.com/mcc0x/milo/blob/main/docs/usage.md#accoun
 ## Reader, media and file tools
 
 - **Git** supplies worktree changes, commit history and historical file contents. Outline also browses plain folders. [Pane guide](https://github.com/mcc0x/milo/blob/main/docs/panes.md)
-- **Markdown** renders directly in Reader in the **v0.1.7 release**; no external previewer is required. On **main**, the [Actions menu](https://github.com/mcc0x/milo/blob/main/docs/panes.md#file-actions) also offers an explicit handoff to a user-installed **tkmp** beside the Rex shell for eligible working Markdown files. That handoff is not in v0.1.7. Milo passes the filename only; see the [wrapper for width-capable builds](https://github.com/mcc0x/milo/blob/main/docs/panes.md#using-the-full-pane-width-with-tkmp). A built-in fit-to-pane choice is tracked separately in [#94](https://github.com/mcc0x/milo/issues/94) and depends on [tfcace/tkmp#1](https://github.com/tfcace/tkmp/pull/1).
+- **Markdown** renders directly in Reader in v0.1.7 and later; no external previewer is required. In v0.1.8, the [Actions menu](https://github.com/mcc0x/milo/blob/main/docs/panes.md#file-actions) also offers an explicit handoff to a user-installed **tkmp** beside the Rex shell for eligible working Markdown files. Milo passes the filename only; see the [wrapper for width-capable builds](https://github.com/mcc0x/milo/blob/main/docs/panes.md#using-the-full-pane-width-with-tkmp). A built-in fit-to-pane choice is tracked separately in [#94](https://github.com/mcc0x/milo/issues/94) and depends on [tfcace/tkmp#1](https://github.com/tfcace/tkmp/pull/1).
 - **Kitty graphics** can display supported images after a positive terminal capability check. **FFmpeg and FFprobe** are optional, user-installed tools for supported MP4s. The [format matrix](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reading-pictures-video-and-markdown) lists platform fallbacks and decoder requirements.
 - **Finder and default Mac apps** can reveal or open eligible working files on a verified local Mac. These actions don’t export a draft or open today’s file in place of a historical revision. [Native file actions](https://github.com/mcc0x/milo/blob/main/docs/panes.md#opening-a-file-outside-milo-on-a-mac)
 - **Formatters** run on request against the draft: rustfmt, gofmt, Ruff, Black, Prettier, Biome, Deno, Taplo, clang-format, shfmt, StyLua, swift-format and Terraform. Milo doesn’t download them or save their output without your explicit save. [File types and formatter selection](https://github.com/mcc0x/milo/blob/main/docs/panes.md#formatting)
@@ -1551,7 +1551,8 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   usage sources without changing anything. `rex actions` (without `-C` or
   `REX_CLIENT`) lists server actions such as `milo_layout`.
 - Standalone Home and the rich previews below require v0.1.7 or later. On an
-  older install, use a direct pane command and check its `--help`.
+  older install, use a direct pane command and check its `--help`. Reader tab
+  sets, review notes, file lookup from Rex output and agent tasks require v0.1.8 or later.
 - Open `milo setup` for interactive configuration. Trying a layout is not
   permission to save it. Distinguish the global default from the override for
   this Git worktree. `milo_remember_layout` captures an explicitly chosen rail;

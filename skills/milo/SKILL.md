@@ -13,7 +13,8 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   usage sources without changing anything. `rex actions` (without `-C` or
   `REX_CLIENT`) lists server actions such as `milo_layout`.
 - Standalone Home and the rich previews below require v0.1.7 or later. On an
-  older install, use a direct pane command and check its `--help`.
+  older install, use a direct pane command and check its `--help`. Reader tab
+  sets, review notes, file lookup from Rex output and agent tasks require v0.1.8 or later.
 - Open `milo setup` for interactive configuration. Trying a layout is not
   permission to save it. Distinguish the global default from the override for
   this Git worktree. `milo_remember_layout` captures an explicitly chosen rail;
