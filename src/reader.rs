@@ -11,6 +11,7 @@ mod edit_tests;
 mod inbox;
 mod handed;
 mod markdown;
+mod pick;
 mod media;
 mod media_load;
 mod rescue;
@@ -45,6 +46,7 @@ use edit::{Editor, Place, Step};
 pub use rescue::take_notes as take_rescue_notes;
 pub use tabs::Tabs;
 pub use handed::{Handed, handed_lines};
+pub use pick::{Picked, PickedLine, Viewed};
 
 /// Lines of context kept above a change when jumping to it.
 const LEAD: usize = 3;
@@ -142,6 +144,13 @@ pub struct Reader {
     state: Option<PathBuf>,
     /// The folders searched for a formatter, as `PATH` lists them.
     tools: Option<std::ffi::OsString>,
+    /// The line cursor of a handed-over patch, while a line is being picked for a note.
+    pick: Option<pick::Pick>,
+    /// Lines of a handed-over patch that notes were written about, as sorted ranges.
+    noted: Vec<std::ops::RangeInclusive<usize>>,
+    /// How many notes on a handed-over patch are not copied yet, which the
+    /// hints count, or `None` while there is no note at all.
+    waiting_notes: Option<usize>,
 }
 
 /// A short message in place of the hints, or of the details in a reader too short for hints.
@@ -551,6 +560,9 @@ impl Reader {
             pending_editor_line: None,
             state: rescue::state_dir(),
             tools: std::env::var_os("PATH"),
+            pick: None,
+            noted: Vec::new(),
+            waiting_notes: None,
         }
     }
 
@@ -775,7 +787,15 @@ impl Pane for Reader {
                     note("changed. Milo cannot"),
                     note("tell who wrote them."),
                 ];
-                rows.splice(0..0, about.into_iter().chain(files).chain([key("r    ", "reload"), HelpRow::new()]));
+                let notes = [
+                    key("i    ", "note on a line"),
+                    key("p    ", "notes to copy"),
+                    note("Notes are copied,"),
+                    note("never sent for you."),
+                    HelpRow::new(),
+                ];
+                let lead = about.into_iter().chain(files).chain([key("r    ", "reload"), HelpRow::new()]);
+                rows.splice(0..0, lead.chain(notes));
             }
         }
         Page::new(rows)

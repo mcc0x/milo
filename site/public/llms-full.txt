@@ -96,7 +96,7 @@ The working-file Reader can also [view pictures, play supported MP4s, and render
 
 Press `e` to edit a working text file where you are reading it. The edit is a draft until you save with `Ctrl-S`, and a save never replaces a file that changed on disk without asking. `Ctrl-F` formats the draft with a [formatter you have installed](https://github.com/mcc0x/milo/blob/main/docs/panes.md#formatting); `Ctrl-Z` takes it back. See [editing files](https://github.com/mcc0x/milo/blob/main/docs/panes.md#editing-files).
 
-To review an agent’s edits without mixing in your own uncommitted work, have it hand you its recorded patch and run `milo review PATCH`. In Rex, `--float` opens that [read-only review](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits) over the current tab. Milo checks that the patch still fits, not who wrote it.
+To review an agent’s edits without mixing in your own uncommitted work, have it hand you its recorded patch and run `milo review PATCH`. In Rex, `--float` opens that [read-only review](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits) over the current tab. Milo checks that the patch still fits, not who wrote it. Press `i` to [write notes on its lines](https://github.com/mcc0x/milo/blob/main/docs/panes.md#notes-on-the-patchs-lines) and copy them, one now or all together, to paste back to the agent.
 
 ## Agent tasks
 
@@ -725,11 +725,67 @@ milo review /tmp/edits.patch --from "Claude Code" --float   # from an agent's sh
 | `]` / `[` | Next or previous file of the patch |
 | `r` | Read the files again |
 | `n` / `N`, `c`, scrolling | As in the reader |
-| `q` or `Esc` | Close |
+| `i` | Write a note on a line or a range of lines |
+| `p` | List the notes, to copy, edit or remove them |
+| `q` or `Esc` | Close; asks first while a note was never copied |
 
 With more than one file, the last row begins with `[ ] files`. In a pane too narrow for the place in the heading, that hint carries it instead, as `[ ] file 2 of 3` or `[ ] 2/3`, and gives up the other keys first.
 
 The review is read-only: `e` says so, and no file is written, in the project or outside it. The patch is read once when the review opens and is not copied or kept. Milo starts no program for it and asks Git nothing but where the project's top folder is, which the patch's paths are relative to.
+
+### Notes on the patch's lines
+
+Press `i` to say something about what you are reading without leaving it. A cursor (`›`) appears on the change in view. Move it with the arrow keys or `n` / `N`, press `v` to hold a range from there, and `Enter` to write. `c` already folds unchanged lines in every reader, so the note key is `i`.
+
+![A note being written under a patch: the cursor is on added line 13, and the panel below is headed Note on src/billing.rs, line 13](https://github.com/mcc0x/milo/blob/main/docs/evidence/review-notes/write.png)
+
+The note is written in a panel under the lines, which stay on screen. Its heading says which lines it is about. A line the patch added or left alone is named by its number in the file now. A line the patch removed has no number now, so it is named by its number before the patch and marked: `removed line 17 (old numbering)`. A range over both says both.
+
+| Key, while writing | Action |
+| --- | --- |
+| `Enter` | Keep the note for review |
+| `Ctrl-Y` | Copy this one note now, and keep it in the list as copied |
+| `Ctrl-N` | New line |
+| `Esc` | Cancel; asks first if there is text to lose |
+
+Either way the file is shown again from where you were reading it. A line with a note has a `•` beside it.
+
+Once there is a note, the last row counts those not copied yet, as `p 2 notes`. `p` opens the list: every note with its place and whether it has been copied, and under it the exact text that would be copied for the entry chosen. The first entry is all the waiting notes as one message.
+
+| Key, in the list | Action |
+| --- | --- |
+| `y` | Copy the chosen entry: one note, or all waiting notes as one message |
+| `e` or `Enter` | Edit the chosen note. A note changed after it was copied waits again. |
+| `d` | Remove the chosen note, after a yes |
+| `Esc` | Back to the patch |
+
+![The list of notes: one entry for both waiting notes as one message, four notes marked copied or to copy, and the text that will be copied](https://github.com/mcc0x/milo/blob/main/docs/evidence/review-notes/list.png)
+
+Copying one note with `Ctrl-Y` or `y` never copies or marks any other note, so an urgent remark can go ahead of the batch. A copied note stays in the list until you remove it, and can be copied again.
+
+```text
+Review notes (2)
+
+1. src/billing.rs, removed lines 9-13 (old numbering):
+>  9 -     let mut total = 0;
+> 10 -     for line in lines {
+> 11 -         total += line.cents * line.quantity as u64;
+> 12 -     }
+> 13 -     total
+Keep the overflow behaviour the loop had.
+
+2. README.md, line 4:
+> 4 + Tax is rounded to the nearest cent.
+Say which rounding: half-up.
+```
+
+A note quotes its lines as the review showed them when you wrote it, at most the first twelve. If the file changes and you press `r`, the note keeps what it quoted and its numbers; it is not moved to wherever those lines are now, and it loses its `•` if the lines are no longer where they were.
+
+**Notes are copied, never sent.** A copy asks your terminal to put the text on your clipboard (the OSC 52 sequence), which travels through the terminal and so is meant to reach your own machine when Milo runs on another host. You paste it to the agent yourself. Milo does not type into a pane, press Return for you, or deliver to an agent: `--from`, the focused pane and a session's name do not prove who should receive a note, and typing into a terminal would join whatever is already written at its prompt. [What was checked for each harness](https://github.com/mcc0x/milo/blob/main/docs/evidence/review-notes/README.md) says why none of them is sent to directly.
+
+- A terminal that does not act on that sequence copies nothing and says nothing, and Milo cannot tell. Try one copy in yours before relying on it: the check made was that a Rex server receives the text, not what each terminal app then does with it. The list shows the text for you to select by hand, and nothing is lost, because a copy never removes a note.
+- Notes live in the review and nowhere else. They are not written to the project, to Milo's state folder or to GitHub, and closing the review discards them. `q` asks first while one was never copied. A pane closed from outside cannot ask.
+- A note holds up to 4,000 characters and a review up to 99 notes. A batch over 64 KiB is refused whole; copy its notes one by one.
 
 ### What Milo checks, and what it cannot
 
@@ -993,7 +1049,7 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 
 The last row shows `e edit` when the file can be edited and the row has room. Help lists the reason when it cannot, and the formatter that would run.
 
-A [review of an agent's patch](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits), opened by `milo review PATCH`, adds `]` and `[` for the next or previous file of the patch and `r` to read the files again. It is always read-only.
+A [review of an agent's patch](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits), opened by `milo review PATCH`, adds `]` and `[` for the next or previous file of the patch and `r` to read the files again. `i` writes a [note on a line or a range](https://github.com/mcc0x/milo/blob/main/docs/panes.md#notes-on-the-patchs-lines) and `p` lists the notes to copy. It is always read-only.
 
 ### Editing in the reader
 
@@ -1595,6 +1651,24 @@ lines your patch says it left there, not who wrote them. A file whose lines
 were changed since shows a reason and no diff. Do not regenerate the patch
 from the current files to make it fit.
 
+The user can write notes on the patch's lines in that review. Milo never
+sends them to you: the user copies them and pastes them into your prompt,
+one at a time or several as one message. Do not ask Milo to deliver them, and
+do not read the review's pane for them. A pasted message begins `Review note`
+or `Review notes (N)`, and each note reads:
+
+```text
+src/billing.rs, line 13, removed line 17 (old numbering):
+> 17 -     subtotal * rate_percent / 100
+> 13 +     (subtotal * rate_percent + 50) / 100
+Is half-up rounding intended?
+```
+
+`line 13` counts in the file as it was when the note was written. A removed
+line has no number in the file, so `(old numbering)` counts in the file
+before your patch. The quoted lines are what the user was shown then; if you
+have edited the file since, find them by their text, not by the numbers.
+
 ## Do not
 
 - Do not edit the user's Rex or Claude Code configuration directly. Use
@@ -1881,7 +1955,9 @@ It claims no more than it checked. Milo checks that a file still holds the patch
 
 The patch is untrusted and the review writes nothing. Paths go through `safe` in `patch.rs` before any file is looked for, and files are read through `src/reader/working_path.rs` with no link followed. Keep the work limit in `fit.rs`. Do not copy the patch into the state folder, run a program for it, or install anything into an agent's settings.
 
-`cargo test --bin milo handoff:: review::` runs the unit tests and the pane tests, which mix a person's, the agent's and another agent's uncommitted edits in one file. With Rex installed, `cargo test --test rex_lab -- --ignored a_floating_review` opens the floating review on a disposable Rex server.
+Notes leave only as a copy. A note on the patch's lines (`src/review/`) is kept in memory with the lines as they were shown, and `Screen::copy` asks the review's own terminal to put its text on the clipboard. Do not have the review type into a pane (`rex send`, `send-key`, a terminal's `write`, a paste event), press Return, or call a harness to deliver a note, and do not keep notes in the state folder: they quote the patch. A direct send needs two things shown in a disposable session first: the harness itself, not the patch, `--from`, the focused pane or a session's name, says which running agent handed the patch over; and the delivery cannot join, submit or replace words already typed at that agent's prompt, nor run when the agent is gone. [The record for each harness](https://github.com/mcc0x/milo/blob/main/docs/evidence/review-notes/README.md) says where each one fell short; add to it rather than to the code until one passes both.
+
+`cargo test --bin milo handoff::` and `cargo test --bin milo review::` run the unit tests and the pane tests, which mix a person's, the agent's and another agent's uncommitted edits in one file. `cargo test --test pane a_review_note` writes and copies a note through a real terminal. With Rex installed, `cargo test --test rex_lab -- --ignored a_floating_review` opens the floating review on a disposable Rex server, and `cargo test --test rex_lab -- --ignored review_notes` checks there that copied notes reach the review's clipboard and that panes holding a draft are left as they were.
 
 ### Changing the task launcher
 
@@ -2064,12 +2140,17 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/reader/edit_tests.rs` | Checks editing, saving, conflicts, read-only files, kept drafts, and formatting. |
 | `src/reader/inbox.rs` | Carries a request to open one more file, at a line if one is named, to a reader already running in a Rex block, through a pipe in the state folder, and notes that reader's project beside it. |
 | `src/reader/handed.rs` | Loads a file with only a handed-over patch's edits marked, through no link and never to edit. |
+| `src/reader/pick.rs` | Moves a line cursor over a handed-over patch and reports the lines under it, for a note. |
 | `src/reader/rescue.rs` | Keeps the draft of a reader ended from outside, and marks a Rex reader that has unsaved edits. |
 | `src/reader/tabs.rs` | Holds the files open in one reader as tabs, draws their strip, and asks about every unsaved draft before a tab or the reader closes. |
 | `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
 | `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
 | `src/host.rs` | Names the computer Milo runs on and says whether its Rex server and command are ones Milo was checked with. |
-| `src/review.rs` | Runs `milo review`: a read-only reader over each file of a handed-over patch, and its floating form for a program with no terminal. |
+| `src/review.rs` | Runs `milo review`: a read-only reader over each file of a handed-over patch, its notes, and its floating form for a program with no terminal. |
+| `src/review/compose.rs` | Holds the text of a note while it is written: wrapping, the cursor and its keys. |
+| `src/review/list.rs` | Lists a review's notes with the text each is copied as. |
+| `src/review/note_tests.rs` | Checks what notes hold, what is copied and when, and that the reading position survives. |
+| `src/review/notes.rs` | Keeps a review's notes with the lines they quote, and words them for copying. |
 | `src/rex.rs` | Calls Rex for setup, floating readers, the listener, and the presence helper's watch. |
 | `src/rex/task.rs` | Creates a task's background session, watches for an agent that exits at once, and runs the launcher on another host. |
 | `src/rex/attention.rs` | Starts the script that reports terminals needing the person, and shows one pane in Rex after checking its host and block. |
@@ -2192,8 +2273,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
 | `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
 | `tests/rex_hosts.rs` | Follows Doctor, a forwarded settings editor and a settings bundle across two disposable Rex servers, and checks the first host's files stay as they were. |
-| `tests/rex_lab.rs` | Exercises Rex layouts and presence on a disposable server, edits files in floating reader tabs, opens a floating review of an agent-supplied patch, and starts agent tasks from the command line and the Rex action. |
-| `tests/rex_lab.rs` | Exercises Rex layouts and presence on a disposable server, edits files in floating reader tabs, opens a floating review of an agent-supplied patch, and opens files named in a pane's output. |
+| `tests/rex_lab.rs` | Exercises Rex layouts and presence on a disposable server, edits files in floating reader tabs, opens a floating review of an agent-supplied patch, copies review notes without touching other panes, starts agent tasks from the command line and the Rex action, and opens files named in a pane's output. |
 | `tests/settings-bench.py` | Times settings requests, a competing save and first state beside a responding Rex stand-in. |
 | `tests/task.rs` | Runs `milo task new` beside stand-ins for Rex and the four agents: the session asked for, literal prompts, refusals that create nothing, and what a late failure reports. |
 | `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
@@ -2214,7 +2294,7 @@ Milo only reads a project, with two exceptions, each of which you ask for: the r
 
 The reader can show where a file link points without reading its target. It refuses a path through a folder link that leaves the project and does not read devices or pipes as files. Text from the project cannot send terminal controls.
 
-`milo review` shows a patch that a program handed over. The patch's text is untrusted: its paths are refused unless they can only mean a file below the project folder and outside `.git`, each file is opened from the held project folder through no link, and its lines are found in the file in memory within a fixed amount of work. No program runs and nothing is written. See [reviewing an agent's edits](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits).
+`milo review` shows a patch that a program handed over. The patch's text is untrusted: its paths are refused unless they can only mean a file below the project folder and outside `.git`, each file is opened from the held project folder through no link, and its lines are found in the file in memory within a fixed amount of work. No program runs and nothing is written. Notes on its lines are kept in memory and leave only when the person copies them, as a clipboard request to the review's own terminal: no pane is typed into and no agent is sent anything. See [reviewing an agent's edits](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits).
 
 ## Writing
 

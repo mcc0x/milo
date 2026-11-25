@@ -77,7 +77,7 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 
 The last row shows `e edit` when the file can be edited and the row has room. Help lists the reason when it cannot, and the formatter that would run.
 
-A [review of an agent's patch](panes.md#reviewing-an-agents-edits), opened by `milo review PATCH`, adds `]` and `[` for the next or previous file of the patch and `r` to read the files again. It is always read-only.
+A [review of an agent's patch](panes.md#reviewing-an-agents-edits), opened by `milo review PATCH`, adds `]` and `[` for the next or previous file of the patch and `r` to read the files again. `i` writes a [note on a line or a range](panes.md#notes-on-the-patchs-lines) and `p` lists the notes to copy. It is always read-only.
 
 ### Editing in the reader
 

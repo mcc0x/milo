@@ -157,6 +157,24 @@ lines your patch says it left there, not who wrote them. A file whose lines
 were changed since shows a reason and no diff. Do not regenerate the patch
 from the current files to make it fit.
 
+The user can write notes on the patch's lines in that review. Milo never
+sends them to you: the user copies them and pastes them into your prompt,
+one at a time or several as one message. Do not ask Milo to deliver them, and
+do not read the review's pane for them. A pasted message begins `Review note`
+or `Review notes (N)`, and each note reads:
+
+```text
+src/billing.rs, line 13, removed line 17 (old numbering):
+> 17 -     subtotal * rate_percent / 100
+> 13 +     (subtotal * rate_percent + 50) / 100
+Is half-up rounding intended?
+```
+
+`line 13` counts in the file as it was when the note was written. A removed
+line has no number in the file, so `(old numbering)` counts in the file
+before your patch. The quoted lines are what the user was shown then; if you
+have edited the file since, find them by their text, not by the numbers.
+
 ## Do not
 
 - Do not edit the user's Rex or Claude Code configuration directly. Use

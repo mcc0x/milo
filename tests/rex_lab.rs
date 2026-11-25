@@ -1156,6 +1156,122 @@ fn a_floating_review_marks_only_the_handed_over_edits_and_says_when_it_cannot() 
     assert!(!lab.root.join("home/.local/state/milo").exists(), "the review kept something in Milo's state folder");
 }
 
+/// A person takes notes on a patch in a tab of their own. The notes leave
+/// through that tab's clipboard and nowhere else: not into the pane that holds
+/// an unsent draft, nor into a pane that took a closed one's place and has focus.
+#[test]
+#[ignore = "needs an installed Rex; starts a disposable server"]
+fn review_notes_are_copied_out_and_never_typed_into_another_pane() {
+    let lab = Lab::start();
+    let dir = lab.root.join("notes");
+    fs::create_dir_all(&dir).unwrap();
+    lab.git(&dir, &["init", "-q", "-b", "main"]);
+    fs::write(dir.join("app.txt"), "one\ntwo\nthree\nfour\nfive\nsix\n").unwrap();
+    lab.git(&dir, &["add", "-A"]);
+    lab.git(&dir, &["commit", "-q", "-m", "base"]);
+    let now = "one\ntwo\nthree\nfour, by the agent\nfive\nsix\n";
+    fs::write(dir.join("app.txt"), now).unwrap();
+    let patch = lab.root.join("edits.patch");
+    fs::write(&patch, "--- a/app.txt\n+++ b/app.txt\n@@ -3,3 +3,3 @@\n three\n-four\n+four, by the agent\n five\n")
+        .unwrap();
+
+    let [session, agent_tab] = lab.new_session("notes", "agent", &dir);
+    let shell_of = |tab: &str| lab.view().tab(tab).panes[0].block.clone();
+    let screen = |block: &str| lab.rex(&["capture", "-s", &session, "-b", block, "--trim"]);
+    let drafted = |block: &str, draft: &str| {
+        // A shell still starting would echo the words twice: once as typed ahead, once at its prompt.
+        let prompt = || screen(block).lines().last().is_some_and(|line| line.ends_with('%'));
+        assert!(soon(prompt), "{}", screen(block));
+        lab.rex(&["send", "-s", &session, "-b", block, draft]);
+        assert!(soon(|| screen(block).contains(draft)), "{}", screen(block));
+        screen(block)
+    };
+    // Where the agent would be: a prompt with words typed and not sent.
+    let agent = shell_of(&agent_tab);
+    let before = drafted(&agent, "half a prompt, not sent");
+
+    let made = lab.rex(&[
+        "window",
+        "new",
+        "Review",
+        "-s",
+        &session,
+        "-c",
+        dir.to_str().unwrap(),
+        "--json",
+        "--",
+        lab.milo.to_str().unwrap(),
+        "review",
+        patch.to_str().unwrap(),
+        "--from",
+        "the agent",
+    ]);
+    let review = id(&made, "block_ids");
+    let shows =
+        |text: &str| assert!(soon(|| screen(&review).contains(text)), "expected {text:?} on:\n{}", screen(&review));
+    let keys = |keys: &[&str]| {
+        lab.rex(&[["send-key", "-s", session.as_str(), "-b", review.as_str()].as_slice(), keys].concat());
+    };
+    let write = |text: &str| lab.rex(&["send", "-s", &session, "-b", &review, text]);
+    let clipboard = |copy: &str| {
+        let asked = format!("{{\"id\":{copy}}}");
+        lab.rex(&["block", "call", "-s", &session, "-b", &review, "clipboard_read", &asked])
+    };
+    shows("patch from the agent");
+
+    // One note, copied at once: it reaches the review's own clipboard and no pane.
+    keys(&["i"]);
+    shows("Enter write");
+    keys(&["enter"]);
+    shows("Note on app.txt, removed line 4 (old numbering)");
+    write("Why four?");
+    shows("Why four?");
+    keys(&["ctrl+y"]);
+    shows("Copied this note");
+    let first = clipboard("1");
+    assert!(
+        first.contains("app.txt, removed line 4 (old numbering):") && first.contains("4 - four\\nWhy four?"),
+        "{first}"
+    );
+    assert_eq!(screen(&agent), before, "the pane with a draft changed");
+
+    // That pane closes and another takes its place, with a draft of its own and the focus.
+    lab.close_tab(&session, &agent_tab);
+    let replacement_tab = lab.new_tab(&session, &dir);
+    let replacement = shell_of(&replacement_tab);
+    lab.rex(&["focus", "-s", &session, &replacement_tab]);
+    let before = drafted(&replacement, "someone else is typing here");
+
+    // Two notes kept, then copied as one message. Still nothing is typed anywhere.
+    for (down, text) in [(1, "Say who."), (2, "And this?")] {
+        keys(&["i"]);
+        shows("Enter write");
+        keys(&vec!["down"; down]);
+        keys(&["enter"]);
+        shows("Note on app.txt, line");
+        write(text);
+        shows(text);
+        keys(&["enter"]);
+        shows("Kept for review");
+    }
+    keys(&["p"]);
+    shows("All 2 waiting notes, as one message");
+    keys(&["y"]);
+    shows("Copied the waiting notes as one message");
+    let batch = clipboard("2");
+    assert!(batch.contains("Review notes (2)") && batch.contains("Say who.") && batch.contains("And this?"), "{batch}");
+    assert!(!batch.contains("Why four?"), "the note copied earlier was copied again: {batch}");
+    assert_eq!(screen(&replacement), before, "the pane that took the closed one's place changed");
+
+    // Everything was copied, so the review closes without asking. It wrote nothing.
+    keys(&["q"]);
+    shows("i note · p notes");
+    keys(&["q"]);
+    assert!(soon(|| !lab.rex(&["block", "ls", "-s", &session, "--json"]).contains(&review)), "the review stayed open");
+    assert_eq!(fs::read_to_string(dir.join("app.txt")).unwrap(), now);
+    assert!(!lab.root.join("home/.local/state/milo").exists(), "the review kept something in Milo's state folder");
+}
+
 /// `milo task new` and the Rex action start an agent in a worktree and a
 /// session of its own, on a real server. The agent is a stand-in that records
 /// how it was started and stays, as an interactive agent does. A real app is

@@ -365,6 +365,25 @@ impl Screen {
         self.pictures.resize_due = None;
     }
 
+    /// Draws with the bottom `rows` rows left out, for a panel drawn there afterwards.
+    pub fn above(&mut self, rows: usize, draw: impl FnOnce(&mut Screen)) {
+        let rows = rows.min(self.h);
+        self.h -= rows;
+        draw(self);
+        self.h += rows;
+    }
+
+    /// Asks the terminal, with the next frame, to put `text` on the clipboard
+    /// of whoever is looking at it (OSC 52). The request travels with the
+    /// frame, so it is the person's own terminal that gets it when this
+    /// machine is remote. A terminal without it copies nothing and says
+    /// nothing, so nothing here can tell whether the text arrived.
+    pub fn copy(&mut self, text: &str) {
+        self.out.extend_from_slice(b"\x1b]52;c;");
+        crate::picture::append_base64(text.as_bytes(), &mut self.out);
+        self.out.extend_from_slice(b"\x1b\\");
+    }
+
     /// Draws with the top `rows` rows left out: row 0 for `draw` is the row under them.
     pub fn below(&mut self, rows: usize, draw: impl FnOnce(&mut Screen)) {
         let rows = rows.min(self.h);

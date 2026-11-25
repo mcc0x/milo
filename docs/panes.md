@@ -191,11 +191,67 @@ milo review /tmp/edits.patch --from "Claude Code" --float   # from an agent's sh
 | `]` / `[` | Next or previous file of the patch |
 | `r` | Read the files again |
 | `n` / `N`, `c`, scrolling | As in the reader |
-| `q` or `Esc` | Close |
+| `i` | Write a note on a line or a range of lines |
+| `p` | List the notes, to copy, edit or remove them |
+| `q` or `Esc` | Close; asks first while a note was never copied |
 
 With more than one file, the last row begins with `[ ] files`. In a pane too narrow for the place in the heading, that hint carries it instead, as `[ ] file 2 of 3` or `[ ] 2/3`, and gives up the other keys first.
 
 The review is read-only: `e` says so, and no file is written, in the project or outside it. The patch is read once when the review opens and is not copied or kept. Milo starts no program for it and asks Git nothing but where the project's top folder is, which the patch's paths are relative to.
+
+### Notes on the patch's lines
+
+Press `i` to say something about what you are reading without leaving it. A cursor (`›`) appears on the change in view. Move it with the arrow keys or `n` / `N`, press `v` to hold a range from there, and `Enter` to write. `c` already folds unchanged lines in every reader, so the note key is `i`.
+
+![A note being written under a patch: the cursor is on added line 13, and the panel below is headed Note on src/billing.rs, line 13](evidence/review-notes/write.png)
+
+The note is written in a panel under the lines, which stay on screen. Its heading says which lines it is about. A line the patch added or left alone is named by its number in the file now. A line the patch removed has no number now, so it is named by its number before the patch and marked: `removed line 17 (old numbering)`. A range over both says both.
+
+| Key, while writing | Action |
+| --- | --- |
+| `Enter` | Keep the note for review |
+| `Ctrl-Y` | Copy this one note now, and keep it in the list as copied |
+| `Ctrl-N` | New line |
+| `Esc` | Cancel; asks first if there is text to lose |
+
+Either way the file is shown again from where you were reading it. A line with a note has a `•` beside it.
+
+Once there is a note, the last row counts those not copied yet, as `p 2 notes`. `p` opens the list: every note with its place and whether it has been copied, and under it the exact text that would be copied for the entry chosen. The first entry is all the waiting notes as one message.
+
+| Key, in the list | Action |
+| --- | --- |
+| `y` | Copy the chosen entry: one note, or all waiting notes as one message |
+| `e` or `Enter` | Edit the chosen note. A note changed after it was copied waits again. |
+| `d` | Remove the chosen note, after a yes |
+| `Esc` | Back to the patch |
+
+![The list of notes: one entry for both waiting notes as one message, four notes marked copied or to copy, and the text that will be copied](evidence/review-notes/list.png)
+
+Copying one note with `Ctrl-Y` or `y` never copies or marks any other note, so an urgent remark can go ahead of the batch. A copied note stays in the list until you remove it, and can be copied again.
+
+```text
+Review notes (2)
+
+1. src/billing.rs, removed lines 9-13 (old numbering):
+>  9 -     let mut total = 0;
+> 10 -     for line in lines {
+> 11 -         total += line.cents * line.quantity as u64;
+> 12 -     }
+> 13 -     total
+Keep the overflow behaviour the loop had.
+
+2. README.md, line 4:
+> 4 + Tax is rounded to the nearest cent.
+Say which rounding: half-up.
+```
+
+A note quotes its lines as the review showed them when you wrote it, at most the first twelve. If the file changes and you press `r`, the note keeps what it quoted and its numbers; it is not moved to wherever those lines are now, and it loses its `•` if the lines are no longer where they were.
+
+**Notes are copied, never sent.** A copy asks your terminal to put the text on your clipboard (the OSC 52 sequence), which travels through the terminal and so is meant to reach your own machine when Milo runs on another host. You paste it to the agent yourself. Milo does not type into a pane, press Return for you, or deliver to an agent: `--from`, the focused pane and a session's name do not prove who should receive a note, and typing into a terminal would join whatever is already written at its prompt. [What was checked for each harness](evidence/review-notes/README.md) says why none of them is sent to directly.
+
+- A terminal that does not act on that sequence copies nothing and says nothing, and Milo cannot tell. Try one copy in yours before relying on it: the check made was that a Rex server receives the text, not what each terminal app then does with it. The list shows the text for you to select by hand, and nothing is lost, because a copy never removes a note.
+- Notes live in the review and nowhere else. They are not written to the project, to Milo's state folder or to GitHub, and closing the review discards them. `q` asks first while one was never copied. A pane closed from outside cannot ask.
+- A note holds up to 4,000 characters and a review up to 99 notes. A batch over 64 KiB is refused whole; copy its notes one by one.
 
 ### What Milo checks, and what it cannot
 
