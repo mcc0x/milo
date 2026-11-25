@@ -388,6 +388,29 @@ fn a_jump_checks_the_host_and_the_pane_before_it_changes_anything() {
     // Two apps here: Milo does not pick one.
     home.write("clients.json", &format!(r#"{{"clients":[{app},{}]}}"#, app.replace("d699", "d698")));
     assert!(jump(HOST).starts_with("focused\nThe pane is focused in its session. Several Rex apps"));
+
+    // The list a running server gave: command-line clients, one client with no description at all,
+    // and Rex for Mac after them. The app is still found, and it alone is asked.
+    let local = format!(r#""principal":{{"kind":"peer","transport":"unix","uid":{uid},"pid":77}}"#);
+    let cli = format!(
+        r#"{{"client_id":"{}","info":{{"kind":"cli"}},"connection_state":"connected",{local}}}"#,
+        APP.replace("d699", "d601")
+    );
+    let undescribed =
+        format!(r#"{{"client_id":"{}","connection_state":"connected",{local}}}"#, APP.replace("d699", "d602"));
+    home.write("clients.json", &format!(r#"{{"clients":[{cli},{undescribed},{app},{cli}]}}"#));
+    fs::remove_file(home.root.join("rex-calls")).unwrap();
+    assert_eq!(jump(HOST), "shown 4242\n");
+    assert_eq!(calls().matches("session.select").count(), 1, "{}", calls());
+    assert!(calls().contains(&select), "{}", calls());
+    // An app listed without what identifies it is not passed over for the one beside it.
+    let unsure = app.replace("d699", "d698").replace(r#","pid":4242"#, "");
+    home.write("clients.json", &format!(r#"{{"clients":[{unsure},{app}]}}"#));
+    fs::remove_file(home.root.join("rex-calls")).unwrap();
+    assert!(
+        jump(HOST).starts_with("focused\nThe pane is focused in its session, but Milo couldn’t tell which Rex app")
+    );
+    assert!(!calls().contains("session.select"), "{}", calls());
 }
 
 mod real_rex {

@@ -141,6 +141,8 @@ const NO_APP: &str = "The pane is focused in its session, but no Rex app on this
     Open Rex and pick the session.";
 const SEVERAL_APPS: &str = "The pane is focused in its session. Several Rex apps are connected on this Mac, \
     so Milo didn’t pick one to switch: open the session in the one you want.";
+const UNSURE_APP: &str = "The pane is focused in its session, but Milo couldn’t tell which Rex app on this Mac to \
+    switch, so it switched none. Open the session in Rex.";
 const NOT_SWITCHED: &str = "The pane is focused in its session, but Rex didn’t switch to it. Rex takes that request \
     only with Remote Control on (Settings › General › Client Info), and Milo doesn’t change that setting. \
     Open the session in Rex.";
@@ -171,16 +173,35 @@ fn placed(reply: &[u8], host: &str, block: &str) -> Option<(String, String)> {
 }
 
 /// The Rex apps of this person connected over the server's local socket: each one's client ID and process ID.
+///
+/// Only a client that says it is an app is looked at further. Rex also lists command-line clients,
+/// scripts and entries with no description at all, and what those leave out says nothing about an app.
+/// An app is counted only when everything that identifies it is there and whole. `None` when an app that
+/// may be this person's is listed without that: whether it is the one to switch cannot be told, so none is.
 fn local_apps(reply: &[u8], uid: u64) -> Option<Vec<(String, u32)>> {
     let [clients] = Value::parse(reply)?.fields(["clients"]);
     let mut apps = Vec::new();
     for client in clients?.elements()? {
         let [id, info, principal, state] = client.fields(["client_id", "info", "principal", "connection_state"]);
-        let [kind] = info?.fields(["kind"]);
-        let [peer, transport, owner, pid] = principal?.fields(["kind", "transport", "uid", "pid"]);
-        let here = peer.is_some_and(|peer| peer.is("peer")) && transport.is_some_and(|transport| transport.is("unix"));
-        if !kind?.is("app") || !state?.is("connected") || !here || owner.and_then(Value::unsigned) != Some(uid) {
+        let [kind] = info.map_or([None], |info| info.fields(["kind"]));
+        if !kind.is_some_and(|kind| kind.is("app")) {
             continue;
+        }
+        // An app whose connection dropped may come back, but it can show nothing now.
+        let state = state?;
+        if state.is("lost") {
+            continue;
+        }
+        let [peer, transport, owner, pid] = principal?.fields(["kind", "transport", "uid", "pid"]);
+        // An app that reached the server another way runs on another computer.
+        if !peer?.is("peer") || !transport?.is("unix") {
+            continue;
+        }
+        if owner?.unsigned()? != uid {
+            continue;
+        }
+        if !state.is("connected") {
+            return None;
         }
         let id = id?.string(43)?;
         exact_id(OsStr::new(id.as_ref()), "client:")?;
@@ -213,7 +234,9 @@ pub(crate) fn jump(host: &str, block: &str) -> Jump {
     if ask(&["api", "call", "-s", &session, "session.focus_block", &focus]).is_none() {
         return Jump::Unavailable(NOT_FOCUSED);
     }
-    let apps = ask(&["client", "ls", "--json"]).and_then(|reply| local_apps(&reply, uid)).unwrap_or_default();
+    let Some(apps) = ask(&["client", "ls", "--json"]).and_then(|reply| local_apps(&reply, uid)) else {
+        return Jump::Focused(UNSURE_APP);
+    };
     let [(client, pid)] = &apps[..] else {
         return Jump::Focused(if apps.is_empty() { NO_APP } else { SEVERAL_APPS });
     };
@@ -258,26 +281,71 @@ mod tests {
         }
     }
 
+    fn client(id: u8, info: &str, principal: &str, state: &str) -> String {
+        format!(
+            r#"{{"client_id":"client:01a21295-d097-70de-b037-f56cd986d6{id:02}",{info}
+                "principal":{principal},"connection_state":"{state}"}}"#
+        )
+    }
+
+    const UNIX: &str = r#"{"kind":"peer","transport":"unix","uid":501,"pid":4242}"#;
+    const APP: &str = r#""info":{"kind":"app","platform":"macos","name":"Rex"},"#;
+
+    fn listed(clients: &[String]) -> Option<Vec<(String, u32)>> {
+        local_apps(format!(r#"{{"clients":[{}]}}"#, clients.join(",")).as_bytes(), 501)
+    }
+
+    fn app(id: u8) -> (String, u32) {
+        (format!("client:01a21295-d097-70de-b037-f56cd986d6{id:02}"), 4242)
+    }
+
     #[test]
     fn only_this_persons_connected_apps_on_the_local_socket_can_be_switched() {
-        let client = |id: u8, kind: &str, principal: &str, state: &str| {
-            format!(
-                r#"{{"client_id":"client:01a21295-d097-70de-b037-f56cd986d6{id:02}","info":{{"kind":"{kind}"}},
-                    "principal":{principal},"connection_state":"{state}"}}"#
-            )
-        };
-        let unix = r#"{"kind":"peer","transport":"unix","uid":501,"pid":4242}"#;
-        let list = [
-            client(1, "cli", unix, "connected"),
-            client(2, "app", r#"{"kind":"tailscale","transport":"tailscale"}"#, "connected"),
-            client(3, "app", r#"{"kind":"peer","transport":"unix","uid":0,"pid":7}"#, "connected"),
-            client(4, "app", unix, "lost"),
-            client(5, "app", unix, "connected"),
-        ];
-        let reply = format!(r#"{{"clients":[{}]}}"#, list.join(","));
-        let expected = vec![("client:01a21295-d097-70de-b037-f56cd986d605".to_owned(), 4242)];
-        assert_eq!(local_apps(reply.as_bytes(), 501), Some(expected));
+        let found = listed(&[
+            client(1, r#""info":{"kind":"cli"},"#, UNIX, "connected"),
+            client(2, APP, r#"{"kind":"tailscale","transport":"tailscale"}"#, "connected"),
+            client(3, APP, r#"{"kind":"peer","transport":"unix","uid":0,"pid":7}"#, "connected"),
+            client(4, APP, UNIX, "lost"),
+            client(5, APP, UNIX, "connected"),
+        ]);
+        assert_eq!(found, Some(vec![app(5)]));
+        assert_eq!(listed(&[client(5, APP, UNIX, "connected"), client(6, APP, UNIX, "connected")]).unwrap().len(), 2);
         assert_eq!(local_apps(br#"{"clients":[]}"#, 501), Some(Vec::new()));
         assert_eq!(local_apps(b"not json", 501), None);
+    }
+
+    #[test]
+    fn a_client_that_does_not_say_it_is_an_app_cannot_hide_the_app_listed_after_it() {
+        // As a running server listed them: an earlier local client of the same person with no
+        // description at all, then Rex for Mac.
+        let found = listed(&[client(1, "", UNIX, "connected"), client(5, APP, UNIX, "connected")]);
+        assert_eq!(found, Some(vec![app(5)]));
+        // Whatever else such an entry leaves out or garbles, it is still not an app.
+        let bare = r#"{"client_id":7}"#.to_owned();
+        let no_kind = client(2, r#""info":{"name":"rex"},"#, "null", "odd");
+        let odd_kind = client(3, r#""info":{"kind":["app"]},"#, UNIX, "connected");
+        assert_eq!(listed(&[bare, no_kind, odd_kind, client(5, APP, UNIX, "connected")]), Some(vec![app(5)]));
+        // And it is never counted as an app itself, however local it is.
+        assert_eq!(listed(&[client(1, "", UNIX, "connected")]), Some(Vec::new()));
+    }
+
+    #[test]
+    fn an_app_that_cannot_be_told_apart_is_not_passed_over_for_another() {
+        let whole = client(5, APP, UNIX, "connected");
+        let no_pid = r#"{"kind":"peer","transport":"unix","uid":501}"#;
+        let no_uid = r#"{"kind":"peer","transport":"unix","pid":4242}"#;
+        let no_transport = r#"{"kind":"peer","uid":501,"pid":4242}"#;
+        for unsure in [
+            client(6, APP, UNIX, "reconnecting"),
+            client(6, APP, no_pid, "connected"),
+            client(6, APP, no_uid, "connected"),
+            client(6, APP, no_transport, "connected"),
+            client(6, APP, "null", "connected"),
+            client(6, APP, UNIX, "connected").replace("client:01a21295", "01a21295"),
+            client(6, APP, UNIX, "connected").replace(r#","connection_state":"connected""#, ""),
+        ] {
+            assert_eq!(listed(&[whole.clone(), unsure.clone()]), None, "{unsure}");
+            assert_eq!(listed(&[unsure.clone(), whole.clone()]), None, "{unsure}");
+        }
     }
 }
