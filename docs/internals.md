@@ -14,6 +14,8 @@ A formatter is a program of a fixed name, found in the folders of `PATH` that ar
 
 Outside the project, milo keeps three things in its state folder for the editor: the draft of a reader that was ended with unsaved changes; in Rex, a mark that a floating reader has unsaved changes in some tab so that another pane does not replace it; and, also in Rex, a pipe under `readers` named after the reader's block, on which the pane that opened it asks for one more file as a tab. The mark names the reader's process and is ignored once that process is gone. The pipe is in a folder only you can use, carries a path and an optional commit ID and nothing back, and is removed when its reader ends. A request is read the way `milo view`'s own arguments are, so it can open a file for reading and nothing more.
 
+The same folder holds, under `tabs`, the lists of [reader tabs](panes.md#reopening-tabs-and-named-sets) for each worktree: paths inside the worktree, full commit IDs, a line number for each tab and which tab was shown, and never a file's text. A list is read as untrusted: a path that is absolute or contains `..` voids the whole file, a commit is accepted only as a full ID, and each tab is then opened as `milo view` would open it, through the same path checks. A file at a commit that Git cannot find is not opened at all.
+
 ## Updates and drawing
 
 - One terminal loop handles replies, input, help and checks for changes. Pasted text is never read as keys: it is skipped, or handed whole to a pane that is taking text. If opening takes more than a moment, it draws `Reading…`; when it can identify a project, it shows its name too. A blocked loading-frame write yields once the pane is ready.

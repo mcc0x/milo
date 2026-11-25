@@ -1140,3 +1140,6 @@ fn a_floating_review_marks_only_the_handed_over_edits_and_says_when_it_cannot() 
     assert_eq!(fs::read_to_string(dir.join("app.txt")).unwrap(), now.replace("four, by the agent", "four, rewritten"));
     assert!(!lab.root.join("home/.local/state/milo").exists(), "the review kept something in Milo's state folder");
 }
+
+#[path = "rex_lab/tab_sets.rs"]
+mod tab_sets;

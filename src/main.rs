@@ -75,6 +75,7 @@ Usage: milo
        milo presence details DETAILS | application ID
        milo view FILE [--commit ID | --edit]
        milo review PATCH [--from NAME] [--float]
+       milo tabs [--last]
        milo PATH
        milo [setup] --skip-onboarding
        milo listen [--stop]
@@ -188,6 +189,9 @@ move between the patch's files and r reads them again. Milo checks that a
 file still holds the patch's lines, not who wrote them, and shows no diff
 for a file that no longer does. --from NAME says whose patch it is; --float
 opens the review in a floating Rex pane from a program with no terminal.
+milo tabs lists the tabs the reader last had open in this worktree and the
+sets you saved under a name, previews one and reopens the tabs you choose.
+--last starts at the last tabs. In a reader, Ctrl-T shows the same lists.
 The reader only reads until you press e. Edits are a draft until saved, and
 a save never replaces a file that changed on disk without asking. Files at
 a commit, links, pictures and files that are not UTF-8 text stay read-only.
@@ -214,6 +218,9 @@ fn command_help(name: &str) -> Option<&'static str> {
         "review" => {
             "Usage: milo review PATCH [--from NAME] [--float]\n\nRead the edits in PATCH, a unified diff that a coding agent wrote of its own edits. Each file is shown as it is now with only those edits marked; other uncommitted work reads as unchanged. Milo checks that the file still holds the patch's lines, not who wrote them. A file that no longer holds them shows no diff.\n--from NAME shows whose patch it is said to be.\n--float opens the review in a floating Rex pane and prints what it shows, for a program with no terminal of its own."
         }
+        "tabs" => {
+            "Usage: milo tabs [--last]\n\nReopen reader tabs in this worktree: the tabs the reader last had open, or a set saved under a name. A list is previewed first, with each working file and each file at a commit named as such, and only the tabs you select are reopened. A missing file or a commit the repository no longer has is marked and stays closed. --last starts at the preview of the last tabs.\nIn a reader, Ctrl-T shows the same lists over the open tabs, and saves, renames, replaces or deletes a named set."
+        }
         "setup" => {
             "Usage: milo setup\n       milo setup --skip-onboarding | --repair | --remove\n\nOpen Settings, skip the welcome guide without a terminal, or maintain managed integrations."
         }
@@ -235,9 +242,9 @@ fn command_help(name: &str) -> Option<&'static str> {
 }
 
 /// Every word `command_help` knows, in the order `--help` lists them.
-const COMMANDS: [&str; 14] = [
+const COMMANDS: [&str; 15] = [
     "outline", "history", "usage", "menubar", "setup", "web", "settings", "doctor", "presence", "view", "review",
-    "listen", "alerts", "claude-status",
+    "tabs", "listen", "alerts", "claude-status",
 ];
 const OPTIONS: [&str; 3] = ["--help", "--version", "--skip-onboarding"];
 
@@ -332,6 +339,7 @@ enum Command<'a> {
     View { file: &'a OsStr, commit: Option<CommitId<'a>> },
     Review { patch: &'a OsStr, from: Option<&'a str>, float: bool },
     Edit(&'a OsStr),
+    Tabs { last: bool },
     Path(&'a OsStr),
     Usage,
     UsageMenuStream,
@@ -443,6 +451,9 @@ fn command<'a>(
         (Some("review"), None) => {
             return Err("missing patch; use milo review PATCH [--from NAME] [--float]".to_string());
         }
+        (Some("tabs"), None) => Command::Tabs { last: false },
+        (Some("tabs"), Some(flag)) if flag == "--last" => Command::Tabs { last: true },
+        (Some("tabs"), Some(_)) => return Err("expected milo tabs [--last]".to_string()),
         (Some("setup"), None) => Command::Setup,
         (Some("web"), first_flag) => {
             const EXPECTED: &str = "expected milo web [--host HOST [--project DIR]] [--port PORT] [--no-open]";
@@ -602,6 +613,9 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             reader.edit(std::time::Instant::now());
             Ok(Box::new(Tabs::new(reader)))
         }),
+        Command::Tabs { last } => {
+            run(Start::Reading(Path::new(".")), &|| Ok(Box::new(reader::TabSets::open(Path::new("."), last)?)))
+        }
         Command::Usage => run(Start::Check, &|| Ok(Box::new(usage::Usage::open()))),
         Command::UsageMenuStream => usage::menu_stream().map_err(|e| format!("could not stream usage: {e}")),
         Command::Web(start) => web::run(start),

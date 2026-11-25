@@ -2404,3 +2404,42 @@ fn menu_indicator_cli_updates_a_running_stream_for_only_its_own_profile() {
     drop(requests);
     assert!(stream.wait().unwrap().success());
 }
+
+#[test]
+fn the_tabs_a_reader_closed_with_reopen_from_the_shell_after_a_preview() {
+    let project = Project::new();
+    project.git(&["init", "-q"]);
+    fs::write(project.0.join("project/page.txt"), "project text\n").unwrap();
+    let milo = || project.command(env!("CARGO_BIN_EXE_milo"));
+
+    // With nothing remembered the lists say so, and Esc ends them.
+    let mut tty = Terminal::run(milo().arg("tabs"));
+    tty.shows("No tabs are remembered for this worktree yet.");
+    tty.master.write_all(b"\x1b").unwrap();
+    assert!(tty.wait_for_exit().success());
+
+    let mut tty = Terminal::run(milo().args(["view", "page.txt"]));
+    tty.shows("project text");
+    tty.master.write_all(b"q").unwrap();
+    assert!(tty.wait_for_exit().success());
+    // What is kept is in milo's state folder, and names the file without holding its text.
+    let lists = project.0.join("state/milo/tabs");
+    let kept = fs::read_dir(&lists).unwrap().next().unwrap().unwrap().path().join("last.tabs");
+    assert_eq!(fs::read_to_string(kept).unwrap(), "milo tabs 1\nactive 0\nworking 0 page.txt\n");
+    assert_eq!(project.git(&["status", "--porcelain"]), "?? page.txt\n");
+
+    let mut tty = Terminal::run(milo().args(["tabs", "--last"]));
+    tty.shows("Reopen  Last tabs");
+    tty.shows("[x] page.txt");
+    tty.shows("working file");
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows("project text");
+    tty.shows("e edit");
+    tty.master.write_all(b"q").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+
+    let refused = milo().args(["tabs", "--first"]).output().unwrap();
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8(refused.stderr).unwrap().contains("expected milo tabs [--last]"));
+}

@@ -6,17 +6,19 @@
 //! above it with the second. A tab closes only once its file is no longer
 //! being edited, which is where unsaved edits are asked about.
 
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 use std::ops::Range;
 use std::os::fd::RawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::content::{CommittedTarget, WorkingTarget};
 use super::inbox::{Inbox, Request};
+use super::reopen::{Plan, Reopen, Step};
 use super::rescue::{self, Mark};
-use super::{Reader, Source};
-use crate::git::CommitId;
+use super::sets::{Entry, List, Shelf};
+use super::{Body, Reader, Source, media_load};
+use crate::git::{CommitId, Repo};
 use crate::help::{self, Page};
 use crate::keys::Key;
 use crate::pane::{After, External, Pane};
@@ -76,6 +78,98 @@ pub struct Tabs {
     rescope: Cell<bool>,
     /// The shown tab closes once its edit has ended.
     closing: bool,
+    /// Where the tabs are remembered, found when first needed: a reader that
+    /// is only read looks nothing up until it closes.
+    memory: OnceCell<Option<Memory>>,
+    /// The screen of lists, while it covers the tabs.
+    reopen: Option<Reopen>,
+}
+
+/// Where one reader's tabs are remembered as the last tabs of its worktree.
+struct Memory {
+    state: PathBuf,
+    /// The top of the worktree the first tab's file is read from. Only tabs of that worktree are remembered.
+    root: PathBuf,
+    /// The last tabs as they were before this reader began to replace them.
+    earlier: Option<List>,
+}
+
+impl Memory {
+    fn new(state: PathBuf, root: PathBuf) -> Self {
+        let earlier = Shelf::new(state.clone(), &root).last();
+        Self { state, root, earlier }
+    }
+
+    fn shelf(&self) -> Shelf {
+        Shelf::new(self.state.clone(), &self.root)
+    }
+}
+
+/// The top of the worktree a tab's file is read from. A handed-over patch is never remembered.
+fn root_of(reader: &Reader) -> Option<&Path> {
+    match &reader.source {
+        Source::Working(work) => Some(&work.repo.root),
+        Source::Committed { project, .. } => Some(project),
+        Source::Handed(_) => None,
+    }
+}
+
+impl Reader {
+    /// This tab as a list keeps it, if its file is read from the worktree at `root`.
+    fn listed(&self, root: &Path) -> Option<Entry> {
+        let (path, commit) = match &self.source {
+            Source::Working(work) if work.repo.root == root => (work.relative.to_str()?.to_owned(), None),
+            Source::Committed { project, hash, .. } if project == root => (self.path.clone(), Some(hash.clone())),
+            _ => return None,
+        };
+        let line = self.editor.as_ref().map_or_else(|| self.top_line(), |editor| editor.top());
+        Some(Entry { path, commit, line })
+    }
+
+    /// Shows the file from `line`, as nearly as the file as it is now allows.
+    fn show_from(&mut self, line: usize) {
+        if matches!(self.body, Body::Note(media_load::PENDING)) {
+            self.pending_editor_line = Some(line);
+        } else {
+            self.show_editor_line(line);
+        }
+    }
+}
+
+/// A tab of a list as it can be opened now: the working file, or the file at the commit that was kept.
+enum Kept {
+    Working(WorkingTarget),
+    Committed(CommittedTarget),
+}
+
+impl Kept {
+    /// None for a working file that is gone and for a commit the repository does not have.
+    /// The working file never stands in for the file at a commit.
+    fn find(root: &Path, entry: &Entry) -> Option<Self> {
+        match &entry.commit {
+            Some(id) => CommittedTarget::resolve_from(root, Path::new(&entry.path), CommitId::parse(id)?)
+                .ok()
+                .map(Self::Committed),
+            None => WorkingTarget::resolve(&root.join(&entry.path)).filter(WorkingTarget::present).map(Self::Working),
+        }
+    }
+
+    fn matches(&self, reader: &Reader) -> bool {
+        match self {
+            Self::Working(target) => target.matches(reader),
+            Self::Committed(target) => target.matches(reader),
+        }
+    }
+
+    /// Reads the file as it is now and shows it from the line that was kept.
+    fn load(self, line: usize) -> Reader {
+        let mut reader = match self {
+            Self::Working(target) => target.load(),
+            Self::Committed(target) => target.load(),
+        };
+        reader.show_from(line);
+        reader
+    }
 }
 
 impl Tabs {
@@ -96,6 +190,142 @@ impl Tabs {
             hits: Vec::new(),
             rescope: Cell::new(false),
             closing: false,
+            memory: OnceCell::new(),
+            reopen: None,
+        }
+    }
+
+    /// A reader of the chosen tabs of a list, in their saved order, showing the one that
+    /// was shown. None if none of them can be opened now.
+    fn reopened(plan: &Plan, root: &Path) -> Option<Self> {
+        let mut loaded = plan
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(at, entry)| Some((at, Kept::find(root, entry)?.load(entry.line))));
+        let (first, reader) = loaded.next()?;
+        let mut tabs = Self::new(reader);
+        let mut shown = plan.active.filter(|active| *active == first).map(|_| 0);
+        for (at, reader) in loaded {
+            if plan.active == Some(at) {
+                shown = Some(tabs.tabs.len());
+            }
+            tabs.tabs.push(reader);
+        }
+        tabs.shown = shown.unwrap_or(0);
+        let shown = tabs.shown;
+        tabs.tabs.iter_mut().enumerate().filter(|(tab, _)| *tab != shown).for_each(|(_, reader)| reader.hide());
+        // The loop has yet to learn what this reader watches.
+        tabs.rescope.set(true);
+        Some(tabs)
+    }
+
+    /// Remembers this reader's tabs under `state`, as a reader outside a test does unasked.
+    #[cfg(test)]
+    fn remembering(mut self, state: PathBuf) -> Self {
+        let memory = root_of(&self.tabs[0]).map(|root| Memory::new(state, root.to_path_buf()));
+        self.memory = OnceCell::from(memory);
+        self
+    }
+
+    fn memory(&self) -> Option<&Memory> {
+        let find = || Some(Memory::new(rescue::state_dir()?, root_of(&self.tabs[0])?.to_path_buf()));
+        self.memory.get_or_init(find).as_ref()
+    }
+
+    /// The tabs as a list keeps them: those of the worktree at `root`, in their order.
+    fn list(&self, root: &Path) -> List {
+        let mut list = List::default();
+        for (tab, reader) in self.tabs.iter().enumerate() {
+            if let Some(entry) = reader.listed(root) {
+                if tab == self.shown {
+                    list.active = list.entries.len();
+                }
+                list.entries.push(entry);
+            }
+        }
+        list
+    }
+
+    /// Keeps the tabs as the last tabs of their worktree. A reader with nothing to remember leaves them alone.
+    fn record(&self) {
+        if let Some(memory) = self.memory() {
+            let list = self.list(&memory.root);
+            if !list.entries.is_empty() {
+                memory.shelf().keep_last(&list);
+            }
+        }
+    }
+
+    /// Covers the tabs with the screen of lists.
+    fn show_lists(&mut self) -> After {
+        let Some(memory) = self.memory() else {
+            self.reader_mut().say("Tabs are not remembered here.", Instant::now());
+            return After::Stay;
+        };
+        let screen =
+            Reopen::new(memory.shelf(), memory.root.clone(), Some(self.list(&memory.root)), memory.earlier.clone());
+        self.reader_mut().cover();
+        self.reopen = Some(screen);
+        After::Stay
+    }
+
+    fn reopen_key(&mut self, key: Key) -> After {
+        let Some(screen) = &mut self.reopen else { return After::Ignored };
+        let step = screen.key(key);
+        self.after_reopen(step)
+    }
+
+    fn after_reopen(&mut self, step: Step) -> After {
+        match step {
+            Step::Ignored => return After::Ignored,
+            Step::Stay => {}
+            Step::Close => self.reopen = None,
+            Step::Reopen(plan) => {
+                self.reopen = None;
+                self.restore(&plan, Instant::now());
+            }
+        }
+        After::Stay
+    }
+
+    /// Reopens the chosen tabs of a list. A file that has a tab keeps it as it is, draft and
+    /// place included; the others are added after the tabs already here, in their saved order.
+    fn restore(&mut self, plan: &Plan, now: Instant) {
+        let Some(root) = self.memory().map(|memory| memory.root.clone()) else { return };
+        let before = self.tabs.len();
+        let (mut first, mut active, mut refused) = (None, None, false);
+        for (at, entry) in plan.entries.iter().enumerate() {
+            let Some(kept) = Kept::find(&root, entry) else {
+                refused = true;
+                continue;
+            };
+            let tab = self.tabs.iter().position(|tab| kept.matches(tab)).unwrap_or_else(|| {
+                self.tabs.push(kept.load(entry.line));
+                self.tabs.len() - 1
+            });
+            first = first.or(Some(tab));
+            if plan.active == Some(at) {
+                active = Some(tab);
+            }
+        }
+        let show = active.or(first);
+        for tab in (before..self.tabs.len()).filter(|tab| Some(*tab) != show) {
+            self.tabs[tab].hide();
+        }
+        match show {
+            // A tab just loaded is shown as it was read. Rescoping has the loop look at it again.
+            Some(tab) if tab >= before => {
+                self.reader_mut().hide();
+                self.activate(tab);
+            }
+            Some(tab) => self.select(tab),
+            None => {}
+        }
+        if refused {
+            self.reader_mut().say("Some tabs could not be reopened.", now);
+        } else if self.tabs.len() == before {
+            self.reader_mut().say("Those tabs were already open.", now);
         }
     }
 
@@ -159,6 +389,7 @@ impl Tabs {
         self.shown = tab;
         self.closing = false;
         self.rescope.set(true);
+        self.record();
     }
 
     /// Brings a tab forward as its file is now, not as it was when the tab was last shown.
@@ -383,8 +614,21 @@ impl Tabs {
     }
 }
 
+impl Drop for Tabs {
+    /// However the reader ends, the tabs it still had are the last tabs, where each was read to.
+    fn drop(&mut self) {
+        self.record();
+    }
+}
+
 impl Pane for Tabs {
     fn draw(&mut self, s: &mut Screen) {
+        if let Some(screen) = &mut self.reopen {
+            self.strip_rows = 0;
+            screen.draw(s);
+            self.sync_mark();
+            return;
+        }
         // Under the strip there must still be a heading, a line of the file and the hints.
         self.strip_rows = usize::from(self.tabs.len() > 1 && s.h >= 4 && s.w > 0);
         let shown = self.shown;
@@ -398,18 +642,20 @@ impl Pane for Tabs {
     fn help(&self) -> Page {
         use help::{HelpRow, heading, key, note};
 
-        let mut page = self.reader().help();
-        if self.tabs.len() > 1 {
-            // First on the page: these keys are what a reader with one file does not have.
-            page.lead([
-                heading("Tabs"),
-                key("^N ^P", "next/previous tab"),
-                key("^W   ", "close this tab"),
-                note("Click a tab, or its ×."),
-                note("* marks unsaved edits."),
-                HelpRow::new(),
-            ]);
+        if let Some(screen) = &self.reopen {
+            return screen.help();
         }
+        let mut page = self.reader().help();
+        // First on the page: these keys are what a reader of one file alone does not have.
+        let several = [
+            key("^N ^P", "next/previous tab"),
+            key("^W   ", "close this tab"),
+            note("Click a tab, or its ×."),
+            note("* marks unsaved edits."),
+        ];
+        let lists = [key("^T   ", "reopen/save tabs"), HelpRow::new()];
+        let several = several.into_iter().filter(|_| self.tabs.len() > 1);
+        page.lead(std::iter::once(heading("Tabs")).chain(several).chain(lists));
         page
     }
 
@@ -418,10 +664,13 @@ impl Pane for Tabs {
     }
 
     fn tracks_hover(&self) -> bool {
-        self.reader().tracks_hover()
+        self.reopen.is_none() && self.reader().tracks_hover()
     }
 
     fn hover_span(&self, x: usize, y: usize) -> Option<Range<usize>> {
+        if self.reopen.is_some() {
+            return None;
+        }
         self.reader().hover_span(x, y.checked_sub(self.strip_rows)?)
     }
 
@@ -458,6 +707,12 @@ impl Pane for Tabs {
         for request in &requests {
             self.open(request, now);
         }
+        if let Some(root) = self.memory().map(|memory| memory.root.clone())
+            && self.reopen.is_some()
+        {
+            let list = self.list(&root);
+            self.reopen.as_mut().expect("checked above").set_open(list);
+        }
         // A tab brought forward is watched from here on; a refusal only has to be read.
         if self.rescope.take() { External::NewScope } else { External::Redraw }
     }
@@ -471,7 +726,7 @@ impl Pane for Tabs {
     }
 
     fn editing(&self) -> bool {
-        self.reader().editing()
+        self.reopen.as_ref().map_or_else(|| self.reader().editing(), Reopen::typing)
     }
 
     fn holds_drafts(&self) -> bool {
@@ -479,10 +734,19 @@ impl Pane for Tabs {
     }
 
     fn paste(&mut self, text: Option<&str>) -> After {
-        self.reader_mut().paste(text)
+        match &mut self.reopen {
+            Some(screen) => {
+                let step = text.map_or(Step::Ignored, |text| screen.paste(text));
+                self.after_reopen(step)
+            }
+            None => self.reader_mut().paste(text),
+        }
     }
 
     fn key(&mut self, key: Key) -> After {
+        if self.reopen.is_some() {
+            return self.reopen_key(key);
+        }
         let several = self.tabs.len() > 1;
         match key {
             Key::Ctrl(b'c') if !self.reader().editing() => self.quit(),
@@ -490,10 +754,145 @@ impl Pane for Tabs {
             Key::Click(x, y) if y < self.strip_rows => self.click_strip(x),
             Key::Click(x, y) => self.pass(Key::Click(x, y - self.strip_rows)),
             key if self.reader().actions.is_some() => self.pass(key),
+            Key::Ctrl(b't') if !self.reader().asking() => self.show_lists(),
             Key::Ctrl(b'n') if several => self.step(true),
             Key::Ctrl(b'p') if several => self.step(false),
             Key::Ctrl(b'w') => self.close(self.shown),
             key => self.pass(key),
+        }
+    }
+}
+
+/// The screen of lists where no reader is open, and then the reader of the tabs chosen there.
+pub struct TabSets {
+    root: PathBuf,
+    screen: Reopen,
+    /// The reader, once a list's tabs were reopened. The screen is not shown again.
+    tabs: Option<Tabs>,
+}
+
+impl TabSets {
+    /// The lists of the worktree that holds `dir`. `last` starts at the preview of its last tabs.
+    pub fn open(dir: &Path, last: bool) -> Result<Self, String> {
+        let state = rescue::state_dir().ok_or("milo has no state folder to remember tabs in")?;
+        let found = dir.canonicalize().ok().and_then(|dir| Repo::open(&dir));
+        let repo = found.ok_or_else(|| format!("{} is not a directory", dir.display()))?;
+        Ok(Self::at(state, repo.root, last))
+    }
+
+    fn at(state: PathBuf, root: PathBuf, last: bool) -> Self {
+        let shelf = Shelf::new(state, &root);
+        let last_tabs = shelf.last();
+        let screen = Reopen::new(shelf, root.clone(), None, last_tabs);
+        Self { root, screen: if last { screen.previewing_last() } else { screen }, tabs: None }
+    }
+
+    fn screen_key(&mut self, key: Key) -> After {
+        match self.screen.key(key) {
+            Step::Ignored => After::Ignored,
+            Step::Stay => After::Stay,
+            Step::Close => After::Leave,
+            Step::Reopen(plan) => {
+                match Tabs::reopened(&plan, &self.root) {
+                    Some(tabs) => self.tabs = Some(tabs),
+                    None => self.screen.say("Those tabs could not be reopened."),
+                }
+                After::Stay
+            }
+        }
+    }
+}
+
+impl Pane for TabSets {
+    fn draw(&mut self, s: &mut Screen) {
+        match &mut self.tabs {
+            Some(tabs) => tabs.draw(s),
+            None => self.screen.draw(s),
+        }
+    }
+
+    fn help(&self) -> Page {
+        self.tabs.as_ref().map_or_else(|| self.screen.help(), Tabs::help)
+    }
+
+    fn cover(&mut self) {
+        if let Some(tabs) = &mut self.tabs {
+            tabs.cover();
+        }
+    }
+
+    fn tracks_hover(&self) -> bool {
+        self.tabs.as_ref().is_some_and(Tabs::tracks_hover)
+    }
+
+    fn hover_span(&self, x: usize, y: usize) -> Option<Range<usize>> {
+        self.tabs.as_ref()?.hover_span(x, y)
+    }
+
+    fn notice(&self) -> Option<&'static str> {
+        self.tabs.as_ref()?.notice()
+    }
+
+    fn watch_scope(&self) -> Scope {
+        match &self.tabs {
+            Some(tabs) => tabs.watch_scope(),
+            None => Scope { roots: Vec::new(), ignored: Default::default(), complete: true },
+        }
+    }
+
+    fn watch_scope_after_input(&self, current: &Scope) -> Option<Scope> {
+        self.tabs.as_ref()?.watch_scope_after_input(current)
+    }
+
+    fn git_busy(&self) -> bool {
+        self.tabs.as_ref().is_some_and(Tabs::git_busy)
+    }
+
+    fn check(&mut self) -> bool {
+        self.tabs.as_mut().is_none_or(Tabs::check)
+    }
+
+    fn external_fd(&self) -> Option<RawFd> {
+        self.tabs.as_ref()?.external_fd()
+    }
+
+    fn check_external(&mut self) -> External {
+        self.tabs.as_mut().map_or(External::Unchanged, Tabs::check_external)
+    }
+
+    fn filesystem_changed(&mut self) {
+        if let Some(tabs) = &mut self.tabs {
+            tabs.filesystem_changed();
+        }
+    }
+
+    fn next_frame(&self) -> Option<Duration> {
+        self.tabs.as_ref()?.next_frame()
+    }
+
+    fn editing(&self) -> bool {
+        self.tabs.as_ref().map_or_else(|| self.screen.typing(), Tabs::editing)
+    }
+
+    fn holds_drafts(&self) -> bool {
+        self.tabs.as_ref().is_some_and(Tabs::holds_drafts)
+    }
+
+    fn paste(&mut self, text: Option<&str>) -> After {
+        match (&mut self.tabs, text) {
+            (Some(tabs), text) => tabs.paste(text),
+            (None, Some(text)) => match self.screen.paste(text) {
+                Step::Stay => After::Stay,
+                _ => After::Ignored,
+            },
+            (None, None) => After::Ignored,
+        }
+    }
+
+    fn key(&mut self, key: Key) -> After {
+        match &mut self.tabs {
+            Some(tabs) => tabs.key(key),
+            None => self.screen_key(key),
         }
     }
 }
@@ -585,7 +984,8 @@ mod tests {
         let mut screen = Screen::sized(40, 6);
         alone.draw(&mut screen);
         assert_eq!(drawn(&mut tabs, 40, 6), screen.text());
-        assert!(!tabs.help().text().contains("Tabs"));
+        let help = tabs.help().text();
+        assert!(help.contains("^T") && !help.contains("^N ^P"), "{help}");
 
         ask(&mut tabs, &f, "b.txt");
         let rows = drawn(&mut tabs, 40, 6);
@@ -1143,5 +1543,304 @@ mod tests {
         // A reader that is gone takes nothing, so its pane opens another.
         drop(tabs);
         assert_eq!(open.offer(&state, &f.root, &f.root.join("b.txt"), None), Offer::Replace);
+    }
+
+    /// A reader of the fixture's files, the first shown, whose tabs are remembered in the fixture's state folder.
+    fn remembered(f: &Fixture, paths: &[&str]) -> Tabs {
+        let mut tabs = Tabs::placed(reader(f, paths[0]), None).remembering(state(f));
+        for path in &paths[1..] {
+            ask(&mut tabs, f, path);
+        }
+        tabs.select(0);
+        tabs
+    }
+
+    fn shelf(tabs: &Tabs) -> Shelf {
+        tabs.memory().unwrap().shelf()
+    }
+
+    fn paths(list: &List) -> Vec<&str> {
+        list.entries.iter().map(|entry| entry.path.as_str()).collect()
+    }
+
+    fn pressed(tabs: &mut impl Pane, keys: &[Key]) {
+        for key in keys {
+            tabs.key(*key);
+        }
+    }
+
+    /// Saves the reader's tabs as `name` through the screen of lists, and leaves that screen.
+    fn save_as(tabs: &mut Tabs, name: &str) {
+        pressed(tabs, &[Key::Ctrl(b't'), Key::Char('s')]);
+        typed(tabs, name);
+        pressed(tabs, &[Key::Enter, Key::Esc]);
+    }
+
+    fn frame(pane: &mut impl Pane, w: usize, h: usize) -> Vec<String> {
+        let mut screen = Screen::sized(w, h);
+        pane.draw(&mut screen);
+        screen.text()
+    }
+
+    fn head(f: &Fixture) -> String {
+        let mut repo = Repo::open(&f.root).unwrap();
+        repo.read();
+        repo.history(1).unwrap()[0].hash.clone()
+    }
+
+    fn numbered(lines: usize) -> String {
+        (1..=lines).map(|n| format!("line {n}\n")).collect()
+    }
+
+    #[test]
+    fn closing_a_tab_drops_it_from_the_last_tabs_and_closing_the_reader_keeps_the_rest() {
+        let f = Fixture::new();
+        f.write("a.txt", "first\n");
+        f.write("b.txt", "second\n");
+        f.write("long.txt", &numbered(60));
+        f.commit("three files");
+        let mut tabs = remembered(&f, &["a.txt", "b.txt", "long.txt"]);
+        let shelf = shelf(&tabs);
+        assert_eq!(paths(&shelf.last().unwrap()), ["a.txt", "b.txt", "long.txt"]);
+
+        // One tab closed is one tab forgotten.
+        pressed(&mut tabs, &[Key::Ctrl(b'n'), Key::Ctrl(b'w')]);
+        let last = shelf.last().unwrap();
+        assert_eq!((paths(&last), last.active), (vec!["a.txt", "long.txt"], 1));
+
+        // The reader ends with two tabs, and they stay, each where it was read to.
+        drawn(&mut tabs, 40, 10);
+        for _ in 0..25 {
+            tabs.key(Key::Char('j'));
+        }
+        assert_eq!(tabs.key(Key::Ctrl(b'c')), After::Leave);
+        drop(tabs);
+        let last = shelf.last().unwrap();
+        assert_eq!(paths(&last), ["a.txt", "long.txt"]);
+        assert_eq!((last.active, last.entries[1].line, &last.entries[1].commit), (1, 25, &None));
+
+        // The last tab of a reader closes the reader, so it is still the last tabs.
+        let mut tabs = Tabs::placed(reader(&f, "b.txt"), None).remembering(state(&f));
+        assert_eq!(tabs.key(Key::Char('q')), After::Leave);
+        drop(tabs);
+        assert_eq!(paths(&shelf.last().unwrap()), ["b.txt"]);
+        assert!(shelf.named().is_empty());
+    }
+
+    #[test]
+    fn a_set_is_previewed_with_its_versions_and_only_what_is_there_and_selected_reopens() {
+        const NOWHERE: &str = "ca3065e5729199ac4562442eea80513faff45a76";
+        let f = Fixture::new();
+        f.write("a.txt", "first\n");
+        f.write("b.txt", "as it was\n");
+        f.write("gone.txt", "soon gone\n");
+        f.commit("one");
+        let old = head(&f);
+        f.write("b.txt", "as it is\n");
+        f.commit("two");
+        let mut tabs = remembered(&f, &["a.txt", "b.txt", "gone.txt"]);
+        let at_commit = Entry { path: "b.txt".into(), commit: Some(old.clone()), line: 0 };
+        tabs.restore(&Plan { entries: vec![at_commit], active: Some(0) }, Instant::now());
+        save_as(&mut tabs, "Rex compatibility");
+        let (shelf, root) = (shelf(&tabs), tabs.memory().unwrap().root.clone());
+        drop(tabs);
+
+        // A file is deleted, and a set names a commit this repository never had.
+        fs::remove_file(f.root.join("gone.txt")).unwrap();
+        let mut list = shelf.named().remove(0).list;
+        assert_eq!((list.entries.len(), list.active, list.entries[3].commit.as_deref()), (4, 3, Some(old.as_str())));
+        list.entries.push(Entry { path: "a.txt".into(), commit: Some(NOWHERE.into()), line: 0 });
+        shelf.save("Rex compatibility", &list, crate::reader::sets::Collision::Replace).unwrap();
+
+        let mut sets = TabSets::at(state(&f), root, false);
+        let rows = frame(&mut sets, 72, 12);
+        assert!(rows[0].starts_with(" Reader tabs"), "{rows:?}");
+        assert!(rows[1].starts_with(" › Last tabs") && rows[1].ends_with("4 tabs"), "{rows:?}");
+        assert!(rows[2].starts_with("   Rex compatibility") && rows[2].ends_with("5 tabs"), "{rows:?}");
+        sets.help().assert_rows_fit(26);
+
+        pressed(&mut sets, &[Key::Down, Key::Enter]);
+        let rows = frame(&mut sets, 72, 12);
+        assert!(rows[0].starts_with(" Reopen  Rex compatibility") && rows[0].ends_with("3 of 5 selected"), "{rows:?}");
+        assert!(rows[1].starts_with(" › [x] a.txt") && rows[1].ends_with(" working file"), "{rows:?}");
+        assert!(rows[2].starts_with("   [x] b.txt") && rows[2].ends_with(" working file"), "{rows:?}");
+        assert!(rows[3].starts_with("    –  gone.txt") && rows[3].ends_with(" missing file"), "{rows:?}");
+        assert!(rows[4].starts_with("   [x] b.txt"), "{rows:?}");
+        assert!(rows[4].ends_with(&format!(" shown · commit {}", &old[..12])), "{rows:?}");
+        assert!(rows[5].starts_with("    –  a.txt"), "{rows:?}");
+        assert!(rows[5].ends_with(" commit ca3065e57291 unavailable"), "{rows:?}");
+        // The line under the rows gives a commit ID whole, and says what is not done about a missing one.
+        pressed(&mut sets, &[Key::Down, Key::Down, Key::Down]);
+        assert_eq!(frame(&mut sets, 72, 12)[10], format!(" As of commit {old}"));
+        sets.key(Key::Down);
+        assert_eq!(frame(&mut sets, 80, 12)[10], format!(" Commit {NOWHERE} is not in this repository."));
+
+        // What is not there cannot be selected. One tab is left out by choice.
+        pressed(&mut sets, &[Key::Char(' '), Key::Char('g'), Key::Char(' ')]);
+        assert!(frame(&mut sets, 72, 12)[0].ends_with("2 of 5 selected"));
+        sets.key(Key::Enter);
+        let rows = frame(&mut sets, 72, 8);
+        assert!(rows[0].starts_with(&format!(" b.txt  b.txt@{} ×", &old[..7])), "{rows:?}");
+        assert!(rows.iter().any(|row| row.ends_with("as it was")), "{rows:?}");
+        sets.key(Key::Ctrl(b'p'));
+        assert!(frame(&mut sets, 72, 8).iter().any(|row| row.ends_with("as it is")));
+    }
+
+    #[test]
+    fn reopening_over_open_tabs_keeps_their_drafts_and_places_and_adds_the_others_in_order() {
+        let f = Fixture::new();
+        f.write("a.txt", &numbered(60));
+        f.write("b.txt", "second\n");
+        f.write("c.txt", &numbered(40));
+        f.commit("three files");
+        let mut tabs = remembered(&f, &["b.txt", "a.txt", "c.txt"]);
+        drawn(&mut tabs, 40, 10);
+        tabs.key(Key::Ctrl(b'p'));
+        for _ in 0..12 {
+            tabs.key(Key::Char('j'));
+        }
+        tabs.key(Key::Ctrl(b'n'));
+        save_as(&mut tabs, "Trio");
+        let shelf = shelf(&tabs);
+
+        // Only a.txt stays open, scrolled and with a draft.
+        pressed(&mut tabs, &[Key::Ctrl(b'w'), Key::Ctrl(b'n'), Key::Ctrl(b'w')]);
+        for _ in 0..5 {
+            tabs.key(Key::Char('j'));
+        }
+        tabs.key(Key::Char('e'));
+        typed(&mut tabs, "draft ");
+        let before = drawn(&mut tabs, 40, 10);
+        assert!(before[0].contains("a.txt") && before[1].contains("draft line 6"), "{before:?}");
+
+        // The lists open over a draft, and the preview says which tab is kept.
+        pressed(&mut tabs, &[Key::Ctrl(b't'), Key::Down, Key::Enter]);
+        let rows = frame(&mut tabs, 60, 10);
+        assert!(rows[1].ends_with("shown · working file") && rows[2].ends_with("open · working file"), "{rows:?}");
+        tabs.key(Key::Enter);
+        assert_eq!(drawn(&mut tabs, 40, 10)[0], " *a.txt  b.txt ×  c.txt");
+        // The tab that was open is as it was; the one that was not is where it was saved.
+        tabs.key(Key::Ctrl(b'p'));
+        assert_eq!(drawn(&mut tabs, 40, 11)[1..10], before[..9]);
+        pressed(&mut tabs, &[Key::Ctrl(b'p')]);
+        assert!(drawn(&mut tabs, 40, 10)[2].ends_with("line 13"));
+
+        // The set is what was saved, whatever opened and closed since; the last tabs follow the reader.
+        assert_eq!(paths(&shelf.named()[0].list), ["b.txt", "a.txt", "c.txt"]);
+        assert_eq!(paths(&shelf.last().unwrap()), ["a.txt", "b.txt", "c.txt"]);
+        // Reopening what is open says so and changes nothing.
+        pressed(&mut tabs, &[Key::Ctrl(b't'), Key::Down, Key::Enter, Key::Enter]);
+        let rows = drawn(&mut tabs, 60, 10);
+        assert_eq!(rows[0], " *a.txt  b.txt ×  c.txt");
+        assert!(rows[9].contains("Those tabs were already open."), "{rows:?}");
+        assert_eq!(kept_drafts(&f), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_named_set_is_replaced_only_when_asked_and_renamed_or_deleted_alone() {
+        let f = Fixture::new();
+        f.write("a.txt", "first\n");
+        f.write("b.txt", "second\n");
+        f.commit("two files");
+        let mut tabs = remembered(&f, &["a.txt"]);
+        save_as(&mut tabs, "Parser");
+        let shelf = shelf(&tabs);
+        ask(&mut tabs, &f, "b.txt");
+
+        // The same name again asks, and keeps the set unless told to replace it.
+        pressed(&mut tabs, &[Key::Ctrl(b't'), Key::Char('s')]);
+        assert_eq!(tabs.paste(Some("Par\nser")), After::Stay);
+        assert!(tabs.editing());
+        let rows = frame(&mut tabs, 60, 10);
+        assert!(rows[8].starts_with(" Name: Parser") && rows[9].contains("Enter save"), "{rows:?}");
+        tabs.key(Key::Enter);
+        let rows = frame(&mut tabs, 60, 10);
+        assert_eq!(rows[8], " Replace “Parser” with the 2 open tabs?");
+        assert_eq!(rows[9], " y replace · n keep");
+        tabs.key(Key::Char('n'));
+        assert_eq!(paths(&shelf.named()[0].list), ["a.txt"]);
+        pressed(&mut tabs, &[Key::Down, Key::Char('o'), Key::Char('y')]);
+        assert_eq!(paths(&shelf.named()[0].list), ["a.txt", "b.txt"]);
+        let rows = frame(&mut tabs, 60, 10);
+        assert_eq!(rows[8], " Saved 2 tabs as “Parser”.");
+        assert!(rows[2].starts_with(" › Parser") && rows[2].ends_with("2 tabs"), "{rows:?}");
+
+        // A rename keeps the list; a name that is taken is refused and stays to be changed.
+        tabs.key(Key::Char('s'));
+        typed(&mut tabs, "Lexer");
+        pressed(&mut tabs, &[Key::Enter, Key::Down, Key::Char('r'), Key::Ctrl(b'u')]);
+        typed(&mut tabs, "Lexer");
+        tabs.key(Key::Enter);
+        let rows = frame(&mut tabs, 60, 10);
+        assert_eq!((rows[7].as_str(), rows[8].as_str()), (" Another set has that name.", " New name: Lexer"));
+        typed(&mut tabs, " 2");
+        tabs.key(Key::Enter);
+        let names: Vec<_> = shelf.named().into_iter().map(|set| set.name).collect();
+        assert_eq!(names, ["Lexer", "Lexer 2"]);
+
+        // Deleting asks, and takes the saved list and nothing else.
+        tabs.key(Key::Char('d'));
+        assert_eq!(frame(&mut tabs, 60, 10)[8], " Delete “Lexer 2”? Files and open tabs stay.");
+        tabs.key(Key::Char('y'));
+        assert_eq!(shelf.named().len(), 1);
+        tabs.key(Key::Esc);
+        assert_eq!(drawn(&mut tabs, 40, 6)[0], " a.txt  b.txt ×");
+        assert!(f.root.join("a.txt").exists() && f.root.join("b.txt").exists());
+    }
+
+    #[test]
+    fn the_last_tabs_reopen_where_they_were_read_to_or_as_near_as_a_changed_file_allows() {
+        let f = Fixture::new();
+        f.write("long.txt", &numbered(60));
+        f.commit("one file");
+        let mut tabs = remembered(&f, &["long.txt"]);
+        let root = tabs.memory().unwrap().root.clone();
+        drawn(&mut tabs, 40, 10);
+        for _ in 0..30 {
+            tabs.key(Key::Char('j'));
+        }
+        drop(tabs);
+
+        let mut sets = TabSets::at(state(&f), root.clone(), true);
+        assert!(frame(&mut sets, 60, 10)[0].starts_with(" Reopen  Last tabs"));
+        sets.key(Key::Enter);
+        assert!(frame(&mut sets, 40, 10)[1].ends_with("line 31"));
+
+        // The file is shorter now: the reader shows its end, and what is on disk.
+        f.write("long.txt", &numbered(12));
+        f.commit("shorter");
+        let mut sets = TabSets::at(state(&f), root, true);
+        sets.key(Key::Enter);
+        let rows = frame(&mut sets, 40, 10);
+        assert!(rows[8].contains("line 12") && !rows.iter().any(|row| row.ends_with("line 31")), "{rows:?}");
+    }
+
+    #[test]
+    fn the_lists_fit_a_narrow_pane_and_take_clicks() {
+        let f = Fixture::new();
+        f.write("src/a rather long file name.txt", "first\n");
+        f.write("b.txt", "second\n");
+        f.commit("two files");
+        let mut tabs = remembered(&f, &["src/a rather long file name.txt", "b.txt"]);
+        save_as(&mut tabs, "Rex compatibility with preview.23");
+        tabs.key(Key::Ctrl(b't'));
+        let rows = frame(&mut tabs, 34, 7);
+        assert_eq!(rows[1], " › Save these tabs as a …  2 tabs");
+        assert_eq!(rows[2], "   Rex compatibility wit…  2 tabs");
+        // A click selects a row, and a second one opens it.
+        tabs.key(Key::Click(5, 2));
+        assert_eq!(frame(&mut tabs, 34, 7)[6], " ↑↓ · Enter preview · Esc back");
+        tabs.key(Key::Click(5, 2));
+        let rows = frame(&mut tabs, 34, 7);
+        assert_eq!(rows[0], " Reopen  Rex compatibility with …");
+        assert_eq!(rows[1], " › [x] src/a rathe…e.txt  working");
+        assert_eq!(rows[6], " ↑↓ · Enter reopen · Esc back");
+        // In the preview a click selects or deselects the tab under it.
+        tabs.key(Key::Click(5, 2));
+        assert_eq!(frame(&mut tabs, 34, 7)[2], " › [ ] b.txt  open · working file");
+        // A pane of a few rows keeps the rows that can be chosen, then the hints.
+        assert_eq!(frame(&mut tabs, 34, 3)[1], " › [ ] b.txt  open · working file");
+        assert_eq!(frame(&mut tabs, 20, 2), [" › [ ] b.t…  worki…", " ↑↓ · Esc back"]);
+        frame(&mut tabs, 3, 1);
     }
 }

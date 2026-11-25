@@ -107,6 +107,7 @@ To review an agent’s edits without mixing in your own uncommitted work, have i
 | `milo history [DIR]` | Browse Git commits, expand a commit and read its file at that revision in place. | Managed sidebar and floating reader tabs. |
 | `milo view FILE` / `--edit` / `--commit ID` | Read in the current terminal. Edit a working text file; save explicitly. A commit is read-only. | Same direct command. |
 | `milo review PATCH [--from NAME]` | Read a handed-over patch in place. | `--float` can open the review from a non-interactive caller in a Rex pane. |
+| `milo tabs [--last]` | Preview and reopen the tabs the reader last had open in this worktree, or a set of tabs you saved under a name. | **Milo: Reopen Last Reader Tabs…** and **Milo: Open a Reader Tab Set…** open the same lists in a floating pane. |
 | `milo usage` / `usage --menu-stream` | Show available local figures in a pane, or emit a stream for the menu app. No provider sign-in required. | Optional compact Usage rail. |
 | `milo setup` | Terminal settings, including icon, Git mark and usage choices. The explicit command offers a skippable first-run guide. | Try, save, repair or remove managed layouts. |
 | `milo web [--no-open]` | Local settings dashboard. `--no-open` prints a private loopback link instead of opening the browser. | `--host HOST` uses Rex to forward **another** host’s editor. |
@@ -345,6 +346,8 @@ Saving installs these actions in the Rex command palette:
 | Milo: Add the Usage | `milo_usage` |
 | Milo: Close Panes in This Tab | `milo_close` |
 | Milo: Peek Outline | `milo_peek_outline` |
+| [Milo: Reopen Last Reader Tabs…](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reopening-tabs-and-named-sets) | `milo_reopen_tabs` |
+| [Milo: Open a Reader Tab Set…](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reopening-tabs-and-named-sets) | `milo_tab_sets` |
 | Close the outline peek | `milo_close_peek` |
 | Remember the current rail | `milo_remember_layout` |
 | Reset a remembered layout | `milo_reset_layout` |
@@ -587,7 +590,46 @@ Each tab keeps its own place in the file, and while it is being edited its curso
 
 In a narrow pane the strip keeps the shown tab and as many neighbours as fit whole. `‹` and `›` at its edges stand for the tabs beyond, with a `*` when one of those has unsaved edits; click an edge to move that way. A pane under four rows tall shows the file without the strip; the keys still work. [See the strip at 34 columns.](https://github.com/mcc0x/milo/blob/main/docs/img/reader-tabs-narrow.webp)
 
-Tabs belong to one reader, which belongs to the pane that opened it and to that pane's project. Another Rex session, another project's outline and History beside Outline each have a reader of their own. A reader started with `milo view` in a shell takes no tabs. The reader's Rex label is the file it was last asked to show; it does not follow `Ctrl-N` and `Ctrl-P`.
+Tabs belong to one reader, which belongs to the pane that opened it and to that pane's project. Another Rex session, another project's outline and History beside Outline each have a reader of their own. A reader started with `milo view` in a shell is sent no files by another pane; it gets more tabs only when you [reopen a list](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reopening-tabs-and-named-sets) in it. The reader's Rex label is the file it was last asked to show; it does not follow `Ctrl-N` and `Ctrl-P`.
+
+### Reopening tabs and named sets
+
+Milo remembers which files a reader had open, for each worktree, so that you can pause and come back to the same files and revisions. Nothing reopens on its own: opening one file opens that file.
+
+- **Last tabs** are the tabs of the reader last used in a worktree. Closing one tab takes it off the list. Closing the whole reader, with `Ctrl-C`, by closing its last tab or from outside, keeps the tabs it still had.
+- **A named set** is a list you saved, such as “Rex compatibility”. It changes only when you replace, rename or delete it. Opening, scrolling, closing and reopening tabs never touch it.
+
+Press `Ctrl-T` in a reader, while reading or editing, for the lists of its worktree. Where no reader is open, run `milo tabs`, or `milo tabs --last` to start at the last tabs. In Rex, **Milo: Reopen Last Reader Tabs…** and **Milo: Open a Reader Tab Set…** open the same screen in a floating pane for the project of the tab's shell.
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Preview the selected list, or name a new set on **Save these tabs as a named set…** |
+| `s` | Save the reader's tabs as a new named set |
+| `o` | Replace the selected set with the reader's tabs, after `y` |
+| `r` | Rename the selected set |
+| `d` | Delete the selected set, after `y` |
+| `Esc` or `q` | Back to the reader |
+
+Saving under a name that already has a set asks `Replace “NAME” with the N open tabs?` and keeps the set unless you answer `y`. A rename onto another set's name is refused. Deleting removes that saved list only: files, drafts and open tabs stay as they are. `s` and `o` need a reader, so `milo tabs` and the Rex actions show neither.
+
+A list is always previewed before anything opens. Each row is one tab: `working file` for the file as it is on disk now, or `commit` and the start of the commit ID for a file as of that commit. The line under the rows gives the ID in full. `shown` marks the tab that was in front, and `open` a file the reader already has.
+
+| Key | Action |
+| --- | --- |
+| `Space` or a click | Select or deselect the tab |
+| `a` | Select every tab that can be reopened, or none |
+| `Enter` | Reopen the selected tabs |
+| `Esc` | Back to the lists |
+
+A working file that is no longer in the worktree is marked `missing file`, and a file at a commit the repository no longer has is marked `unavailable`. Neither can be selected, and the working file is never shown in place of a file at a commit.
+
+<p align="center"><img src="https://github.com/mcc0x/milo/blob/main/docs/img/reader-tab-sets-preview.webp" width="822" alt="Preview of the set Rex compatibility: c.txt at a commit marked unavailable, b.txt at a commit selected, a.txt marked missing file, 1 of 3 selected, and the full ID of the missing commit under the rows"></p>
+
+Where no reader is open, the selected tabs open in their saved order with the same tab in front. In a reader that has tabs, those stay as they are, with their drafts, cursors and places; a file that already has a tab is not opened twice, and the others are added after the open tabs in their saved order. The working file and the same path at a commit are two tabs.
+
+A working file is read from disk as it is now and shown from the line it was last read to, or as near as a changed file allows. A draft is never reopened by a list: press `e` on the file and Milo offers a [kept draft](https://github.com/mcc0x/milo/blob/main/docs/panes.md#editing-files) as it always does. Reopening tabs starts no command, agent or shell and restores no Rex session.
+
+Lists are kept in the `tabs` folder of Milo's state folder, in a folder named after the worktree's path, readable only by you. Outside Git, the folder a file is in counts as its worktree. A list holds paths, full commit IDs, the line each tab was read to and which tab was shown. It never holds a file's text or a draft, and nothing is written into the project. A worktree that is moved or renamed starts with no lists. A second reader in the same worktree replaces the last tabs with its own once its tabs change or it closes; `Ctrl-T` in that reader still offers the list from before. [See the lists over a reader.](https://github.com/mcc0x/milo/blob/main/docs/img/reader-tab-sets-lists.webp)
 
 On iPhone, enable [Rex → Settings → Keyboard → Open Keyboard Manually](https://www.superlogical.com/rex/docs/reference/ios-settings#setting-keyboard-open-keyboard-manually) to browse without raising the keyboard. Tap a folder to expand it, tap a file to select it, and double-tap to open it. This setting affects **all** terminal panes on that iPhone, not just Outline. Tap the keyboard button to type in a shell. If the keyboard reopens when you return to a terminal, turn off **Keep Keyboard Open** in the same settings.
 
@@ -953,6 +995,8 @@ Press `e` in the reader, or start with `milo view FILE --edit`. The heading says
 Pasted text is inserted as one change, with the file's line endings and without control characters. A paste larger than 1 MiB is refused. Every other key types itself, including `?` and `q`.
 
 Once the floating reader in Rex holds a second file, `Ctrl-N` and `Ctrl-P` show the next and previous [tab](https://github.com/mcc0x/milo/blob/main/docs/panes.md#tabs-in-the-floating-reader) and `Ctrl-W` closes the shown one, while reading and while editing. A click on a tab's name shows it, and a click on its `×` closes it.
+
+`Ctrl-T` in the reader, while reading or editing, shows the [last tabs and named sets](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reopening-tabs-and-named-sets) of the worktree: `Enter` previews a list, `s` saves the open tabs as a named set, `o` replaces a set, `r` renames and `d` deletes one. In the preview, `Space` selects a tab, `a` all or none, and `Enter` reopens the selected ones.
 
 Questions take the place of the last row and wait for one of the keys they list. Any other key is ignored. When the pane is two rows tall they take the heading's row instead. A narrow pane drops the words before the keys first: at 28 columns every key is still listed.
 
@@ -1384,6 +1428,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
 | `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
 | `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. |
+| `milo tabs [--last]` | Lists the reader tabs remembered for this worktree: the last tabs and the user's named sets. The user previews a list and chooses what reopens; in a reader, `Ctrl-T` shows the same lists and saves a set. It needs a terminal, and has no option that reopens or saves anything unattended. |
 | `milo setup` | Opens terminal settings. In Rex it can also manage the sidebar layout. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. |
 | `milo web --host HOST [--project DIR]` | Opens another Rex host's settings dashboard on this computer through a loopback Rex forward, and closes both when done. `HOST` is a label from `rex hosts`. |
@@ -1736,6 +1781,20 @@ The patch is untrusted and the review writes nothing. Paths go through `safe` in
 
 `cargo test --bin milo handoff:: review::` runs the unit tests and the pane tests, which mix a person's, the agent's and another agent's uncommitted edits in one file. With Rex installed, `cargo test --test rex_lab -- --ignored a_floating_review` opens the floating review on a disposable Rex server.
 
+### Changing reader tab lists
+
+[Reopening tabs and named sets](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reopening-tabs-and-named-sets) says what a person sees. `src/reader/sets.rs` keeps the lists, `src/reader/reopen.rs` is the screen over them, and `src/reader/tabs.rs` records the last tabs and reopens what was chosen. Keep four things true.
+
+A list holds references only: a path inside the worktree, a full commit ID, a line and which tab was shown. Never write a file's text, a draft, a command or a terminal's contents into one, and never write a list into the project.
+
+Nothing reopens unasked. A reader records its tabs as the last tabs and shows no list until `Ctrl-T`; only `milo tabs` and the two Rex actions start at the lists. Every reopening goes through the preview, and a named set changes only through its own save, replace, rename and delete.
+
+A tab is opened as `milo view` would open it: a working file through `WorkingTarget`, a file at a commit through `CommittedTarget` with the full ID that was kept. When that fails the tab stays closed and says so. Do not fall back from a commit to the working file, or from a missing file to another path.
+
+A tab that is open is left alone. Reopening matches each kept tab against the open ones before loading anything, so a draft, its undo history and a reading position are never replaced.
+
+`cargo test --bin milo reader::` runs the unit tests and `cargo test --test pane the_tabs_a_reader` runs `milo tabs` in a terminal. With Rex installed, `cargo test --test rex_lab -- --ignored reader_tabs_reopen` follows two worktrees through panes of a disposable server: sets saved, replaced, renamed and deleted, a reopen over a draft, a deleted file and a dropped commit. It starts each reader with `milo view` and loads this checkout's `actions.lua` with `rex do FILE --action`, so it needs no saved layout. Set `MILO_TEST_READER_EVIDENCE` to a folder to keep its frames as HTML; `tests/rex_lab/capture_png.swift` turns one into a picture.
+
 ### Adding a language to the reader
 
 Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for language tables, and `src/syntax/delimiters.rs` for strings and comments whose closing marks depend on the opener. `src/syntax/markup.rs` reads HTML and XML, and `src/syntax/markdown.rs` reads Markdown; those two are not code and have walkers of their own. Adding a language normally means changing only the tables:
@@ -1899,8 +1958,10 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/reader/edit_tests.rs` | Checks editing, saving, conflicts, read-only files, kept drafts, and formatting. |
 | `src/reader/inbox.rs` | Carries a request to open one more file to a reader already running in a Rex block, through a pipe in the state folder. |
 | `src/reader/handed.rs` | Loads a file with only a handed-over patch's edits marked, through no link and never to edit. |
+| `src/reader/reopen.rs` | Shows a worktree's last tabs and named sets, previews one with each tab's version and whether it is still there, and saves, renames, replaces and deletes a set. |
 | `src/reader/rescue.rs` | Keeps the draft of a reader ended from outside, and marks a Rex reader that has unsaved edits. |
-| `src/reader/tabs.rs` | Holds the files open in one reader as tabs, draws their strip, and asks about every unsaved draft before a tab or the reader closes. |
+| `src/reader/sets.rs` | Keeps a worktree's last tabs and named sets in the state folder: paths, full commit IDs, lines and the shown tab, never a file's text. |
+| `src/reader/tabs.rs` | Holds the files open in one reader as tabs, draws their strip, asks about every unsaved draft before a tab or the reader closes, remembers the tabs as the worktree's last, and reopens the tabs chosen from a list. |
 | `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
 | `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
 | `src/host.rs` | Names the computer Milo runs on and says whether its Rex server and command are ones Milo was checked with. |
@@ -1914,7 +1975,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/rex_shell.lua` | Reports the directory of the one shell a managed pane follows, and nothing from other terminals. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Runs the setup screen: its choices, layout trials, scoped saves, and maintenance. |
-| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes or name a session for its project. |
+| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes, name a session for its project, or open the lists of Reader tabs. |
 | `src/setup/actions_test.lua` | Checks those actions with a stand-in for Rex. |
 | `src/setup/claude.rs` | Plans changes to the Claude Code status line and tracks ownership. |
 | `src/setup/doctor.rs` | Inspects the installation without starting Rex, and repairs or removes the integration with setup's ownership checks. |
@@ -2023,6 +2084,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
+| `tests/rex_lab/tab_sets.rs` | Saves, reopens, replaces, renames and deletes Reader tab sets in panes of that server, in two worktrees, over a draft and with a deleted file and a dropped commit. |
 | `tests/web.rs` | Runs `milo web` beside a Rex stand-in that answers late: the link first, the state only once whole, a clean end in between. |
 | `tests/web_bench.rs` | Times the settings link and the first state, outside Rex and beside a slow one. |
 | `tests/web_bench/baseline-fa34ca4.tsv` | Records those times beside that revision's, on the machine named in its header. |
@@ -2047,6 +2109,8 @@ An edit is a draft in memory. A save opens the file from the project folder the 
 A formatter is a program of a fixed name, found in the folders of `PATH` that are written in full. It runs only when asked for, in a process group of its own, for at most ten seconds, with the draft on its standard input. It is not given the file to write. See [formatting](https://github.com/mcc0x/milo/blob/main/docs/panes.md#formatting).
 
 Outside the project, milo keeps three things in its state folder for the editor: the draft of a reader that was ended with unsaved changes; in Rex, a mark that a floating reader has unsaved changes in some tab so that another pane does not replace it; and, also in Rex, a pipe under `readers` named after the reader's block, on which the pane that opened it asks for one more file as a tab. The mark names the reader's process and is ignored once that process is gone. The pipe is in a folder only you can use, carries a path and an optional commit ID and nothing back, and is removed when its reader ends. A request is read the way `milo view`'s own arguments are, so it can open a file for reading and nothing more.
+
+The same folder holds, under `tabs`, the lists of [reader tabs](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reopening-tabs-and-named-sets) for each worktree: paths inside the worktree, full commit IDs, a line number for each tab and which tab was shown, and never a file's text. A list is read as untrusted: a path that is absolute or contains `..` voids the whole file, a commit is accepted only as a full ID, and each tab is then opened as `milo view` would open it, through the same path checks. A file at a commit that Git cannot find is not opened at all.
 
 ## Updates and drawing
 

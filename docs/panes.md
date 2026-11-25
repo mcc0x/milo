@@ -108,7 +108,46 @@ Each tab keeps its own place in the file, and while it is being edited its curso
 
 In a narrow pane the strip keeps the shown tab and as many neighbours as fit whole. `‹` and `›` at its edges stand for the tabs beyond, with a `*` when one of those has unsaved edits; click an edge to move that way. A pane under four rows tall shows the file without the strip; the keys still work. [See the strip at 34 columns.](img/reader-tabs-narrow.webp)
 
-Tabs belong to one reader, which belongs to the pane that opened it and to that pane's project. Another Rex session, another project's outline and History beside Outline each have a reader of their own. A reader started with `milo view` in a shell takes no tabs. The reader's Rex label is the file it was last asked to show; it does not follow `Ctrl-N` and `Ctrl-P`.
+Tabs belong to one reader, which belongs to the pane that opened it and to that pane's project. Another Rex session, another project's outline and History beside Outline each have a reader of their own. A reader started with `milo view` in a shell is sent no files by another pane; it gets more tabs only when you [reopen a list](#reopening-tabs-and-named-sets) in it. The reader's Rex label is the file it was last asked to show; it does not follow `Ctrl-N` and `Ctrl-P`.
+
+### Reopening tabs and named sets
+
+Milo remembers which files a reader had open, for each worktree, so that you can pause and come back to the same files and revisions. Nothing reopens on its own: opening one file opens that file.
+
+- **Last tabs** are the tabs of the reader last used in a worktree. Closing one tab takes it off the list. Closing the whole reader, with `Ctrl-C`, by closing its last tab or from outside, keeps the tabs it still had.
+- **A named set** is a list you saved, such as “Rex compatibility”. It changes only when you replace, rename or delete it. Opening, scrolling, closing and reopening tabs never touch it.
+
+Press `Ctrl-T` in a reader, while reading or editing, for the lists of its worktree. Where no reader is open, run `milo tabs`, or `milo tabs --last` to start at the last tabs. In Rex, **Milo: Reopen Last Reader Tabs…** and **Milo: Open a Reader Tab Set…** open the same screen in a floating pane for the project of the tab's shell.
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Preview the selected list, or name a new set on **Save these tabs as a named set…** |
+| `s` | Save the reader's tabs as a new named set |
+| `o` | Replace the selected set with the reader's tabs, after `y` |
+| `r` | Rename the selected set |
+| `d` | Delete the selected set, after `y` |
+| `Esc` or `q` | Back to the reader |
+
+Saving under a name that already has a set asks `Replace “NAME” with the N open tabs?` and keeps the set unless you answer `y`. A rename onto another set's name is refused. Deleting removes that saved list only: files, drafts and open tabs stay as they are. `s` and `o` need a reader, so `milo tabs` and the Rex actions show neither.
+
+A list is always previewed before anything opens. Each row is one tab: `working file` for the file as it is on disk now, or `commit` and the start of the commit ID for a file as of that commit. The line under the rows gives the ID in full. `shown` marks the tab that was in front, and `open` a file the reader already has.
+
+| Key | Action |
+| --- | --- |
+| `Space` or a click | Select or deselect the tab |
+| `a` | Select every tab that can be reopened, or none |
+| `Enter` | Reopen the selected tabs |
+| `Esc` | Back to the lists |
+
+A working file that is no longer in the worktree is marked `missing file`, and a file at a commit the repository no longer has is marked `unavailable`. Neither can be selected, and the working file is never shown in place of a file at a commit.
+
+<p align="center"><img src="img/reader-tab-sets-preview.webp" width="822" alt="Preview of the set Rex compatibility: c.txt at a commit marked unavailable, b.txt at a commit selected, a.txt marked missing file, 1 of 3 selected, and the full ID of the missing commit under the rows"></p>
+
+Where no reader is open, the selected tabs open in their saved order with the same tab in front. In a reader that has tabs, those stay as they are, with their drafts, cursors and places; a file that already has a tab is not opened twice, and the others are added after the open tabs in their saved order. The working file and the same path at a commit are two tabs.
+
+A working file is read from disk as it is now and shown from the line it was last read to, or as near as a changed file allows. A draft is never reopened by a list: press `e` on the file and Milo offers a [kept draft](#editing-files) as it always does. Reopening tabs starts no command, agent or shell and restores no Rex session.
+
+Lists are kept in the `tabs` folder of Milo's state folder, in a folder named after the worktree's path, readable only by you. Outside Git, the folder a file is in counts as its worktree. A list holds paths, full commit IDs, the line each tab was read to and which tab was shown. It never holds a file's text or a draft, and nothing is written into the project. A worktree that is moved or renamed starts with no lists. A second reader in the same worktree replaces the last tabs with its own once its tabs change or it closes; `Ctrl-T` in that reader still offers the list from before. [See the lists over a reader.](img/reader-tab-sets-lists.webp)
 
 On iPhone, enable [Rex → Settings → Keyboard → Open Keyboard Manually](https://www.superlogical.com/rex/docs/reference/ios-settings#setting-keyboard-open-keyboard-manually) to browse without raising the keyboard. Tap a folder to expand it, tap a file to select it, and double-tap to open it. This setting affects **all** terminal panes on that iPhone, not just Outline. Tap the keyboard button to type in a shell. If the keyboard reopens when you return to a terminal, turn off **Keep Keyboard Open** in the same settings.
 

@@ -214,6 +214,8 @@ Saving installs these actions in the Rex command palette:
 | Milo: Add the Usage | `milo_usage` |
 | Milo: Close Panes in This Tab | `milo_close` |
 | Milo: Peek Outline | `milo_peek_outline` |
+| [Milo: Reopen Last Reader Tabs…](panes.md#reopening-tabs-and-named-sets) | `milo_reopen_tabs` |
+| [Milo: Open a Reader Tab Set…](panes.md#reopening-tabs-and-named-sets) | `milo_tab_sets` |
 | Close the outline peek | `milo_close_peek` |
 | Remember the current rail | `milo_remember_layout` |
 | Reset a remembered layout | `milo_reset_layout` |
