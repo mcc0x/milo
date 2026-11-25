@@ -734,7 +734,7 @@ impl Alerts {
             command.env("PATH", path);
         }
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        let mut process = command.spawn().map_err(|_| FAILED.to_owned())?;
+        let mut process = crate::fs_ops::spawn(&mut command).map_err(|_| FAILED.to_owned())?;
         // Whenever it ends, it is waited for, so that it does not linger in a
         // settings page that stays open.
         std::thread::spawn(move || process.wait());

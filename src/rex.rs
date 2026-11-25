@@ -20,7 +20,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::term;
+use crate::{fs_ops, term};
 
 const PROBE_WAIT: Duration = Duration::from_secs(3);
 /// How long a script or a settings command may take before it is ended. Rex allows each
@@ -139,7 +139,7 @@ fn output_within(command: &mut Command, input: Option<&str>, wait: Duration) -> 
     const LIMIT: usize = 1 << 20;
     let deadline = Instant::now() + wait;
     let stdin = if input.is_some() { Stdio::piped() } else { Stdio::null() };
-    let mut child = command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut child = fs_ops::spawn(command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::null())).ok()?;
     // Written from a thread that can be left behind: a program that never reads, or one that
     // hands the pipe to another, must not hold a pane past the deadline.
     let written = input.zip(child.stdin.take()).map(|(input, mut pipe)| {
@@ -210,7 +210,7 @@ pub fn run(args: &[&OsStr]) -> bool {
 /// Whether a program succeeded within `wait`. One that has not ended by then is ended.
 fn finished(command: &mut Command, wait: Duration) -> bool {
     let deadline = Instant::now() + wait;
-    let Ok(mut child) = command.spawn() else { return false };
+    let Ok(mut child) = fs_ops::spawn(command) else { return false };
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
@@ -384,12 +384,13 @@ impl AlertSource {
         if !self.is_current() {
             return Err(io::ErrorKind::NotConnected.into());
         }
-        alert_command(self.endpoint())
-            .args(["--timeout=2s", "events", "--all", "--json"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
+        fs_ops::spawn(
+            alert_command(self.endpoint())
+                .args(["--timeout=2s", "events", "--all", "--json"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
     }
 }
 
