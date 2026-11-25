@@ -864,7 +864,11 @@ impl Repo {
                 (paths, true)
             }
         };
-        self.tracked = Tracked { index, paths: paths.into(), incomplete };
+        self.tracked.index = index;
+        self.tracked.incomplete = incomplete;
+        if paths != *self.tracked.paths {
+            self.tracked.paths = paths.into();
+        }
     }
 
     /// The tracked paths relative to the root, as `pending` last listed them.

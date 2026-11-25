@@ -230,6 +230,32 @@ mod tests {
     }
 
     #[test]
+    fn staging_an_edit_updates_counts_without_replacing_the_tree() {
+        let f = project();
+        let path = "src/main.rs";
+        f.write(path, "first edit\n");
+        let mut o = open(&f).refreshing_away();
+        let selected = o.selected_path().unwrap();
+        assert_eq!(&*selected, path);
+
+        f.write(path, "second edit\nnew line\n");
+        f.git(&["add", "--", path]);
+        assert!(o.check());
+        assert_eq!(finish(&mut o), Some(true));
+        let row = o.tree.row(o.tree.row_of(path).unwrap()).unwrap();
+        assert_eq!((row.kind, row.add, row.del), (Kind::Modified, 2, 1));
+        assert!(std::rc::Rc::ptr_eq(&selected, &row.path));
+
+        f.git(&["mv", "src/old.rs", "src/new.rs"]);
+        f.git(&["commit", "--only", "-qm", "rename a clean file", "--", "src/old.rs", "src/new.rs"]);
+        assert!(o.check());
+        assert_eq!(finish(&mut o), Some(true));
+        assert!(shows(&mut o, "new.rs"));
+        assert!(!shows(&mut o, "old.rs"));
+        assert_eq!(o.selected_path().as_deref(), Some(path));
+    }
+
+    #[test]
     fn a_check_does_not_start_a_second_refresh_beside_one_that_is_running() {
         let f = project();
         let mut o = open(&f).refreshing_away();
