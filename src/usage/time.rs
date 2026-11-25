@@ -77,6 +77,55 @@ fn digits(bytes: &[u8]) -> Option<u32> {
     bytes.iter().try_fold(0_u32, |n, &b| b.is_ascii_digit().then(|| n * 10 + u32::from(b - b'0')))
 }
 
+/// HTTP recipients accept IMF-fixdate and the two obsolete HTTP-date formats (RFC 9110 §5.6.7).
+pub(super) fn http_date(value: &str, now: i64) -> Option<i64> {
+    const SHORT: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const LONG: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let (weekday, tail) = value.split_once(' ')?;
+    let (weekday, day, month, year, clock, short_year) = if let Some(weekday) = weekday.strip_suffix(',') {
+        let tail = tail.strip_suffix(" GMT")?;
+        if let Some(index) = SHORT.iter().position(|&w| w == weekday) {
+            let (day, tail) = tail.split_once(' ')?;
+            let (month, tail) = tail.split_once(' ')?;
+            let (year, clock) = tail.split_once(' ')?;
+            (index, day, month, year, clock, false)
+        } else {
+            let index = LONG.iter().position(|&w| w == weekday)?;
+            let (date, clock) = tail.split_once(' ')?;
+            let (day, date) = date.split_once('-')?;
+            let (month, year) = date.split_once('-')?;
+            (index, day, month, year, clock, true)
+        }
+    } else {
+        let index = SHORT.iter().position(|&w| w == weekday)?;
+        let (month, tail) = tail.split_once(' ')?;
+        let (day, tail) = tail.split_at_checked(2)?;
+        let (clock, year) = tail.strip_prefix(' ')?.split_once(' ')?;
+        (index, day.trim_start_matches(' '), month, year, clock, false)
+    };
+    let month = u32::try_from(MONTHS.iter().position(|&m| m == month)? + 1).ok()?;
+    if year.len() != if short_year { 2 } else { 4 } || day.is_empty() || day.len() > 2 {
+        return None;
+    }
+    let day = digits(day.as_bytes())?;
+    let [h, h1, b':', m, m1, b':', s, s1] = *clock.as_bytes() else { return None };
+    let (h, m, s) = (digits(&[h, h1])?, digits(&[m, m1])?, digits(&[s, s1])?);
+    if h >= 24 || m >= 60 || s > 60 {
+        return None;
+    }
+    let time = i64::from(h * 3600 + m * 60 + s);
+    let mut year = digits(year.as_bytes())?;
+    if short_year {
+        year = (19..=99).rev().map(|century| century * 100 + year).find(|&candidate| {
+            calendar_days(candidate - 50, month, 1)
+                .is_some_and(|first| (first + i64::from(day) - 1) * DAY + time <= now)
+        })?;
+    }
+    let days = calendar_days(year, month, day)?;
+    ((days + 4).rem_euclid(7) == i64::try_from(weekday).ok()?).then_some(days * DAY + time)
+}
+
 fn offset(zone: &[u8]) -> Option<i64> {
     match zone {
         [b'Z' | b'z'] => Some(0),

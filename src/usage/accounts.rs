@@ -241,16 +241,18 @@ pub(super) struct Fetched {
     asked: i64,
     /// The earliest time to ask it again unprompted.
     next: i64,
+    retry_after: bool,
 }
 
 impl Fetched {
     fn manual_at(&self) -> i64 {
         let floor = self.asked.saturating_add(MANUAL_REST);
-        if self.failure == Some(Failure::Limited) { self.next.max(floor) } else { floor }
+        if self.retry_after || self.failure == Some(Failure::Limited) { self.next.max(floor) } else { floor }
     }
 
     fn same_schedule(&self, other: &Self) -> bool {
-        (self.asked, self.next, self.failure) == (other.asked, other.next, other.failure)
+        (self.asked, self.next, self.failure, self.retry_after)
+            == (other.asked, other.next, other.failure, other.retry_after)
     }
 }
 
@@ -629,11 +631,12 @@ impl Sources {
         if u64::try_from(bytes.len()).ok()? > CACHE_LIMIT {
             return None;
         }
-        let [version, asked, next, failure, reading] =
-            Value::parse(&bytes)?.fields(["version", "asked", "next", "failure", "reading"]);
+        let [version, asked, next, failure, reading, retry_after] =
+            Value::parse(&bytes)?.fields(["version", "asked", "next", "failure", "reading", "retry_after"]);
         let asked = asked?.integer()?;
+        let retry_after = retry_after.and_then(Value::boolean).unwrap_or(false);
         // A look saved while the clock was ahead would put off every later one.
-        if version?.unsigned() != Some(2) || asked > now + CLOCK_SKEW {
+        if version?.unsigned() != Some(2) || (!retry_after && asked > now + CLOCK_SKEW) {
             return None;
         }
         Some(Fetched {
@@ -641,6 +644,7 @@ impl Sources {
             failure: failure.and_then(|saved| Failure::NAMES.iter().find(|(_, name, _)| saved.is(name)).map(|f| f.0)),
             asked,
             next: next?.integer()?,
+            retry_after,
         })
     }
 
@@ -651,6 +655,9 @@ impl Sources {
         let mut text = String::with_capacity(256);
         text.push_str(r#"{"version":2"#);
         write!(text, r#","asked":{},"next":{}"#, fetched.asked, fetched.next).expect("writing to a string");
+        if fetched.retry_after {
+            text.push_str(r#","retry_after":true"#);
+        }
         if let Some(failure) = fetched.failure {
             write!(text, r#","failure":"{}""#, failure.name()).expect("writing to a string");
         }
@@ -678,10 +685,11 @@ impl Sources {
         credentials: &Credentials<'_>,
         cache: Option<&Path>,
         origin: Origin,
-        now: i64,
+        time: (i64, Instant),
         manual: bool,
         known: Option<Fetched>,
-    ) -> Fetched {
+    ) -> (Fetched, Cooldown) {
+        let (now, clock) = time;
         let scope = credentials.scope.as_deref();
         let before = cache.and_then(|path| Self::remembered(path, now));
         if let Some(saved) = before.filter(|saved| known.is_none_or(|known| !saved.same_schedule(&known))) {
@@ -689,7 +697,7 @@ impl Sources {
             // known one already has an elapsed-time schedule in this process.
             let rest = if manual { saved.manual_at() } else { saved.next };
             if now < rest {
-                return saved;
+                return (saved, Cooldown::from_wall(&saved, now, clock));
             }
         }
         let (path, until) = account.question(scope, now);
@@ -700,15 +708,26 @@ impl Sources {
         };
         let request = http::Request { url: &url, bearer: &credentials.key, headers: account.headers() };
         let interval = account.interval();
-        let (answer, rest) = match http::get(&request, HTTP_WAIT) {
+        let reply = http::get(&request, HTTP_WAIT);
+        let (now, clock, round_up) = match origin {
+            Origin::Providers => (when::now(), Instant::now(), 1),
+            #[cfg(test)]
+            Origin::Loopback(_) => (now, clock, 0),
+        };
+        let hint = reply.as_ref().filter(|reply| reply.status != 200).and_then(|reply| reply.retry_after.as_ref());
+        let retry_after = hint.is_some();
+        let wait = hint.map(|hint| match hint {
+            http::RetryAfter::Seconds(delay) => delay.saturating_add(round_up),
+            http::RetryAfter::At(date) => date.saturating_sub(now),
+        });
+        let (answer, rest) = match reply {
             None => (Err(Failure::Unreachable), UNREACHABLE_REST),
             Some(reply) => match reply.status {
                 200 => (account.parse(&reply.body, now, until).unwrap_or(Err(Failure::Unexpected)), interval),
                 401 => (Err(Failure::Refused), REFUSED_REST),
                 // GitHub reports its secondary rate limits as forbidden, with a wait.
                 429 | 403 if reply.status == 429 || reply.retry_after.is_some() => {
-                    let wait = reply.retry_after.and_then(|wait| i64::try_from(wait).ok()).unwrap_or(LIMITED_REST);
-                    (Err(Failure::Limited), wait.clamp(MINUTE, HOUR))
+                    (Err(Failure::Limited), wait.unwrap_or(LIMITED_REST).max(MINUTE))
                 }
                 403 | 404 => (Err(Failure::Denied), REFUSED_REST),
                 _ => (Err(Failure::Unreachable), UNREACHABLE_REST),
@@ -718,18 +737,19 @@ impl Sources {
             Ok(reading) => {
                 // A count says nothing once its period ends, so the next period is asked about then.
                 let next = reading.until.map_or(now + rest, |until| until.min(now + rest));
-                Fetched { reading: Some(reading), failure: None, asked: now, next }
+                Fetched { reading: Some(reading), failure: None, asked: now, next, retry_after }
             }
             Err(failure) => {
                 // The last answer still describes the account when the provider merely did not give a new one.
                 let earlier = before.and_then(|saved| saved.reading).filter(|_| failure != Failure::Nothing);
-                Fetched { reading: earlier, failure: Some(failure), asked: now, next: now + rest }
+                let next = now.saturating_add(rest.max(wait.unwrap_or(0)));
+                Fetched { reading: earlier, failure: Some(failure), asked: now, next, retry_after }
             }
         };
         if let Some(cache) = cache {
             Self::remember(cache, &fetched);
         }
-        fetched
+        (fetched, Cooldown::from_wall(&fetched, now, clock))
     }
 }
 
@@ -886,8 +906,7 @@ impl Accounts {
             let credentials = credentials.into_owned();
             // If no thread can be started, the next check tries again.
             account.job = sqlite::Job::start(known.is_none() || manual, move || {
-                let fetched = Sources::fetch(which, &credentials, cache.as_deref(), origin, now, manual, known);
-                Some((fetched, Cooldown::from_wall(&fetched, now, clock)))
+                Some(Sources::fetch(which, &credentials, cache.as_deref(), origin, (now, clock), manual, known))
             })
             .ok();
         }
@@ -1025,7 +1044,7 @@ impl Accounts {
 
     pub(super) fn set(&mut self, which: UsageAccount, reading: Option<Reading>, failure: Option<Failure>, now: i64) {
         let account = self.accounts.iter_mut().find(|account| account.which == which).expect("the account is on");
-        account.fetched = Some(Fetched { reading, failure, asked: now, next: i64::MAX });
+        account.fetched = Some(Fetched { reading, failure, asked: now, next: i64::MAX, retry_after: false });
         account.cooldown = Some(Cooldown { since: Instant::now(), automatic: Duration::MAX, manual: Duration::ZERO });
     }
 }
