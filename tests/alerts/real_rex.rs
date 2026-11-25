@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use super::{DISCORD, ENABLED, Home, PAUSED, RECOVERED, TELEGRAM, settle, soon};
+use super::{DISCORD, ENABLED, Home, LINK, PAUSED, RECOVERED, TELEGRAM, TOKEN, settle, soon};
 
 struct Server(Child);
 
@@ -131,7 +131,7 @@ exec "$rex" --autostart=false -S "$endpoint" "$@"
         discord.push(ENABLED);
     }
     home.wait_for_health("Listening");
-    emit("before-restart", "blocked:kind=permission");
+    emit("project/before-restart · opencode", "blocked:kind=permission");
     telegram.push(if origin {
         "Rex: <code>synthetic</code> is waiting for permission · <code>before-restart</code>"
     } else {
@@ -145,6 +145,17 @@ exec "$rex" --autostart=false -S "$endpoint" "$@"
     assert!(home.received(telegram.len() + discord.len()), "{}", home.run(&["alerts"]));
     assert_eq!(home.destination.texts_at(TELEGRAM), telegram);
     assert_eq!(home.destination.texts_at(DISCORD), discord);
+    let tg = home.destination.requests_at(TELEGRAM).pop().unwrap();
+    assert_eq!(tg.path, format!("/bot{TOKEN}/sendMessage"));
+    assert!(tg.body.contains("\"chat_id\":-1001234567890") && tg.body.contains("\"parse_mode\":\"HTML\""));
+    assert!(tg.body.contains("\"link_preview_options\":{\"is_disabled\":true}"));
+    let dc = home.destination.requests_at(DISCORD).pop().unwrap();
+    assert_eq!(dc.path, format!("{DISCORD}{}", LINK.split_once("/webhooks/").unwrap().1));
+    assert!(dc.body.contains("\"embeds\":[{\"author\":{\"name\":\"milo - Needs attention\""));
+    assert!(dc.body.contains("\"allowed_mentions\":{\"parse\":[]}"));
+    for body in [tg.body, dc.body] {
+        assert!(!body.contains("private prompt") && !body.contains("project/") && !body.contains("opencode"));
+    }
 
     drop(server);
     home.wait_for_health("Waiting for Rex");
