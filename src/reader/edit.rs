@@ -597,15 +597,14 @@ impl Editor {
         let original = self.original.read();
         let over_other_text = !draft.written_over(original);
         let unmarked = kept.strip_prefix(BOM).filter(|_| draft.marked(original, !over_other_text));
-        let step = self.replace(Pos::default(), self.buffer.end(), unmarked.unwrap_or(&kept));
+        let replay = self.buffer.replace_all(unmarked.unwrap_or(&kept), self.cursor, Pos { row: self.top, col: 0 });
         // The kept copy stays until this text is saved: undoing the restore must not be the end of it.
         let marked = unmarked.is_some();
         self.restored =
             Some(Restored { change: self.buffer.last_change(), draft: Some(draft), over_other_text, marked });
-        self.cursor = Pos { row: self.top.min(self.buffer.len() - 1), col: 0 };
         let over = if over_other_text { " over a changed file" } else { "" };
         self.say(format!("Draft restored{over} · ^Z undoes"), now);
-        step
+        self.edited(replay.first_row, replay.old_last_row, replay.last_row, replay.cursor)
     }
 
     /// Whether the draft can grow by `more` bytes and still be a file milo shows. Says so if not.
@@ -685,12 +684,8 @@ impl Editor {
         } else if formatted.len() as u64 + 3 > LIMIT {
             self.say("The formatted file would be too large.", now);
         } else {
-            let Pos { row, col } = self.cursor;
-            self.replace(Pos::default(), self.buffer.end(), &formatted);
-            let row = row.min(self.buffer.len() - 1);
-            let line = self.buffer.row(row);
-            let col = (0..=col.min(line.len())).rev().find(|&at| line.is_char_boundary(at)).unwrap_or(0);
-            self.cursor = Pos { row, col };
+            let replay = self.buffer.replace_all(&formatted, self.cursor, self.cursor);
+            self.edited(replay.first_row, replay.old_last_row, replay.last_row, replay.cursor);
             self.say(format!("Formatted with {} · ^Z undoes", tool.name), now);
         }
     }
