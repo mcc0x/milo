@@ -17,7 +17,7 @@ use super::event::{self, Alert, Seen};
 use super::send::{self, Outcome};
 use super::{Alerts, Destination, Health, Settings, lifecycle, message, origin, secret};
 use crate::setup::lock;
-use crate::{preferences, rex};
+use crate::{fs_ops, preferences, rex};
 
 /// The longest line of the stream that is read. Rex's largest alert is far smaller.
 const LINE_LIMIT: u64 = 1 << 16;
@@ -162,7 +162,7 @@ impl Worker {
         };
         // SAFETY: The closure only restores the signal mask before exec; it does not allocate or acquire a lock.
         unsafe { command.pre_exec(restore) };
-        command.spawn().map(|child| Self(Some(child)))
+        fs_ops::spawn(&mut command).map(|child| Self(Some(child)))
     }
 
     fn reap(&mut self) -> io::Result<ExitStatus> {

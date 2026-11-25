@@ -1245,8 +1245,17 @@ fn a_pane_started_without_a_terminal_says_what_works_without_one() {
         .arg("outline")
         .output()
         .unwrap();
-    let in_rex = format!("{NEEDS}, and rex run -s \"$REX_SESSION\" -- milo COMMAND opens a pane in a Rex tab\n");
-    assert_eq!((output.status.code(), String::from_utf8(output.stderr).unwrap()), (Some(1), in_rex));
+    let in_rex =
+        |variable: &str| format!("{NEEDS}, and rex run -s \"${variable}\" -- milo COMMAND opens a pane in a Rex tab\n");
+    assert_eq!((output.status.code(), String::from_utf8(output.stderr).unwrap()), (Some(1), in_rex("REX_SESSION")));
+    // Rex preview.23 and later name only the pane's block, which selects its session.
+    let block_only = |block: &str| {
+        let output =
+            project.command(env!("CARGO_BIN_EXE_milo")).env("REX_BLOCK", block).arg("outline").output().unwrap();
+        (output.status.code(), String::from_utf8(output.stderr).unwrap())
+    };
+    assert_eq!(block_only("block:00000000-0000-0000-0000-000000000002"), (Some(1), in_rex("REX_BLOCK")));
+    assert_eq!(block_only("block:0002"), (Some(1), format!("{NEEDS}\n")));
     // A mistake in the command is still reported as that mistake.
     let output = project.command(env!("CARGO_BIN_EXE_milo")).args(["outline", "missing"]).output().unwrap();
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "milo: missing is not a directory\n");
@@ -1349,13 +1358,9 @@ fn doctor_and_removal_do_not_install_anything_on_a_fresh_account() {
     let original = br#"{"statusLine":{"type":"command","command":"mine"}}"#;
     fs::write(&settings, original).unwrap();
     for args in [&["doctor"][..], &["setup", "--remove"]] {
-        let out = project
-            .command(env!("CARGO_BIN_EXE_milo"))
-            .env_remove("REX_CONFIG")
-            .env("PI_CODING_AGENT_DIR", project.0.join("agent"))
-            .args(args)
-            .output()
-            .unwrap();
+        // A Rex on the developer's path keeps a file of its own in the state folder
+        // it is given, so this account is one that has no Rex either.
+        let out = project.standalone().env("PI_CODING_AGENT_DIR", project.0.join("agent")).args(args).output().unwrap();
         assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
         assert!(!project.0.join("config").exists() && !project.0.join("state").exists());
         assert_eq!(fs::read(&settings).unwrap(), original);
@@ -2000,6 +2005,56 @@ fn the_outline_edits_a_file_in_its_own_pane_and_returns_to_the_same_file() {
     tty.master.write_all(b"qq").unwrap();
     assert!(tty.wait_for_exit().success());
     assert!(tty.restored());
+}
+
+#[test]
+fn the_outline_opens_its_reader_beside_the_pane_rex_named_with_or_without_a_session() {
+    let project = Project::new();
+    fs::write(project.0.join("project/page.txt"), "more\n").unwrap();
+    let pane = "block:22222222-2222-2222-2222-222222222222";
+    let rex = project.0.join("rex");
+    // Every request is noted by all its arguments, which say which session and pane Rex is to act in.
+    let script = "#!/bin/sh\n[ \"$1\" = ready ] && exit 0\ncat >/dev/null\necho \"$*\" >> \"$HOME/requests\"\n\
+                  echo block:11111111-1111-1111-1111-111111111111\n";
+    fs::write(&rex, script).unwrap();
+    fs::set_permissions(&rex, fs::Permissions::from_mode(0o700)).unwrap();
+    // A sibling test's new process can hold the script open for writing for a moment.
+    let until = Instant::now() + TEST_WAIT;
+    while let Err(error) = project.command(&rex).arg("ready").status() {
+        assert!(
+            error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < until,
+            "cannot run stand-in rex: {error}"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let mut paths = vec![project.0.clone()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    // Rex preview.23 and later name only the block, whose ID then selects the session. An
+    // older Rex names the session too, and a newer one's request must not replace it.
+    for (requests, session) in [(1, None), (2, Some("session:33333333-3333-3333-3333-333333333333"))] {
+        let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+        command.env("PATH", std::env::join_paths(&paths).unwrap()).env("TERM_PROGRAM", "rex").env("REX_BLOCK", pane);
+        if let Some(session) = session {
+            command.env("REX_SESSION", session);
+        }
+        let mut outline = Terminal::run(command.arg("outline"));
+        outline.shows("page.txt");
+        outline.master.write_all(b"\r").unwrap();
+        let until = Instant::now() + TEST_WAIT;
+        let log = loop {
+            let log = fs::read_to_string(project.0.join("requests")).unwrap_or_default();
+            if log.lines().count() == requests {
+                break log;
+            }
+            assert!(Instant::now() < until, "expected {requests} requests to Rex, not:\n{log}");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let request = log.lines().last().unwrap();
+        let target = format!(" do - -s {} -b {pane} --args ", session.unwrap_or(pane));
+        assert!(request.contains(&target) && request.contains(r#""view""#), "{request}");
+        outline.master.write_all(b"q").unwrap();
+        assert!(outline.wait_for_exit().success());
+    }
 }
 
 #[test]
