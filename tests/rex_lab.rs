@@ -504,6 +504,27 @@ impl Lab {
         }
     }
 
+    /// A program run from `block` with no terminal, as a coding agent's shell there would
+    /// run it: with the variables this Rex gives a terminal and nothing else of one.
+    /// Releases before preview.23 name the session as well as the block, so a lab
+    /// terminal is asked which it was given.
+    fn in_pane(&self, program: &Path, session: &str, block: &str) -> Command {
+        let seen = self.root.join("pane-variables");
+        let print = format!("printf '%s' \"${{REX_SESSION:+session }}${{REX_BLOCK:+block}}\" >'{}'", seen.display());
+        let made = self.rex(&["run", "-s", session, "--focus=false", "--json", "--wait", "--", "sh", "-c", &print]);
+        let _ = self.rex_output(&["window", "close", "-s", session, &id(&made, "window_id")]);
+        let mut command = self.command(program);
+        command.env("REX_BLOCK", block);
+        match self.read("pane-variables").as_str() {
+            "block" => {}
+            "session block" => {
+                command.env("REX_SESSION", session);
+            }
+            other => panic!("a lab terminal has neither Rex variable Milo reads: {other:?}"),
+        }
+        command
+    }
+
     /// The process ID and command line of each layout listener serving the lab.
     fn listeners(&self) -> Vec<(String, String)> {
         let processes = self.command("ps").args(["-axww", "-o", "pid=,command="]).output().unwrap();
@@ -826,14 +847,7 @@ impl Scene {
                 tab.panes.iter().map(|pane| &pane.block).eq(view.tab(restored).panes.iter().map(|pane| &pane.block))
             );
         };
-        let report = lab
-            .command(&lab.milo)
-            .current_dir(second)
-            .env("REX_SESSION", session)
-            .env("REX_BLOCK", &shell)
-            .arg("doctor")
-            .output()
-            .unwrap();
+        let report = lab.in_pane(&lab.milo, session, &shell).current_dir(second).arg("doctor").output().unwrap();
         let report = String::from_utf8(report.stdout).unwrap();
         assert!(report.contains("Live sidebar: restored shells, not Milo panes."), "{report}");
         let arrange = lab.rex_output(&["do", "milo_layout", "-s", session, "-b", &shell]).unwrap();
@@ -1090,10 +1104,8 @@ fn a_floating_review_marks_only_the_handed_over_edits_and_says_when_it_cannot() 
     let shell = lab.view().tab(&tab).panes[0].block.clone();
     // What an agent's shell in that tab would run: no terminal, only the pane's Rex variables.
     let output = lab
-        .command(&lab.milo)
+        .in_pane(&lab.milo, &session, &shell)
         .current_dir(&dir)
-        .env("REX_SESSION", &session)
-        .env("REX_BLOCK", &shell)
         .args(["review", patch.to_str().unwrap(), "--from", "the agent", "--float"])
         .output()
         .unwrap();

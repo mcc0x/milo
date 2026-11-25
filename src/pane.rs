@@ -563,13 +563,17 @@ fn without_a_terminal() -> &'static str {
     const PRINTS: &str =
         "; a pane needs an interactive terminal. milo doctor and milo COMMAND --help print without one";
     const IN_REX: &str = "; a pane needs an interactive terminal. milo doctor and milo COMMAND --help print without one, \
-                          and rex run -s \"$REX_SESSION\" -- milo COMMAND opens a pane in a Rex tab";
+                          and rex run -s \"$REX_BLOCK\" -- milo COMMAND opens a pane in a Rex tab";
+    const IN_OLDER_REX: &str = "; a pane needs an interactive terminal. milo doctor and milo COMMAND --help print without one, \
+                                and rex run -s \"$REX_SESSION\" -- milo COMMAND opens a pane in a Rex tab";
     if io::stdout().is_terminal() && io::stdin().is_terminal() {
         ""
-    } else if crate::rex::inside() {
-        IN_REX
-    } else {
+    } else if !crate::rex::inside() {
         PRINTS
+    } else if crate::rex::names_session() {
+        IN_OLDER_REX
+    } else {
+        IN_REX
     }
 }
 

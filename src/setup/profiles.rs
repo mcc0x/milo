@@ -325,7 +325,7 @@ impl Store {
                 return Err(NO_TAB);
             }
         }
-        Ok(Trial { session: target.session.clone(), window, blocks, temporary })
+        Ok(Trial { session: target.selector().to_owned(), window, blocks, temporary })
     }
 }
 
@@ -402,14 +402,15 @@ fn probe_window(
     operation: &str,
     window: Option<&str>,
 ) -> Result<String, &'static str> {
-    let Some(window) = window else { return probe(Some(target), &target.session, layout, operation, &[]) };
+    let Some(window) = window else { return probe(Some(target), target.selector(), layout, operation, &[]) };
     // The CLI accepts labels and partial IDs, and a valid block can move to
     // another tab. Verify both original IDs in the same Lua call as the action.
     const GUARD: &str = r#"
 do
   local session = rex.session.view{ session_id = rex.session_id }
   local original, wanted
-  if rex.block_id == rex.args.milo_web_block and rex.session_id == rex.args.milo_web_session then
+  local in_session = rex.args.milo_web_session == "" or rex.session_id == rex.args.milo_web_session
+  if rex.block_id == rex.args.milo_web_block and in_session then
     wanted = rex.args.milo_web_window
     for _, candidate in ipairs(session and session.windows or {}) do
       if wanted == "" or candidate.window_id == wanted then
@@ -426,14 +427,16 @@ do
 end
 "#;
     let block = target.block.to_str().ok_or(NO_TAB)?;
-    let session = target.session.to_str().ok_or(NO_TAB)?;
+    // A pane named by its block alone has no session to compare: Rex found the session
+    // from the block, and the script still requires the block to be in the original tab.
+    let session = target.session.as_deref().map_or(Some(""), OsStr::to_str).ok_or(NO_TAB)?;
     let mut script = String::from(GUARD);
     script.push_str(&probe_lua(layout, &executable()?));
     let args =
         [format!("milo_web_block={block}"), format!("milo_web_session={session}"), format!("milo_web_window={window}")];
     rex::script(
         Some(target),
-        &target.session,
+        target.selector(),
         &script,
         std::iter::once(operation).chain(args.iter().map(String::as_str)),
     )
@@ -461,7 +464,7 @@ pub fn return_from_peek(origin: &OsStr) {
     let Some(target) = rex::Target::current() else { return };
     let _ = probe(
         Some(&target),
-        &target.session,
+        target.selector(),
         &Layout::default(),
         "milo_operation=return_peek",
         &[format!("origin={origin}")],
