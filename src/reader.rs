@@ -14,7 +14,9 @@ mod markdown;
 mod pick;
 mod media;
 mod media_load;
+mod reopen;
 mod rescue;
+mod sets;
 mod tabs;
 #[cfg(test)]
 mod tests;
@@ -44,7 +46,7 @@ use disk::{ReadOnly, SaveError};
 use draw::{Hint, Hints};
 use edit::{Editor, Place, Step};
 pub use rescue::take_notes as take_rescue_notes;
-pub use tabs::Tabs;
+pub use tabs::{TabSets, Tabs};
 pub use handed::{Handed, handed_lines};
 pub use pick::{Picked, PickedLine, Viewed};
 

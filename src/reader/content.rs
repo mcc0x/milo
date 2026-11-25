@@ -163,6 +163,11 @@ impl WorkingTarget {
         Some(Self { repo, root, relative })
     }
 
+    /// Whether there is something at the path now, reached as the reader would reach it.
+    pub(super) fn present(&self) -> bool {
+        WorkingStamp::at(&self.repo, &self.root, &self.relative).0.is_ok()
+    }
+
     pub(super) fn matches(&self, reader: &Reader) -> bool {
         let Source::Working(work) = &reader.source else { return false };
         work.relative == self.relative && work.repo.root == self.repo.root && work.root.same_directory(&self.root)

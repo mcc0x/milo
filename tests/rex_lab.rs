@@ -1379,3 +1379,6 @@ fn a_task_starts_its_agent_in_a_background_session_from_the_command_line_and_the
     trees.sort();
     assert_eq!(trees, ["task-one", "task-two"]);
 }
+
+#[path = "rex_lab/tab_sets.rs"]
+mod tab_sets;

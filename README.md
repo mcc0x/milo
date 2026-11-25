@@ -103,6 +103,7 @@ In Rex, start a coding agent on a task without leaving your pane. `milo task new
 | `milo history [DIR]` | Browse Git commits, expand a commit and read its file at that revision in place. | Managed sidebar and floating reader tabs. |
 | `milo view FILE` / `--edit` / `--line LINE` / `--commit ID` | Read in the current terminal, at a line if you name one. Edit a working text file; save explicitly. A commit is read-only. | [Open a file named in a pane's output](docs/panes.md#opening-a-file-from-a-terminals-output), at its line, from the command palette. |
 | `milo review PATCH [--from NAME]` | Read a handed-over patch in place. | `--float` can open the review from a non-interactive caller in a Rex pane. |
+| `milo tabs [--last]` | Preview and reopen the tabs the reader last had open in this worktree, or a set of tabs you saved under a name. | **Milo: Reopen Last Reader Tabs…** and **Milo: Open a Reader Tab Set…** open the same lists in a floating pane. |
 | `milo usage` / `usage --menu-stream` | Show available local figures in a pane, or emit a stream for the menu app. No provider sign-in required. | Optional compact Usage rail. |
 | `milo setup` | Terminal settings, including icon, Git mark and usage choices. The explicit command offers a skippable first-run guide. | Try, save, repair or remove managed layouts. |
 | `milo web [--no-open]` | Local settings dashboard. `--no-open` prints a private loopback link instead of opening the browser. | `--host HOST` uses Rex to forward **another** host’s editor. |

@@ -284,6 +284,20 @@ A harness goes in `HARNESSES` in `src/task/harness.rs` only with the interactive
 
 `cargo test --bin milo task:: worktrees::` runs the unit tests and `cargo test --test task` runs the real `milo task new` beside stand-ins for `rex` and the agents. With Lua 5.1, the fixtures above cover the action's questions, including closing each one. With Rex installed, `cargo test --test rex_lab -- --ignored a_task_starts` starts tasks from the command line and through the action on a disposable server. No test starts a real agent: do that by hand on a disposable Rex server and repository, and say in the pull request which agents and versions you ran. Only a Rex app can answer `rex.ui` questions, so say whether you answered them in an app or passed every choice as an argument.
 
+### Changing reader tab lists
+
+[Reopening tabs and named sets](docs/panes.md#reopening-tabs-and-named-sets) says what a person sees. `src/reader/sets.rs` keeps the lists, `src/reader/reopen.rs` is the screen over them, and `src/reader/tabs.rs` records the last tabs and reopens what was chosen. Keep four things true.
+
+A list holds references only: a path inside the worktree, a full commit ID, a line and which tab was shown. Never write a file's text, a draft, a command or a terminal's contents into one, and never write a list into the project.
+
+Nothing reopens unasked. A reader records its tabs as the last tabs and shows no list until `Ctrl-T`; only `milo tabs` and the two Rex actions start at the lists. Every reopening goes through the preview, and a named set changes only through its own save, replace, rename and delete.
+
+A tab is opened as `milo view` would open it: a working file through `WorkingTarget`, a file at a commit through `CommittedTarget` with the full ID that was kept. When that fails the tab stays closed and says so. Do not fall back from a commit to the working file, or from a missing file to another path.
+
+A tab that is open is left alone. Reopening matches each kept tab against the open ones before loading anything, so a draft, its undo history and a reading position are never replaced.
+
+`cargo test --bin milo reader::` runs the unit tests and `cargo test --test pane the_tabs_a_reader` runs `milo tabs` in a terminal. With Rex installed, `cargo test --test rex_lab -- --ignored reader_tabs_reopen` follows two worktrees through panes of a disposable server: sets saved, replaced, renamed and deleted, a reopen over a draft, a deleted file and a dropped commit. It starts each reader with `milo view` and loads this checkout's `actions.lua` with `rex do FILE --action`, so it needs no saved layout. Set `MILO_TEST_READER_EVIDENCE` to a folder to keep its frames as HTML; `tests/rex_lab/capture_png.swift` turns one into a picture.
+
 ### Adding a language to the reader
 
 Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for language tables, and `src/syntax/delimiters.rs` for strings and comments whose closing marks depend on the opener. `src/syntax/markup.rs` reads HTML and XML, and `src/syntax/markdown.rs` reads Markdown; those two are not code and have walkers of their own. Adding a language normally means changing only the tables:
@@ -453,9 +467,11 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/reader/edit_tests.rs` | Checks editing, saving, conflicts, read-only files, kept drafts, and formatting. |
 | `src/reader/inbox.rs` | Carries a request to open one more file, at a line if one is named, to a reader already running in a Rex block, through a pipe in the state folder, and notes that reader's project beside it. |
 | `src/reader/handed.rs` | Loads a file with only a handed-over patch's edits marked, through no link and never to edit. |
+| `src/reader/reopen.rs` | Shows a worktree's last tabs and named sets, previews one with each tab's version and whether it is still there, and saves, renames, replaces and deletes a set. |
 | `src/reader/pick.rs` | Moves a line cursor over a handed-over patch and reports the lines under it, for a note. |
 | `src/reader/rescue.rs` | Keeps the draft of a reader ended from outside, and marks a Rex reader that has unsaved edits. |
-| `src/reader/tabs.rs` | Holds the files open in one reader as tabs, draws their strip, and asks about every unsaved draft before a tab or the reader closes. |
+| `src/reader/sets.rs` | Keeps a worktree's last tabs and named sets in the state folder: paths, full commit IDs, lines and the shown tab, never a file's text. |
+| `src/reader/tabs.rs` | Holds the files open in one reader as tabs, draws their strip, asks about every unsaved draft before a tab or the reader closes, remembers the tabs as the worktree's last, and reopens the tabs chosen from a list. |
 | `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
 | `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
 | `src/host.rs` | Names the computer Milo runs on and says whether its Rex server and command are ones Milo was checked with. |
@@ -476,8 +492,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/rex_shell.lua` | Reports the directory of the one shell a managed pane follows, and nothing from other terminals. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Runs the setup screen: its choices, layout trials, scoped saves, and maintenance. |
-| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes, name a session for its project, or ask for a new agent task. |
-| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes, name a session for its project, or open a file named in a pane's recent output. |
+| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes, name a session for its project, open a file named in a pane's recent output, ask for a new agent task, or open the lists of Reader tabs. |
 | `src/setup/actions_test.lua` | Checks those actions with a stand-in for Rex. |
 | `src/setup/claude.rs` | Plans changes to the Claude Code status line and tracks ownership. |
 | `src/setup/doctor.rs` | Inspects the installation without starting Rex, and repairs or removes the integration with setup's ownership checks. |
@@ -592,6 +607,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
+| `tests/rex_lab/tab_sets.rs` | Saves, reopens, replaces, renames and deletes Reader tab sets in panes of that server, in two worktrees, over a draft and with a deleted file and a dropped commit. |
 | `tests/web.rs` | Runs `milo web` beside a Rex stand-in that answers late: the link first, the state only once whole, a clean end in between. |
 | `tests/web_bench.rs` | Times the settings link and the first state, outside Rex and beside a slow one. |
 | `tests/web_bench/baseline-fa34ca4.tsv` | Records those times beside that revision's, on the machine named in its header. |

@@ -983,6 +983,28 @@ rex.action{ name = "milo_reset_layout", title = "Milo: Reset Saved Layout…", a
 rex.action{ name = "milo_peek_outline", title = "Milo: Peek Outline", run = function(ctx) peek(ctx, false) end }
 rex.action{ name = "milo_close_peek", title = "Milo: Dismiss Outline Peek", run = function(ctx) peek(ctx, true) end }
 
+-- Opens the lists of Reader tabs remembered for the project of this tab's
+-- shell, in a floating pane. It reads no terminal, and starts nothing a list
+-- names: a list is previewed there, and only files chosen from it are read.
+local function reader_tabs(ctx, last)
+  local window = tab(ctx)
+  if not window then raise("no_tab") end
+  local _, cwd = anchor(ctx, window, true)
+  if not cwd then raise("no_shell") end
+  local command = { milo, "tabs" }
+  if last then command[3] = "--last" end
+  local made, err = rex.session.new_layer{
+    session_id = ctx.session_id, window_id = window.window_id, focus = true, bounds = {0.12, 0.08, 0.76, 0.84},
+    layout = rex.layout.block{ flavor = shell_flavor, label = "Reader tabs",
+      options = { command = command, shell = "none", cwd = cwd } },
+  }
+  if not made or not made.block_ids or not made.block_ids[1] then raise(err or "Rex could not open the Reader tabs.") end
+end
+rex.action{ name = "milo_reopen_tabs", title = "Milo: Reopen Last Reader Tabs…",
+  run = function(ctx) reader_tabs(ctx, true) end }
+rex.action{ name = "milo_tab_sets", title = "Milo: Open a Reader Tab Set…",
+  run = function(ctx) reader_tabs(ctx, false) end }
+
 -- The only place Milo names a session: the one this action was run in, and
 -- only when someone runs it. It makes no session and shows none.
 local function name_session(ctx)

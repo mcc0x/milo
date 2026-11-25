@@ -104,6 +104,8 @@ Pasted text is inserted as one change, with the file's line endings and without 
 
 Once the floating reader in Rex holds a second file, `Ctrl-N` and `Ctrl-P` show the next and previous [tab](panes.md#tabs-in-the-floating-reader) and `Ctrl-W` closes the shown one, while reading and while editing. A click on a tab's name shows it, and a click on its `×` closes it.
 
+`Ctrl-T` in the reader, while reading or editing, shows the [last tabs and named sets](panes.md#reopening-tabs-and-named-sets) of the worktree: `Enter` previews a list, `s` saves the open tabs as a named set, `o` replaces a set, `r` renames and `d` deletes one. In the preview, `Space` selects a tab, `a` all or none, and `Enter` reopens the selected ones.
+
 Questions take the place of the last row and wait for one of the keys they list. Any other key is ignored. When the pane is two rows tall they take the heading's row instead. A narrow pane drops the words before the keys first: at 28 columns every key is still listed.
 
 | Question | Keys |

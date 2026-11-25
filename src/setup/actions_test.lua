@@ -141,6 +141,18 @@ assert(#closed == 1 and closed[1] == "block:peek" and focus[2] == outline.block_
 ctx.block_id = shell.block_id
 window.layers[2] = nil
 
+-- The tab lists open floating in the shell's project, and the last tabs straight at their preview.
+actions.milo_reopen_tabs(ctx)
+actions.milo_tab_sets(ctx)
+local last_tabs, tab_sets = floats[2].layout.options, floats[3].layout.options
+assert(#floats == 3 and floats[2].focus and floats[2].window_id == window.window_id)
+assert(last_tabs.command[1] == "/test/bin/milo" and last_tabs.command[2] == "tabs" and last_tabs.command[3] == "--last")
+assert(#tab_sets.command == 2 and tab_sets.command[2] == "tabs")
+assert(last_tabs.cwd == "/my project" and tab_sets.cwd == "/my project" and last_tabs.shell == "none")
+ok, why = pcall(actions.milo_reopen_tabs, { session_id = "session:1", block_id = "block:nowhere" })
+assert(not ok and why == "Could not find this Rex tab." and #floats == 3)
+floats = { floats[1] }
+
 local function probe(args, profile)
   rex.args, rex.session_id, rex.block_id = args, ctx.session_id, ctx.block_id
   local output, saved_print = nil, print
