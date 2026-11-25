@@ -388,6 +388,68 @@ fn a_rate_limit_is_honoured_even_by_a_reload_and_the_last_answer_stays_with_its_
 }
 
 #[test]
+fn long_provider_deadlines_survive_manual_refresh_shared_cache_and_restart() {
+    const RESTART: &str = "MILO_TEST_REOPEN_PROVIDER_PORT";
+    if let Ok(port) = std::env::var(RESTART) {
+        let sources = Sources::test(
+            &[("MILO_DEEPSEEK_API_KEY", KEY)],
+            "config/usage-accounts.conf".into(),
+            "state/accounts".into(),
+            port.parse().unwrap(),
+        );
+        let mut accounts = Accounts::with(sources, chosen(&[(UsageAccount::DeepSeek, Show::Auto)]));
+        let now = NOW + 2 * HOUR - 1;
+        accounts.settle(now, true);
+        assert!(
+            matches!(accounts.iter().next().unwrap().status(now), Status::Reading(reading, _) if reading.observed == NOW - MINUTE)
+        );
+        return;
+    }
+    for (code, header) in [
+        (429, "Retry-After: 7200\r\n"),
+        (403, "Retry-After: Thu, 19 Nov 2026 16:53:20 GMT\r\n"),
+        (503, "Retry-After: 7200\r\n"),
+    ] {
+        let (f, provider) = (Fixture::folder(), Provider::start());
+        let open = || {
+            pane(&f, sources(&f, &provider, &[("MILO_DEEPSEEK_API_KEY", KEY)]), &[(UsageAccount::DeepSeek, Show::Auto)])
+        };
+        let (mut first, mut second) = (open(), open());
+        let clock = Instant::now();
+        provider.reply("deepseek", 200, "", DEEPSEEK);
+        second.accounts.settle_at(NOW - MINUTE, clock, false);
+        provider.reply("deepseek", code, header, "{}");
+        first.accounts.settle_at(NOW, clock, true);
+        assert_eq!(provider.requests(), 2);
+        provider.reply("deepseek", 200, "", DEEPSEEK);
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", std::thread::current().name().unwrap()])
+            .env_clear()
+            .env("HOME", &f.root)
+            .env(RESTART, provider.port.to_string())
+            .current_dir(&f.root)
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success() && String::from_utf8_lossy(&child.stdout).contains("1 passed"),
+            "{}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+        let mut reopened = open();
+        reopened.accounts.settle_at(NOW - HOUR, clock, true);
+        second.accounts.settle_at(NOW + HOUR, elapsed(clock, HOUR), true);
+        for manual in [false, true] {
+            first.accounts.settle_at(NOW + 4 * HOUR, elapsed(clock, 2 * HOUR - 1), manual);
+            second.accounts.settle_at(NOW + 2 * HOUR - 1, elapsed(clock, 2 * HOUR - 1), manual);
+            reopened.accounts.settle_at(NOW + 2 * HOUR - 1, elapsed(clock, 3 * HOUR - 1), manual);
+            assert_eq!(provider.requests(), 2, "{code} {header}");
+        }
+        reopened.accounts.settle_at(NOW + 2 * HOUR, elapsed(clock, 3 * HOUR), true);
+        assert_eq!(provider.requests(), 3);
+    }
+}
+
+#[test]
 fn provider_intervals_and_reload_floor_use_elapsed_time_in_an_open_pane() {
     for (manual, rest) in [(false, 5 * MINUTE), (true, 30)] {
         let (f, provider) = (Fixture::folder(), Provider::start());

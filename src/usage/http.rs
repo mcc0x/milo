@@ -27,9 +27,23 @@ pub(super) struct Request<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Reply {
     pub(super) status: u16,
-    /// Seconds the provider asked callers to wait, when it said so in seconds.
-    pub(super) retry_after: Option<u64>,
+    pub(super) retry_after: Option<RetryAfter>,
     pub(super) body: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RetryAfter {
+    Seconds(i64),
+    At(i64),
+}
+
+impl RetryAfter {
+    fn parse(value: &str) -> Option<Self> {
+        if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
+            return Some(Self::Seconds(value.parse().unwrap_or(i64::MAX)));
+        }
+        super::time::http_date(value, crate::when::now()).map(Self::At)
+    }
 }
 
 /// Whether `text` can sit inside a quoted value of curl's configuration
@@ -102,14 +116,14 @@ fn parse(mut output: &[u8]) -> Option<Reply> {
         let rest = &output[end + 4..];
         let mut lines = head.split("\r\n");
         let status: u16 = lines.next()?.strip_prefix("HTTP/")?.split(' ').nth(1)?.parse().ok()?;
-        if rest.starts_with(b"HTTP/") {
+        if (status == 200 || (100..200).contains(&status)) && rest.starts_with(b"HTTP/") {
             output = rest;
             continue;
         }
         let retry_after = lines
             .filter_map(|line| line.split_once(':'))
             .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-            .and_then(|(_, value)| value.trim().parse().ok());
+            .and_then(|(_, value)| RetryAfter::parse(value.trim()));
         return Some(Reply { status, retry_after, body: rest.to_vec() });
     }
 }
@@ -119,17 +133,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_last_response_is_the_reply_and_its_retry_hint_is_read_in_seconds_only() {
+    fn the_last_response_supplies_the_status_body_and_retry_hint() {
         let reply = parse(
             b"HTTP/1.1 200 Connection established\r\n\r\nHTTP/2 429 \r\ncontent-type: application/json\r\n\
             Retry-After: 60\r\n\r\n{\"message\":\"slow down\"}",
         );
         assert_eq!(
             reply,
-            Some(Reply { status: 429, retry_after: Some(60), body: b"{\"message\":\"slow down\"}".to_vec() })
+            Some(Reply {
+                status: 429,
+                retry_after: Some(RetryAfter::Seconds(60)),
+                body: b"{\"message\":\"slow down\"}".to_vec()
+            })
         );
         let dated = parse(b"HTTP/1.1 503 Unavailable\r\nRetry-After: Wed, 21 Oct 2026 07:28:00 GMT\r\n\r\n").unwrap();
-        assert_eq!((dated.status, dated.retry_after, dated.body.len()), (503, None, 0));
+        assert_eq!((dated.status, dated.retry_after, dated.body.len()), (503, Some(RetryAfter::At(1_792_567_680)), 0));
+        for invalid in ["", "+60", "-60", "1.5", "yesterday"] {
+            assert_eq!(RetryAfter::parse(invalid), None);
+        }
+        assert_eq!(RetryAfter::parse("99999999999999999999"), Some(RetryAfter::Seconds(i64::MAX)));
+        for date in ["Sun, 06 Nov 1994 08:49:37 GMT", "Sunday, 06-Nov-94 08:49:37 GMT", "Sun Nov  6 08:49:37 1994"] {
+            assert_eq!(super::super::time::http_date(date, 1_795_100_000), Some(784111777), "{date}");
+        }
+        for invalid in ["Thu, 31 Nov 2026 00:00:00 GMT", "Wed, 21 Oct 2026 07:28:00", "Wed, 21 Oct 2026 07:68:00 GMT"] {
+            assert_eq!(RetryAfter::parse(invalid), None);
+        }
         assert_eq!(parse(b"not http"), None);
         assert_eq!(parse(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n"), None);
     }
