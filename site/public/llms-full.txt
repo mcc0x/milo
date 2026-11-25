@@ -74,7 +74,7 @@ See how much of each reported limit you have left. Milo reads local reports save
 
 ### In the macOS menu bar
 
-Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside your lowest fresh remaining percentage by default. Click it for reset times, switch to **CPU** or **Memory** under **More options → Menu bar indicator**, or choose **Browser settings…** to open the browser editor.
+Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside your lowest fresh remaining percentage by default. Click it for reset times, switch to **CPU** or **Memory** under **More options → Menu bar indicator**, or choose **Browser settings…** to open the browser editor. Turn on **More options → Needs you** to also list the Rex panes whose agent is waiting for you, failed or finished, and click one to go to it; it is off until you choose it.
 
 <p align="center"><img src="https://github.com/mcc0x/milo/blob/main/docs/img/menu-bar.webp" width="312" alt="Milo’s macOS menu showing example Codex and Claude Code limits, reset times and a Settings button"></p>
 
@@ -109,7 +109,7 @@ In Rex, start a coding agent on a task without leaving your pane. `milo task new
 | `milo` (Home) | Choose Outline, History, Usage or settings. No first-run guide on this path. Quit a pane to return to Home. | The existing settings and maintenance Home, with a first-run guide. |
 | `milo outline [DIR]` or `milo DIR` | Browse and search a plain folder or Git worktree; open a file in place. | Managed sidebar, floating reader tabs, optional shell-following and temporary outline peek. |
 | `milo history [DIR]` | Browse Git commits, expand a commit and read its file at that revision in place. | Managed sidebar and floating reader tabs. |
-| `milo view FILE` / `--edit` / `--commit ID` | Read in the current terminal. Edit a working text file; save explicitly. A commit is read-only. | Same direct command. |
+| `milo view FILE` / `--edit` / `--line LINE` / `--commit ID` | Read in the current terminal, at a line if you name one. Edit a working text file; save explicitly. A commit is read-only. | [Open a file named in a pane's output](https://github.com/mcc0x/milo/blob/main/docs/panes.md#opening-a-file-from-a-terminals-output), at its line, from the command palette. |
 | `milo review PATCH [--from NAME]` | Read a handed-over patch in place. | `--float` can open the review from a non-interactive caller in a Rex pane. |
 | `milo usage` / `usage --menu-stream` | Show available local figures in a pane, or emit a stream for the menu app. No provider sign-in required. | Optional compact Usage rail. |
 | `milo setup` | Terminal settings, including icon, Git mark and usage choices. The explicit command offers a skippable first-run guide. | Try, save, repair or remove managed layouts. |
@@ -119,7 +119,7 @@ In Rex, start a coding agent on a task without leaving your pane. `milo task new
 | `milo doctor`, `--help`, `--version` | Plain output; no TTY needed. Doctor distinguishes local preferences from optional integrations. | Reports Rex host and integration health. |
 | `milo alerts`, `milo presence` | Inspect the settings without a running session. | Actual event mirroring and activity presence require Rex and explicit opt-in. |
 | `milo listen`, arrange/remember rails, title tabs | Not standalone features. Run a direct pane command instead. | Managed by the Rex integration. |
-| `milo menubar install` / `uninstall` / `indicator` | Optional on macOS with a menu-enabled build; choosing an indicator does not install the app. | Not Rex-dependent. |
+| `milo menubar install` / `uninstall` / `indicator` / `attention` | Optional on macOS with a menu-enabled build; choosing an indicator or what the menu lists does not install the app. | The opt-in **Needs you** section lists Rex panes that wait for you and jumps to them. |
 | `milo claude-status` | Status-line helper for an explicitly configured Claude Code profile, not an interactive pane. | Not Rex-dependent. |
 
 `milo setup --skip-onboarding` records a skip without opening a TUI or applying settings. Direct pane commands never run the guide. See [Using the panes](https://github.com/mcc0x/milo/blob/main/docs/panes.md) for input and display fallbacks, and [terminal checks and measurements](https://github.com/mcc0x/milo/blob/main/docs/evidence/terminal-portability/README.md) for the environments actually exercised.
@@ -401,10 +401,13 @@ Saving installs these actions in the Rex command palette:
 | Reset a remembered layout | `milo_reset_layout` |
 | Name the session after this project | `milo_name_session` |
 | Milo: New Agent Task… | `milo_new_agent_task` |
+| Milo: Open File from Terminal Output… | `milo_open_output` |
 
 Milo does not install key bindings. For an optional shortcut, check Rex's shortcut settings and `rex keymap` first; the latter lists config bindings, not every Mac app shortcut. If the chord is free, put a binding such as `rex.bind("cmd+shift+m", "milo_peek_outline")` in your own Rex `init.lua`. Actions also work directly in the palette without any binding.
 
 Peek opens a floating outline and takes focus. Invoking it again raises the same peek. Dismiss it to return to the originating pane. Adding the docked Outline instead keeps the shell focused. Your existing custom actions remain yours.
+
+Open File from Terminal Output reads the recent output of the pane you run it in, once, and opens a project file it names in the reader. [Opening a file from a terminal's output](https://github.com/mcc0x/milo/blob/main/docs/panes.md#opening-a-file-from-a-terminals-output) says what it reads and what it refuses. An installation keeps the actions it was saved with, so after updating Milo, save the layout again to get an action added since; until then `milo doctor` reports `Server actions: not current`.
 
 Setup adds two marked lines at the top of `~/.config/rex/init.lua` (after the interpreter line, if it has one) and asks Rex to reload. The actions live in `~/.config/milo/rex.lua`. `~/.config/milo/listener.lua` watches for divider changes even when arranging new shell tabs is off, and titles tabs when you have chosen that. If `$XDG_CONFIG_HOME` is an absolute path, both folders live there instead. `$REX_CONFIG` can point directly to a different settings file. Milo keeps its saved state in `~/.local/state/milo` or under an absolute `$XDG_STATE_HOME`.
 
@@ -645,11 +648,22 @@ On iPhone, enable [Rex → Settings → Keyboard → Open Keyboard Manually](htt
 
 For a quick look at the tree, use **Milo: Peek Outline** in Rex. It reuses one floating outline per tab. Close the peek with `Esc` or `q` rather than removing a permanent pane.
 
-`milo view FILE` reads a working file. `milo view FILE --commit ID` reads the version from a commit. Give the file's path as it was in that commit, relative to your current directory or as an absolute path. For example, from `src`, use `milo view main.rs --commit ID`. Milo ignores `.` components and repeated slashes, but rejects `..`. Use a full or abbreviated hexadecimal commit ID, not a branch name or `HEAD`.
+`milo view FILE` reads a working file. `milo view FILE --line LINE` or `--line LINE:COLUMN` opens it with that line in view and its number marked; `e` then starts editing there. `milo view FILE --commit ID` reads the version from a commit. Give the file's path as it was in that commit, relative to your current directory or as an absolute path. For example, from `src`, use `milo view main.rs --commit ID`. Milo ignores `.` components and repeated slashes, but rejects `..`. Use a full or abbreviated hexadecimal commit ID, not a branch name or `HEAD`.
 
 Committed-file lookup requires a UTF-8 path. A working file with a non-UTF-8 name can still be read directly, without a Git diff.
 
 The reader shows the whole file with changed lines marked, and colours the languages below. Working files and files at a commit are recognised the same way, by file name, in any letter case. It uses a small scanner, not a full parser. Other files show as plain text, as does a script whose `#!` line names a different language from its extension. The working-file reader will not open a file outside the project through a linked folder.
+
+### Opening a file from a terminal's output
+
+A compiler prints `src/reader/disk.rs:184:17`, or an agent says it changed `docs/migration.md`. Focus that Rex pane and run **Milo: Open File from Terminal Output…** from the command palette. A single file opens at once in a floating reader, at the line printed with it. Several open a list in the palette, the most recent first, each with the diagnostic or sentence it came from; type to filter by path or message. If the output names no file of the project, Milo says so and opens nothing.
+
+- **What is read.** Only the pane the action was run in, only when you run it, and only the end of its output: the last 256 KiB Rex holds for the pane, of which Milo looks at the last 2,000 lines. Moving the focus while the list is open does not change which pane was read. Nothing is captured in the background, indexed or saved.
+- **What counts as a file.** A path that leads to a file in the pane's worktree: the Git worktree holding the folder the pane's program works in, or that folder itself outside Git. Relative paths start from that folder. Milo reads `FILE:LINE`, `FILE:LINE:COLUMN`, `FILE(LINE,COLUMN)`, `FILE#LLINE` and Python's `File "FILE", line LINE`. The same place mentioned again is listed once; other lines of the same file are listed separately.
+- **What is refused.** A path that leads outside the worktree, directly or through a link, into another worktree or submodule inside it, or under `.git`. A web address, `~` and a path that does not exist are passed over. Milo opens nothing from a pane running `ssh`, `mosh`, `telnet` or `et`, from a pane of another Rex host, or when it cannot read the folder of the pane's program, as under `sudo` or once the program has exited: the same path could name another file there.
+- **Where it opens.** As a tab of a reader already floating over that tab for the same worktree, or else in a new floating reader. A file that already has a tab is shown in that tab with its draft; only the draft's cursor moves to the line. The action closes no reader, types nothing into the terminal, runs nothing the output names and opens no links.
+
+The line's number stays marked while you read, and the hint row says `Line 184:17` for a few seconds. A column is counted in characters. A line past the end of the file shows its end. To choose without the palette, as from a script, pass the entry as it would be listed: `rex do milo_open_output choice=src/reader/disk.rs:184:17`.
 
 ### Languages
 
@@ -1096,6 +1110,36 @@ Low-quota notifications are **off by default**. In **More options → Low-quota 
 
 Choose **Browser settings…** to open the [local browser editor](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor). To change a specific worktree instead, run `milo web` from that project.
 
+### Rex panes that need you
+
+The menu can list the Rex panes whose program is waiting for you, so you can see it from another app. It is **off by default** and separate from [alert forwarding](https://github.com/mcc0x/milo/blob/main/docs/setup.md#mirror-rex-alerts) and low-quota notifications: it needs no Telegram or Discord setup, sends nothing anywhere, and raises no sound or notification.
+
+In **More options → Needs you**, choose **In this menu** to list the panes when you open the menu, or **In this menu, with a menu bar dot** to also put a small dot beside Milo while any pane is listed. The dot sits next to the quota, CPU or memory indicator you already chose; it doesn’t replace it. Under **Include**, switch each state on its own:
+
+| State | Listed when a program in the pane reports | Default |
+| --- | --- | --- |
+| Waiting for input | It can’t go on until you answer: a permission, a question or a sign-in. | On |
+| Errors | It failed and stopped. | On |
+| Finished work | It finished and you haven’t looked. | Off |
+
+From a shell, `milo menubar attention` prints the choice, `milo menubar attention off`, `menu` or `dot` sets where panes are shown, and `milo menubar attention states waiting,errors,done` sets what is listed. Like the indicator, the choice is saved for this Milo profile and doesn’t install the app.
+
+![Milo’s menu with a Needs you section above Usage: one pane waiting for permission, one that reported an error and one that finished, each with how long ago](https://github.com/mcc0x/milo/blob/main/docs/img/menu-needs-you.png)
+
+Each row names the session, the tab if you named it, what the program reported and for how long. The rows are what is true now, not a history:
+
+- A row leaves by itself when its program goes back to work, clears its status or its pane closes.
+- **Finished work** and **errors** stay until the program reports something else, so each has a **Mark seen** button. It hides that one row until the program reports again. A wait can’t be marked seen; it ends when you answer.
+- If Rex stops, the section says so and counts nothing, and the dot goes out. When Rex is back, Milo lists only what Rex reports then. A row you marked seen stays hidden unless its program has reported again.
+
+Click a row to go to that pane. Milo first checks that the Rex server on this Mac is still the one that reported the pane and that the pane is still a terminal in one of its tabs. Then Rex focuses that pane, and the Rex app on this Mac is asked to show its session. Only the row you clicked is affected, and a finished or failed row is marked seen once Rex shows it.
+
+Rex takes requests to switch sessions only when **Remote Control** is on in Rex (**Settings → General → Client Info**). It is off unless you turn it on, and Milo never changes it. With it off, with no Rex app connected, with several connected on this Mac, or when Milo can’t tell which app is yours, the pane is still focused in its session and the menu tells you to open that session in Rex. If the pane has closed or another Rex server now answers, nothing is changed and the menu says why.
+
+**What Milo reads.** Only what the program reported through Rex’s [program status](https://www.superlogical.com/rex/docs/build/program-status): the state, what kind of answer it waits for, the program’s short name and the time. It also reads the session’s and tab’s labels. Milo doesn’t read the status message or title, a terminal’s screen, its scrollback or a transcript. It asks only the Rex server on this Mac for the terminals that server runs; a server on another host is not asked and its panes are not guessed at. While the section is off, Milo starts no process for it and doesn’t ask Rex anything.
+
+The menu app runs the `rex` command that Rex installs for your account on this Mac. If the section says Rex wasn’t found, install Rex for Mac; nothing else needs setting up.
+
 ## Which tools appear
 
 Milo gives a tool a place once it has a figure, and no place before that. If you use Codex and Claude Code but not OpenCode, the pane has two places and nothing for OpenCode: no label, no dash and no empty row. Each tool has its own choice under **Appearance** in `milo setup` or **Usage** in `milo web`, saved globally or for a worktree like the other pane preferences. Reopen the pane to apply a change.
@@ -1378,7 +1422,7 @@ See [account setup](https://github.com/mcc0x/milo/blob/main/docs/usage.md#accoun
 | Discord alerts | Forward selected Rex events to a channel. Pair through Milo or use your own webhook. Delivery goes directly from your device to Discord. | [Alert forwarding](https://github.com/mcc0x/milo/blob/main/docs/setup.md#mirror-rex-alerts) |
 | Telegram alerts | Pair with Milo’s bot in a private chat (delivery uses the hosted relay), or configure your own bot and chat without the relay. Can run alongside Discord. | [Alert forwarding](https://github.com/mcc0x/milo/blob/main/docs/setup.md#mirror-rex-alerts) |
 | Discord Rich Presence | Optionally show Rex activity in Discord. Separate from alerts; session and project names are separate opt-ins. | [Presence and privacy](https://github.com/mcc0x/milo/blob/main/docs/presence.md) |
-| Milo for macOS | Optional menu app for agent quota or local CPU/memory readings, with access to settings. Included in the Apple Silicon release; installed separately with `milo menubar install`. | [Menu bar guide](https://github.com/mcc0x/milo/blob/main/docs/usage.md#macos-menu-bar) |
+| Milo for macOS | Optional menu app for agent quota or local CPU/memory readings, with access to settings. An opt-in **Needs you** section lists the Rex panes whose program waits for you, failed or finished, and jumps to them; it needs no messaging account. Included in the Apple Silicon release; installed separately with `milo menubar install`. | [Menu bar guide](https://github.com/mcc0x/milo/blob/main/docs/usage.md#macos-menu-bar) and [panes that need you](https://github.com/mcc0x/milo/blob/main/docs/usage.md#rex-panes-that-need-you) |
 
 ## Reader, media and file tools
 
@@ -1424,6 +1468,11 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   Never choose a different agent when theirs is missing: report the refusal.
   It does not show the new session; leave switching to the user. It removes
   nothing, so say what a failed launch left behind.
+- `milo_open_output` (**Milo: Open File from Terminal Output…**) lets the user
+  open a project file named in a pane's recent output, at its line. Write
+  locations as `path:line` or `path:line:column`, relative to the project, so
+  that it can find them. It opens a floating reader and takes focus, so leave
+  running it to the user unless they ask.
 - Use `milo setup --repair` or `--remove` only when asked to change the
   integration. Do not change Rex's global theme, font or keyboard shortcuts.
 - Discord presence is off unless the user turned it on, and it publishes on
@@ -1442,7 +1491,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo outline [PATH]` | Shows a live file tree with changes to commit or push. |
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
-| `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
+| `milo view FILE [--commit ID \| --edit \| --line LINE[:COLUMN]]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. `--line` opens a working file at that line. |
 | `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. |
 | `milo task new --agent AGENT (--branch NAME [--base REF] \| --worktree DIR) [--prompt TEXT]` | Starts `claude`, `codex`, `omp` or `opencode` interactively in a Git worktree and a background Rex session. Prints `worktree DIR` and `session ID`. Pass the prompt as one quoted argument. `--host HOST --project DIR` starts it on another Rex host. |
 | `milo setup` | Opens terminal settings. In Rex it can also manage the sidebar layout. |
@@ -1746,6 +1795,20 @@ as an agent's shell would. It sees only the handed-over edits marked beside a
 person's uncommitted lines in the same file, a path outside the project
 refused, and a reason in place of the diff once the agent's line is rewritten.
 
+### Changing the output action
+
+**Milo: Open File from Terminal Output…** reads what a pane printed, which no other action does. [Opening a file from a terminal's output](https://github.com/mcc0x/milo/blob/main/docs/panes.md#opening-a-file-from-a-terminals-output) says what a person sees. Keep four things true.
+
+It reads on demand and keeps nothing. `actions.lua` asks Rex for the end of one pane's output when the action is run, bounded by `output_bytes`, and hands it to `milo output-files list` on standard input. Do not read a pane from the listener, a timer or another action, and do not write the output or what was found in it to the state folder or a log.
+
+The pane is the one in the action's context. Take the block, its tab and its program's folder from `ctx` before anything is asked, and never from the focus afterwards. Where the folder or the computer is in doubt, as with `ssh` in the pane, a block of another host or a program whose folder cannot be read, refuse and say why.
+
+The output is untrusted. `src/output.rs` only looks paths up: it runs nothing, opens no address and reads no file's contents. A path counts only if it leads, links followed, to a file under the worktree's root and under no other `.git`. `open` looks the chosen place up again, because the choice came back through a Rex app. What goes to Rex is plain text with no control characters.
+
+It never costs a draft. The action closes no pane. A reader is reused only if it noted the same project beside its pipe (`src/reader/inbox.rs`), and a request with a place moves the reader's view or a draft's cursor, never its text.
+
+`cargo test --bin milo output:: reader::` runs the unit tests, and the Lua fixtures cover the action with a stand-in for Rex. With Rex installed, `cargo test --test rex_lab -- --ignored files_named` runs it in shell panes of a disposable server. That test loads this checkout's `actions.lua` with `rex do FILE --action`, so with `MILO_TEST_BINARY` it checks that build's `output-files` and reader under this checkout's action. No palette is shown there: check the list itself in a Rex app, on a disposable session.
+
 ### Changing alert mirroring
 
 `src/alerts.rs` and the files under `src/alerts/` mirror Rex alerts to Telegram or Discord. An *alert* is an event Rex itself draws attention to; `event.rs` lists them and is the only place that decides. Hear Rex only through `rex events`, as `src/rex.rs` starts it: never read a terminal's screen, a system notification or Rex's socket for an alert.
@@ -1783,6 +1846,22 @@ A second line is shown only for the *details* a person chose: the name of the se
 `presence::Control` is the only way to read or change the choice, so `milo presence`, Settings and the browser editor cannot disagree. A change names the choice its surface had shown, and `Control::apply` refuses it when another surface has saved a different one since: what the person was told would become public is then no longer what would. Turning presence off needs no such check. One helper holds `presence.lock` for as long as it runs; a second gives up rather than set the activity in turn. A change to the details or the application replaces the helper, which takes the old activity down first.
 
 No test may reach a real Discord. The helper looks for Discord's socket in one folder, the first of `XDG_RUNTIME_DIR`, `TMPDIR`, `TMP` and `TEMP` that is set, so a test that starts a helper gives it an environment in which the first of those names a folder of the test's own, and listens there as a stand-in. Do the same when trying a build by hand, and do not publish to your own Discord account from a test. With Rex installed, `cargo test --test rex_lab -- --ignored discord_presence` checks the watch on a disposable Rex server. What a real Discord app then displays can only be checked by hand with a test application and account.
+
+### Changing the menu’s Needs you section
+
+[Rex panes that need you](https://github.com/mcc0x/milo/blob/main/docs/usage.md#rex-panes-that-need-you) says what a person sees. *Attention* is a Rex terminal whose program status says it waits for the person, failed or finished. Keep four things true.
+
+It is off until someone turns it on, and off means no process, no Rex call and no timer. The menu app starts `milo menubar attention watch` only while the choice in `menubar.conf` is `menu` or `dot`, and the watch ends itself when that choice turns off or cannot be read. However the watch ends, the Rex script it started ends with it: `tests/menu_attention.rs` checks each way. The choice is separate from alert mirroring and from low-quota notifications; do not read either one’s settings for it or add a sound or a notification.
+
+It reads Rex’s report and nothing else. `src/rex_attention.lua` passes on a status record’s ID, state, kind, program name and time, and the session’s and tab’s labels. It must never read a record’s title or message, a terminal’s title, screen or scrollback, or send anything to a terminal. It answers only for the Rex server on this computer, reached over its local socket, and only for terminals that server runs. Everything it prints is untrusted: `board.rs` bounds it and makes labels plain before the menu shows them.
+
+It shows what is true now. `board.rs` keeps no history: a record that goes back to work, is cleared or loses its terminal leaves the board, and a lost Rex leaves nothing listed. *Seen* is kept in the watch’s memory only, for one record in one state, and only a finished or failed record can be seen. Marking one row seen, or jumping to it, must never clear another.
+
+A jump changes nothing it has not checked. `rex::jump` takes the host ID the pane was reported under and the pane’s whole block ID. It asks the local server who it is, finds the block wherever it is now, and only then focuses it and asks the one Rex app of this person on this computer to select its session. Never match a pane by label, position or ID suffix, never ask a server on another host, and never turn on Rex’s Remote Control or any other Rex setting: when Rex refuses, say so and stop.
+
+Rex’s client list also holds command-line clients, scripts and entries with no `info` at all. Only an entry that says it is an app is a candidate, so whatever the others leave out must not end the scan: that once hid a connected Rex for Mac behind an earlier entry with no description. An app entry is the opposite. It counts only with a whole client ID, a local-socket principal of this user and a process ID, and one that could be this person’s app but lacks any of those means no app is switched.
+
+`cargo test --bin milo attention` runs the unit tests, and `cargo test --test menu_attention` runs the real commands against a stand-in for `rex`. With Rex installed, `cargo test --test menu_attention real_rex -- --ignored` follows waiting, resumed, finished and failed panes, a jump and a server restart on a disposable Rex server with a socket of its own. `sh tests/menubar.sh` runs the menu app’s side in `tests/menu-attention.swift`. To look at the menu itself, `python3 docs/evidence/menu-attention/walkthrough.py` drives a separate copy of the app against such a server and saves pictures; see [its notes](https://github.com/mcc0x/milo/blob/main/docs/evidence/menu-attention/README.md) for what that does and does not exercise. No test may ask the Rex you work in.
 
 ### Adding a usage source
 
@@ -1954,7 +2033,10 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/json.rs` | Validates JSON and lets callers read fields without copying values. |
 | `src/keys.rs` | Decodes keys, mouse events, pasted text, and terminal replies. |
 | `src/main.rs` | Parses and dispatches commands and supplies CLI help. |
-| `src/menubar.rs` | Stores the profile-wide menu indicator and manages the optional macOS app in menu-enabled builds. |
+| `src/menubar.rs` | Stores the profile-wide menu choices in one file and manages the optional macOS app in menu-enabled builds. |
+| `src/menubar/attention.rs` | Keeps the choice for the menu's Needs you section and runs `milo menubar attention`. |
+| `src/menubar/attention/board.rs` | Keeps what each Rex terminal last reported as needing the person, what was marked seen, and writes the menu's rows. |
+| `src/menubar/attention/watch.rs` | Streams those rows to the menu app while the section is on, and ends with its Rex script. |
 | `src/menubar.sh` | Verifies, installs, upgrades and removes that app for `menubar.rs`. It is embedded, never downloaded. |
 | `src/outline.rs` | Updates the file tree, pending changes, and recent marks. |
 | `src/outline/attention.rs` | Uses focus and recent activity to follow writes and fade marks. |
@@ -1962,6 +2044,8 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/outline/input.rs` | Handles outline navigation, folds, and file opening. |
 | `src/outline/refresh.rs` | Refreshes the outline's Git state away from the pane loop and takes the answer in whole. |
 | `src/outline/untracked.rs` | Fills in line counts for new files after the first frame, without following links. |
+| `src/output.rs` | Finds the project files a terminal's recent output names, within its worktree, for the Rex action that opens one in the reader. |
+| `src/output/tests.rs` | Checks which mentions are offered, their order and context, and what is refused. |
 | `src/pane.rs` | Defines the pane interface and runs the shared terminal loop. |
 | `src/paths.rs` | Finds milo's configuration and state folders. |
 | `src/picture.rs` | Loads pictures and converts them to PNG for the terminal. |
@@ -1978,7 +2062,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/reader/draw.rs` | Draws files, change marks, and reader headings. |
 | `src/reader/edit.rs` | Edits a draft: cursor, keys, questions, formatting, and drawing. |
 | `src/reader/edit_tests.rs` | Checks editing, saving, conflicts, read-only files, kept drafts, and formatting. |
-| `src/reader/inbox.rs` | Carries a request to open one more file to a reader already running in a Rex block, through a pipe in the state folder. |
+| `src/reader/inbox.rs` | Carries a request to open one more file, at a line if one is named, to a reader already running in a Rex block, through a pipe in the state folder, and notes that reader's project beside it. |
 | `src/reader/handed.rs` | Loads a file with only a handed-over patch's edits marked, through no link and never to edit. |
 | `src/reader/rescue.rs` | Keeps the draft of a reader ended from outside, and marks a Rex reader that has unsaved edits. |
 | `src/reader/tabs.rs` | Holds the files open in one reader as tabs, draws their strip, and asks about every unsaved draft before a tab or the reader closes. |
@@ -1988,7 +2072,9 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/review.rs` | Runs `milo review`: a read-only reader over each file of a handed-over patch, and its floating form for a program with no terminal. |
 | `src/rex.rs` | Calls Rex for setup, floating readers, the listener, and the presence helper's watch. |
 | `src/rex/task.rs` | Creates a task's background session, watches for an agent that exits at once, and runs the launcher on another host. |
+| `src/rex/attention.rs` | Starts the script that reports terminals needing the person, and shows one pane in Rex after checking its host and block. |
 | `src/rex/server.rs` | Asks a Rex server for its version, host ID and connected apps, and starts, forwards and ends another host's settings editor. |
+| `src/rex_attention.lua` | Tells the menu's watch which terminals of the local Rex server hold a blocked, failed or finished program status, never its text. |
 | `src/rex_presence.lua` | Tells the presence helper whether any Rex app has a session open and, only for the names chosen, which session is in front. |
 | `src/rex_reader.lua` | Opens a floating reader in Rex and closes the one it replaces only after the new one exists. |
 | `src/rex_reader_test.lua` | Checks that script with a stand-in for Rex. |
@@ -1997,6 +2083,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Runs the setup screen: its choices, layout trials, scoped saves, and maintenance. |
 | `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes, name a session for its project, or ask for a new agent task. |
+| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes, name a session for its project, or open a file named in a pane's recent output. |
 | `src/setup/actions_test.lua` | Checks those actions with a stand-in for Rex. |
 | `src/setup/claude.rs` | Plans changes to the Claude Code status line and tracks ownership. |
 | `src/setup/doctor.rs` | Inspects the installation without starting Rex, and repairs or removes the integration with setup's ownership checks. |
@@ -2086,7 +2173,9 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/history_bench/baseline-fa34ca4.tsv` | Records those times beside that revision's, on the machine named in its header. |
 | `tests/install.sh` | Checks both installers with stand-ins for Git, Cargo and curl: which source is built, the macOS and checksum checks, and removal only with a matching receipt. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
+| `tests/menu_attention.rs` | Runs `milo menubar attention` against a Rex stand-in: off asks nothing, rows by chosen state, seen, a lost Rex, and a jump's checks. With Rex installed, an ignored test repeats it on a disposable server. |
 | `tests/menu-alerts.swift` | Checks when the menu app raises a low-quota notification, with a stand-in for the system. |
+| `tests/menu-attention.swift` | Checks the menu app's Needs you choices, wording, watch lifetime and jump reports with stand-ins for the bundled Milo. |
 | `tests/menu-badge.swift` | Checks which provider and window the menu bar badge shows. |
 | `tests/menu-resources.swift` | Checks system CPU deltas, discontinuities and physical RAM accounting with synthetic counters. |
 | `tests/menu-bench.sh` | Builds a throwaway copy of the menu app and times frames and opening the popover in it. |
@@ -2104,6 +2193,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
 | `tests/rex_hosts.rs` | Follows Doctor, a forwarded settings editor and a settings bundle across two disposable Rex servers, and checks the first host's files stay as they were. |
 | `tests/rex_lab.rs` | Exercises Rex layouts and presence on a disposable server, edits files in floating reader tabs, opens a floating review of an agent-supplied patch, and starts agent tasks from the command line and the Rex action. |
+| `tests/rex_lab.rs` | Exercises Rex layouts and presence on a disposable server, edits files in floating reader tabs, opens a floating review of an agent-supplied patch, and opens files named in a pane's output. |
 | `tests/settings-bench.py` | Times settings requests, a competing save and first state beside a responding Rex stand-in. |
 | `tests/task.rs` | Runs `milo task new` beside stand-ins for Rex and the four agents: the session asked for, literal prompts, refusals that create nothing, and what a late failure reports. |
 | `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |

@@ -38,7 +38,7 @@ See [account setup](usage.md#accounts-asked-online) and the [provider evidence](
 | Discord alerts | Forward selected Rex events to a channel. Pair through Milo or use your own webhook. Delivery goes directly from your device to Discord. | [Alert forwarding](setup.md#mirror-rex-alerts) |
 | Telegram alerts | Pair with Milo’s bot in a private chat (delivery uses the hosted relay), or configure your own bot and chat without the relay. Can run alongside Discord. | [Alert forwarding](setup.md#mirror-rex-alerts) |
 | Discord Rich Presence | Optionally show Rex activity in Discord. Separate from alerts; session and project names are separate opt-ins. | [Presence and privacy](presence.md) |
-| Milo for macOS | Optional menu app for agent quota or local CPU/memory readings, with access to settings. Included in the Apple Silicon release; installed separately with `milo menubar install`. | [Menu bar guide](usage.md#macos-menu-bar) |
+| Milo for macOS | Optional menu app for agent quota or local CPU/memory readings, with access to settings. An opt-in **Needs you** section lists the Rex panes whose program waits for you, failed or finished, and jumps to them; it needs no messaging account. Included in the Apple Silicon release; installed separately with `milo menubar install`. | [Menu bar guide](usage.md#macos-menu-bar) and [panes that need you](usage.md#rex-panes-that-need-you) |
 
 ## Reader, media and file tools
 

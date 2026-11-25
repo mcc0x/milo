@@ -6,7 +6,7 @@ use std::os::fd::{AsFd, AsRawFd, RawFd};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::menubar::Indicator;
+use crate::menubar::{Choices, Indicator};
 use crate::pane::Pane as _;
 use crate::preferences::{Preferences, UsageAccounts};
 use crate::{paths, term, when};
@@ -37,7 +37,7 @@ pub fn menu_stream() -> io::Result<()> {
     let home = home.as_deref();
     let config = paths::config_dir();
     let config = config.as_deref();
-    let indicator_file = config.map(Indicator::file);
+    let menu_file = config.map(Indicator::file);
     let (tools, chosen) = global_choices(config).unwrap_or_default();
     let mut usage = Usage::for_home(home, when::now(), tools).with_databases(
         omp::database(home),
@@ -45,13 +45,14 @@ pub fn menu_stream() -> io::Result<()> {
         sqlite::QUERY_WAIT,
     );
     usage.accounts = accounts::Accounts::open(chosen);
-    // Every frame uses quota if the saved choice cannot be read, never a stale resource mode.
-    let load_indicator = || indicator_file.as_deref().and_then(|file| Indicator::load(file).ok()).unwrap_or_default();
+    // Every frame uses quota if the saved choice cannot be read, never a stale resource mode,
+    // and says the Needs you section is off, never that Rex should be watched on a guess.
+    let load_choices = || Choices::load(menu_file.as_deref());
     snapshots(io::stdin(), io::stdout().lock(), |line, request| {
         let indicator_ack = request.acknowledges_indicator();
         if request == Refresh::Indicator {
             // A display choice must not force provider lookups or postpone their next refresh.
-            usage.menu_snapshot(line, load_indicator(), indicator_ack);
+            usage.menu_snapshot(line, load_choices(), indicator_ack);
             return Ok(None);
         }
         if request != Refresh::Start
@@ -76,7 +77,7 @@ pub fn menu_stream() -> io::Result<()> {
         let waiting = !settled || usage.accounts.pending();
         let interval = if waiting { Duration::from_secs(1) } else { INTERVAL };
         let wait = interval.min(usage.next_frame().unwrap_or(interval));
-        usage.menu_snapshot(line, load_indicator(), indicator_ack);
+        usage.menu_snapshot(line, load_choices(), indicator_ack);
         Ok(Some(wait))
     })
 }
@@ -116,13 +117,16 @@ impl Usage {
         }
     }
 
-    pub(super) fn menu_snapshot(&mut self, output: &mut String, indicator: Indicator, indicator_ack: bool) {
+    pub(super) fn menu_snapshot(&mut self, output: &mut String, choices: impl Into<Choices>, indicator_ack: bool) {
         let now = self.now();
         let today = self.today.since(now);
         let codex = self.codex.reported(now);
         let claude = self.claude.reported(now);
         let presence = [self.codex.presence(codex), self.claude.presence(claude), self.opencode.presence(today)];
+        let Choices { indicator, attention } = choices.into();
         write!(output, r#"{{"version":1,"indicator":"{}","#, indicator.value()).unwrap();
+        let (show, states) = (attention.show.value(), attention.states.value());
+        write!(output, r#""attention":"{show}","attentionStates":"{states}","#).unwrap();
         if indicator_ack {
             output.push_str(r#""indicatorAck":true,"#);
         }

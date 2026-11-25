@@ -114,11 +114,22 @@ On iPhone, enable [Rex → Settings → Keyboard → Open Keyboard Manually](htt
 
 For a quick look at the tree, use **Milo: Peek Outline** in Rex. It reuses one floating outline per tab. Close the peek with `Esc` or `q` rather than removing a permanent pane.
 
-`milo view FILE` reads a working file. `milo view FILE --commit ID` reads the version from a commit. Give the file's path as it was in that commit, relative to your current directory or as an absolute path. For example, from `src`, use `milo view main.rs --commit ID`. Milo ignores `.` components and repeated slashes, but rejects `..`. Use a full or abbreviated hexadecimal commit ID, not a branch name or `HEAD`.
+`milo view FILE` reads a working file. `milo view FILE --line LINE` or `--line LINE:COLUMN` opens it with that line in view and its number marked; `e` then starts editing there. `milo view FILE --commit ID` reads the version from a commit. Give the file's path as it was in that commit, relative to your current directory or as an absolute path. For example, from `src`, use `milo view main.rs --commit ID`. Milo ignores `.` components and repeated slashes, but rejects `..`. Use a full or abbreviated hexadecimal commit ID, not a branch name or `HEAD`.
 
 Committed-file lookup requires a UTF-8 path. A working file with a non-UTF-8 name can still be read directly, without a Git diff.
 
 The reader shows the whole file with changed lines marked, and colours the languages below. Working files and files at a commit are recognised the same way, by file name, in any letter case. It uses a small scanner, not a full parser. Other files show as plain text, as does a script whose `#!` line names a different language from its extension. The working-file reader will not open a file outside the project through a linked folder.
+
+### Opening a file from a terminal's output
+
+A compiler prints `src/reader/disk.rs:184:17`, or an agent says it changed `docs/migration.md`. Focus that Rex pane and run **Milo: Open File from Terminal Output…** from the command palette. A single file opens at once in a floating reader, at the line printed with it. Several open a list in the palette, the most recent first, each with the diagnostic or sentence it came from; type to filter by path or message. If the output names no file of the project, Milo says so and opens nothing.
+
+- **What is read.** Only the pane the action was run in, only when you run it, and only the end of its output: the last 256 KiB Rex holds for the pane, of which Milo looks at the last 2,000 lines. Moving the focus while the list is open does not change which pane was read. Nothing is captured in the background, indexed or saved.
+- **What counts as a file.** A path that leads to a file in the pane's worktree: the Git worktree holding the folder the pane's program works in, or that folder itself outside Git. Relative paths start from that folder. Milo reads `FILE:LINE`, `FILE:LINE:COLUMN`, `FILE(LINE,COLUMN)`, `FILE#LLINE` and Python's `File "FILE", line LINE`. The same place mentioned again is listed once; other lines of the same file are listed separately.
+- **What is refused.** A path that leads outside the worktree, directly or through a link, into another worktree or submodule inside it, or under `.git`. A web address, `~` and a path that does not exist are passed over. Milo opens nothing from a pane running `ssh`, `mosh`, `telnet` or `et`, from a pane of another Rex host, or when it cannot read the folder of the pane's program, as under `sudo` or once the program has exited: the same path could name another file there.
+- **Where it opens.** As a tab of a reader already floating over that tab for the same worktree, or else in a new floating reader. A file that already has a tab is shown in that tab with its draft; only the draft's cursor moves to the line. The action closes no reader, types nothing into the terminal, runs nothing the output names and opens no links.
+
+The line's number stays marked while you read, and the hint row says `Line 184:17` for a few seconds. A column is counted in characters. A line past the end of the file shows its end. To choose without the palette, as from a script, pass the entry as it would be listed: `rex do milo_open_output choice=src/reader/disk.rs:184:17`.
 
 ### Languages
 

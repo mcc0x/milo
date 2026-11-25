@@ -848,7 +848,7 @@ fn no_account_figure_is_ever_drawn_or_streamed_as_a_percentage_or_a_limit_window
     usage.menu_snapshot(&mut line, crate::menubar::Indicator::Quota, false);
     assert_eq!(
         line,
-        "{\"version\":1,\"indicator\":\"quota\",\"providers\":[{\"id\":\"copilot\",\"name\":\"Copilot\",\"windows\":[],\"detail\":\"Rate limited\"}]}\n"
+        "{\"version\":1,\"indicator\":\"quota\",\"attention\":\"off\",\"attentionStates\":\"waiting,errors\",\"providers\":[{\"id\":\"copilot\",\"name\":\"Copilot\",\"windows\":[],\"detail\":\"Rate limited\"}]}\n"
     );
 }
 

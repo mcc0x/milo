@@ -19,6 +19,7 @@ mod keys;
 mod menubar;
 mod native;
 mod outline;
+mod output;
 mod pane;
 mod paths;
 mod picture;
@@ -55,7 +56,7 @@ use git::{CommitId, Repo};
 use history::History;
 use outline::Outline;
 use pane::{Open, Pane, Start};
-use reader::{Reader, Tabs};
+use reader::{Reader, Spot, Tabs};
 
 const USAGE: &str = "\
 milo — file, history, usage, and reader panes for your terminal
@@ -66,6 +67,7 @@ Usage: milo
        milo usage [--menu-stream]
        milo menubar install | uninstall
        milo menubar indicator quota | cpu | memory
+       milo menubar attention [off | menu | dot | states LIST]
        milo setup
        milo web [--port PORT] [--no-open]
        milo web --host HOST [--project DIR] [--port PORT] [--no-open]
@@ -74,7 +76,7 @@ Usage: milo
        milo setup --repair | --remove
        milo presence [status] | enable | disable
        milo presence details DETAILS | application ID
-       milo view FILE [--commit ID | --edit]
+       milo view FILE [--commit ID | --edit | --line LINE[:COLUMN]]
        milo review PATCH [--from NAME] [--float]
        milo task new --agent AGENT --branch NAME [--base REF] [--prompt TEXT]
        milo task new --agent AGENT --worktree DIR [--prompt TEXT]
@@ -186,7 +188,8 @@ need pushing, faint dots are pushed, and a hollow dot is uncommitted work.
 The reader colours supported code and marks added and removed lines. It
 shows a picture as a picture where the terminal can draw one.
 Use milo view FILE --commit ID to see the file as of that commit, not as
-it is now. ID is a full or abbreviated Git commit ID in hex.
+it is now. ID is a full or abbreviated Git commit ID in hex. Use
+milo view FILE --line LINE to open a working file with that line marked.
 milo review PATCH reads a unified diff that a coding agent wrote of its own
 edits, and shows each file as it is now with only those edits marked. [ and ]
 move between the patch's files and r reads them again. Milo checks that a
@@ -211,10 +214,10 @@ fn command_help(name: &str) -> Option<&'static str> {
             "Usage: milo usage [--menu-stream]\n\nSee Codex and Claude Code limits and OpenCode activity.\n--menu-stream prints one JSON snapshot per line using global preferences. It refreshes about every 30 seconds or on a newline from stdin, and exits at EOF."
         }
         "menubar" => {
-            "Usage: milo menubar install | uninstall\n       milo menubar indicator quota | cpu | memory\n\nInstall and open the optional macOS usage app, or remove it without changing Milo settings.\nThe indicator command saves what the menu bar shows without opening the app."
+            "Usage: milo menubar install | uninstall\n       milo menubar indicator quota | cpu | memory\n       milo menubar attention [off | menu | dot | states LIST]\n\nInstall and open the optional macOS usage app, or remove it without changing Milo settings.\nThe indicator command saves what the menu bar shows without opening the app.\n\nattention saves whether the menu lists Rex panes whose program waits for you, failed or finished: off (the default), menu, or dot for a dot in the menu bar as well. states takes the ones to list, from waiting, errors and done, separated by commas. Without a word it prints the choice. While off, Milo does not watch Rex for it."
         }
         "view" => {
-            "Usage: milo view FILE [--commit ID | --edit]\n\nRead a file now or as it was at a Git commit. --edit starts editing a working text file; in the reader, e does the same."
+            "Usage: milo view FILE [--commit ID | --edit | --line LINE[:COLUMN]]\n\nRead a file now or as it was at a Git commit. --edit starts editing a working text file; in the reader, e does the same. --line opens a working file at that line, counted from one, with its number marked."
         }
         "review" => {
             "Usage: milo review PATCH [--from NAME] [--float]\n\nRead the edits in PATCH, a unified diff that a coding agent wrote of its own edits. Each file is shown as it is now with only those edits marked; other uncommitted work reads as unchanged. Milo checks that the file still holds the patch's lines, not who wrote them. A file that no longer holds them shows no diff.\n--from NAME shows whose patch it is said to be.\n--float opens the review in a floating Rex pane and prints what it shows, for a program with no terminal of its own."
@@ -335,7 +338,7 @@ enum Command<'a> {
     ShellOutline(&'a OsStr),
     ShellHistory(&'a OsStr),
     PeekOutline { origin: &'a OsStr, shell: Option<&'a OsStr> },
-    View { file: &'a OsStr, commit: Option<CommitId<'a>> },
+    View { file: &'a OsStr, commit: Option<CommitId<'a>>, spot: Option<Spot> },
     Review { patch: &'a OsStr, from: Option<&'a str>, float: bool },
     Edit(&'a OsStr),
     Path(&'a OsStr),
@@ -343,6 +346,7 @@ enum Command<'a> {
     UsageMenuStream,
     MenuBar(menubar::Action),
     MenuIndicator(menubar::Indicator),
+    MenuAttention(menubar::AttentionCommand),
     Home,
     Setup,
     Web(web::Start<'a>),
@@ -416,22 +420,32 @@ fn command<'a>(
                 };
                 Command::MenuIndicator(indicator.ok_or("expected milo menubar indicator quota | cpu | memory")?)
             }
+            (Some("attention"), args) => {
+                Command::MenuAttention(menubar::AttentionCommand::parse(args).ok_or(menubar::ATTENTION_USAGE)?)
+            }
             _ => return Err("see milo menubar --help for commands".into()),
         },
         (Some("outline"), path) => Command::Outline(path),
         (Some("history"), path) => Command::History(path),
         (Some("view"), Some(file)) => {
-            let commit = match rest {
-                [] => None,
+            const EXPECTED: &str = "expected milo view FILE [--commit ID | --edit | --line LINE[:COLUMN]]";
+            let (commit, spot) = match rest {
+                [] => (None, None),
                 [flag] if flag == "--edit" => return Ok(Command::Edit(file)),
                 [flag, id] if flag == "--commit" => {
-                    Some(id.to_str().and_then(CommitId::parse).ok_or("commit ID must be 4 to 64 hex digits")?)
+                    (Some(id.to_str().and_then(CommitId::parse).ok_or("commit ID must be 4 to 64 hex digits")?), None)
                 }
-                _ => return Err("expected milo view FILE [--commit ID | --edit]".to_string()),
+                [flag, spot] if flag == "--line" => {
+                    let spot = spot.to_str().and_then(Spot::parse);
+                    (None, Some(spot.ok_or("--line requires LINE or LINE:COLUMN, counted from 1")?))
+                }
+                _ => return Err(EXPECTED.to_string()),
             };
-            Command::View { file, commit }
+            Command::View { file, commit, spot }
         }
-        (Some("view"), None) => return Err("missing file; use milo view FILE [--commit ID | --edit]".to_string()),
+        (Some("view"), None) => {
+            return Err("missing file; use milo view FILE [--commit ID | --edit | --line LINE[:COLUMN]]".to_string());
+        }
         (Some("review"), Some(patch)) => {
             let (mut from, mut float) = (None, false);
             let mut flags = rest.iter();
@@ -561,6 +575,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             let config = paths::config_dir().ok_or("Milo's configuration directory is unavailable")?;
             print_line(indicator.save(&config)?)
         }
+        Command::MenuAttention(command) => menubar::attention(command),
         Command::Outline(path) => run(Start::Reading(project_path(path)), &|| open_outline(path)),
         Command::Path(path) => run(Start::Reading(Path::new(path)), &|| {
             open_outline(Some(path)).map_err(|why| match instead_of(path) {
@@ -594,13 +609,16 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         Command::Review { patch, from, float: false } => run(Start::Reading(Path::new(".")), &|| {
             Ok(Box::new(review::Review::open(Path::new("."), Path::new(patch), from)?))
         }),
-        Command::View { file, commit } => run(Start::Reading(file_dir(Path::new(file))), &|| {
+        Command::View { file, commit, spot } => run(Start::Reading(file_dir(Path::new(file))), &|| {
             let path = Path::new(file);
-            let reader = if let Some(id) = commit {
+            let mut reader = if let Some(id) = commit {
                 Reader::at_commit(path, id)?
             } else {
                 Reader::open(path).ok_or_else(|| format!("{} is not in a directory", path.display()))?
             };
+            if let Some(spot) = spot {
+                reader.go_to(spot, std::time::Instant::now());
+            }
             Ok(Box::new(Tabs::new(reader)))
         }),
         Command::Edit(file) => run(Start::Reading(file_dir(Path::new(file))), &|| {
@@ -723,6 +741,9 @@ fn main() {
     if first.as_deref() == Some(OsStr::new("layout-profile")) {
         exit(setup::layout_profile(&args.collect::<Vec<_>>()));
     }
+    if first.as_deref() == Some(OsStr::new("output-files")) {
+        exit(output::command(&args.collect::<Vec<_>>()));
+    }
     if first.as_deref() == Some(OsStr::new("tab-title")) {
         exit(titles::command(&args.collect::<Vec<_>>()));
     }
@@ -822,8 +843,8 @@ mod tests {
             Command::Outline(Some(f.root.as_os_str())),
             Command::Outline(Some(plain.root.as_os_str())),
             Command::History(Some(f.root.as_os_str())),
-            Command::View { file: file.as_os_str(), commit: None },
-            Command::View { file: file.as_os_str(), commit: CommitId::parse(&commits[0].hash) },
+            Command::View { file: file.as_os_str(), commit: None, spot: None },
+            Command::View { file: file.as_os_str(), commit: CommitId::parse(&commits[0].hash), spot: None },
         ];
         for command in commands {
             open_pane(command).unwrap().help().assert_rows_fit(26);

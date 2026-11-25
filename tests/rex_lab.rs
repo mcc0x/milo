@@ -1063,6 +1063,9 @@ fn a_floating_reader_holds_the_outlines_files_as_tabs_and_keeps_their_unsaved_ed
 #[path = "rex_lab/file_actions.rs"]
 mod file_actions;
 
+#[path = "rex_lab/output_files.rs"]
+mod output_files;
+
 #[cfg(target_os = "macos")]
 #[path = "rex_lab/rich_reader.rs"]
 mod rich_reader;

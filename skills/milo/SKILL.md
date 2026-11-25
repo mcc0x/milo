@@ -30,6 +30,11 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   Never choose a different agent when theirs is missing: report the refusal.
   It does not show the new session; leave switching to the user. It removes
   nothing, so say what a failed launch left behind.
+- `milo_open_output` (**Milo: Open File from Terminal Output…**) lets the user
+  open a project file named in a pane's recent output, at its line. Write
+  locations as `path:line` or `path:line:column`, relative to the project, so
+  that it can find them. It opens a floating reader and takes focus, so leave
+  running it to the user unless they ask.
 - Use `milo setup --repair` or `--remove` only when asked to change the
   integration. Do not change Rex's global theme, font or keyboard shortcuts.
 - Discord presence is off unless the user turned it on, and it publishes on
@@ -48,7 +53,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo outline [PATH]` | Shows a live file tree with changes to commit or push. |
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
-| `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
+| `milo view FILE [--commit ID \| --edit \| --line LINE[:COLUMN]]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. `--line` opens a working file at that line. |
 | `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. |
 | `milo task new --agent AGENT (--branch NAME [--base REF] \| --worktree DIR) [--prompt TEXT]` | Starts `claude`, `codex`, `omp` or `opencode` interactively in a Git worktree and a background Rex session. Prints `worktree DIR` and `session ID`. Pass the prompt as one quoted argument. `--host HOST --project DIR` starts it on another Rex host. |
 | `milo setup` | Opens terminal settings. In Rex it can also manage the sidebar layout. |
