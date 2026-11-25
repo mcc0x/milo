@@ -1185,13 +1185,16 @@ end
 local function task_options(cwd)
   local reply = profile_exec({ milo, "task-options", cwd }, 10)
   if not reply or not reply.ok then raise(first_line(reply, "Could not read this project.")) end
-  local found = { agents = {}, worktrees = {}, bases = {}, free = {} }
+  local found = { agents = {}, unprompted = {}, worktrees = {}, bases = {}, free = {} }
   for line in reply.stdout:gmatch("[^\n]+") do
     local id, name = line:match("^agent (%S+) (.+)$")
     local path, branch, here = line:match("^worktree (%x+) (%S+) (%S+)$")
     local base, free = line:match("^base (%x+)$"), line:match("^branch (%x+)$")
+    local unprompted = line:match("^unprompted (%S+)$")
     if id then
       found.agents[#found.agents + 1] = { id = id, name = name }
+    elseif unprompted then
+      found.unprompted[unprompted] = true
     elseif path then
       found.worktrees[#found.worktrees + 1] = { path = unhex(path), branch = branch ~= "-" and unhex(branch) or nil,
         here = here == "here" }
@@ -1214,7 +1217,7 @@ end
 
 local function task_agent(found)
   if #found.agents == 0 then
-    raise("None of Claude Code, Codex, oh-my-pi and OpenCode is installed on this host.")
+    raise("No coding agent Milo can start is installed on this host. Run milo task agents for the list.")
   end
   -- With one agent installed there is nothing to choose.
   if #found.agents == 1 then return found.agents[1].id end
@@ -1270,8 +1273,10 @@ local function new_task(ctx, args)
   for _, known in ipairs(found.agents) do
     if known.id == agent then name = known.name end
   end
-  local prompt = args.prompt or answered(rex.ui.input{ title = "Task for " .. name, confirm = "Start " .. name,
-    placeholder = "What should it do? Leave this empty to start without a task." })
+  -- An agent that takes no first prompt is not asked for one: the task is typed on its own screen.
+  local prompt = args.prompt or (found.unprompted[agent] and "")
+    or answered(rex.ui.input{ title = "Task for " .. name, confirm = "Start " .. name,
+      placeholder = "What should it do? Leave this empty to start without a task." })
   if not prompt then return end
   local argv = { milo, "task", "new", "--project", cwd, "--agent", agent }
   for _, flag in ipairs{ "worktree", "branch", "base" } do

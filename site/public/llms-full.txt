@@ -100,7 +100,7 @@ To review an agent’s edits without mixing in your own uncommitted work, have i
 
 ## Agent tasks
 
-In Rex, start a coding agent on a task without leaving your pane. `milo task new --branch fix/login --base origin/main --agent claude --prompt "Fix the login redirect"` adds a Git worktree for the branch and opens Claude Code, Codex, oh-my-pi or OpenCode there, in a new Rex session that starts in the background with the agent's full interactive screen. **Milo: New Agent Task…** in the command palette asks the same questions. Milo starts only the agent you name, never switches your checkout, and never pushes, merges or cleans up. See [starting an agent task](https://github.com/mcc0x/milo/blob/main/docs/setup.md#start-an-agent-task). This is on `main` and not in the v0.1.7 release.
+In Rex, start a coding agent on a task without leaving your pane. `milo task new --branch fix/login --base origin/main --agent claude --prompt "Fix the login redirect"` adds a Git worktree for the branch and opens the agent there, in a new Rex session that starts in the background with the agent's full interactive screen. **Milo: New Agent Task…** in the command palette asks the same questions. Outside Rex, add `--here` and the agent takes over the terminal you are in. Fourteen agents can be started this way, among them Claude Code, Codex, oh-my-pi, OpenCode, Pi, GitHub Copilot CLI, Cursor CLI and Goose: `milo task agents` lists them with what is installed, and [the agents table](https://github.com/mcc0x/milo/blob/main/docs/integrations.md#agent-tasks) says how far each was checked. Milo starts only the agent you name, installs and signs in to none, never switches your checkout, and never pushes, merges or cleans up. See [starting an agent task](https://github.com/mcc0x/milo/blob/main/docs/setup.md#start-an-agent-task). This is on `main` and not in the v0.1.7 release.
 
 ## What works in each terminal
 
@@ -115,7 +115,7 @@ In Rex, start a coding agent on a task without leaving your pane. `milo task new
 | `milo setup` | Terminal settings, including icon, Git mark and usage choices. The explicit command offers a skippable first-run guide. | Try, save, repair or remove managed layouts. |
 | `milo web [--no-open]` | Local settings dashboard. `--no-open` prints a private loopback link instead of opening the browser. | `--host HOST` uses Rex to forward **another** host’s editor. |
 | `milo settings export GROUPS` / `import FILE [--apply]` / `undo` | Transfer selected settings as a file. Import previews unless you ask to apply. | Saved rail geometry can be used by a Rex layout. |
-| `milo task new --agent AGENT …` | Not a standalone feature: the agent opens in a Rex session. | Adds or uses a Git worktree and starts the agent there in a background session. |
+| `milo task new --agent AGENT …` / `milo task agents` | With `--here`, adds or uses a Git worktree and runs the agent in this terminal. Without it the command is refused when no Rex server answers. `milo task agents` lists the agents and needs no terminal. | Adds or uses a Git worktree and starts the agent there in a background session. |
 | `milo doctor`, `--help`, `--version` | Plain output; no TTY needed. Doctor distinguishes local preferences from optional integrations. | Reports Rex host and integration health. |
 | `milo alerts`, `milo presence` | Inspect the settings without a running session. | Actual event mirroring and activity presence require Rex and explicit opt-in. |
 | `milo listen`, arrange/remember rails, title tabs | Not standalone features. Run a direct pane command instead. | Managed by the Rex integration. |
@@ -227,7 +227,7 @@ Both need the installed Rex integration. After upgrading Milo, run `milo setup -
 
 ## Start an agent task
 
-`milo task new` starts a coding agent on a task from a shell in your project. It adds a Git worktree for the task, or uses one the project already has, and opens the agent in a new Rex session named after it, `project/worktree`. The session starts in the background: your pane keeps the focus, and no app is asked to show the new session. Visit it whenever you like. It shows the agent's own full screen, so you can read along, answer its questions and type a follow-up. On `main`; not in the v0.1.7 release.
+`milo task new` starts a coding agent on a task from a shell in your project. It adds a Git worktree for the task, or uses one the project already has, and opens the agent in a new Rex session named after it, `project/worktree`. The session starts in the background: your pane keeps the focus, and no app is asked to show the new session. Visit it whenever you like. It shows the agent's own full screen, so you can read along, answer its questions and type a follow-up. Without Rex, `--here` runs the agent in the terminal you are in. On `main`; not in the v0.1.7 release.
 
 ```sh
 milo task new --branch perf/reader-scroll --base origin/main --agent claude --prompt "Speed up scrolling in large files"
@@ -248,24 +248,32 @@ session session:01a212ce-82f4-7ed0-bdb4-88aa2edd12fa
 
 The checkout you run the command from is never switched or changed. `--project DIR` names the project when the current folder is not in it.
 
-**Which agent.** `--agent` is `claude`, `codex`, `omp` or `opencode`. Milo starts each the way its own documentation starts an interactive session with a first message, never a print or one-shot mode:
+**Which agent.** `--agent` takes one of fourteen words: `claude`, `codex`, `omp`, `opencode`, `pi`, `amp`, `copilot`, `cursor`, `antigravity`, `kiro`, `cline`, `droid`, `goose` or `qwen`. Milo starts each the way its own documentation starts an interactive session with a first message, never a print or one-shot mode. [The agents table](https://github.com/mcc0x/milo/blob/main/docs/integrations.md#agent-tasks) has each one's program, how it is started, what it needs before it can reply and how far it was checked. `milo task agents` prints the same list with what is installed on your computer:
 
-| Agent | `--agent` | Started as | Checked with |
-| --- | --- | --- | --- |
-| Claude Code | `claude` | `claude -- PROMPT` | 2.1.311 |
-| Codex | `codex` | `codex -- PROMPT` | 0.171.0 |
-| oh-my-pi | `omp` | `omp launch -- PROMPT` | 19.1.1 |
-| OpenCode | `opencode` | `opencode --prompt=PROMPT` | 1.19.6 and 2.4.1 |
+```
+cursor  Cursor CLI
+  installed   cursor-agent is not on the search path
+  starts as   cursor-agent agent -- PROMPT
+  needs       a Cursor account
+  milo usage  reads nothing this agent saves
+  checked     2026.11.22: opened, as far as its own sign-in or setup
+```
 
-The agent must be installed: its program is looked for by that name on your shell's search path. If it is not there, Milo says which agent is missing and stops before any worktree or session exists. It never starts a different agent in its place. Online usage accounts such as OpenRouter are not agents and cannot be started.
+The agent must be installed: its program is looked for by its own name, which is not always the word `--agent` takes, on your shell's search path. If it is not there, Milo says which agent is missing and stops before any worktree or session exists. It never starts a different agent in its place, installs none, and signs in to none: an agent that is not signed in opens on its own sign-in or setup screen, which is the agent's to show and yours to answer. Online usage accounts such as OpenRouter are not agents and cannot be started. Starting an agent does not make `milo usage` show it: that pane reads only [the sources it has a reader for](https://github.com/mcc0x/milo/blob/main/docs/integrations.md#coding-agents-and-usage).
 
-**The prompt.** `--prompt TEXT` is the agent's first message. It reaches the agent as one argument, exactly as written: no shell reads it, so quotes, `$(…)`, backticks and a leading dash are only text. The agent then reads it as it reads anything you type to it, so a slash command or an `@file` mention means what it means there. Without `--prompt` the agent opens idle. One limit: Claude Code runs a prompt that is a single bare word, such as `doctor`, as its own command of that name, so Milo refuses a one-word prompt for it and asks for a few words.
+**The prompt.** `--prompt TEXT` is the agent's first message. It reaches the agent as one argument, exactly as written: no shell reads it, so quotes, `$(…)`, backticks and a leading dash are only text. The agent then reads it as it reads anything you type to it, so a slash command or an `@file` mention means what it means there. Without `--prompt` the agent opens idle. Milo refuses a prompt it cannot hand over as written, before anything is created, and never changes one:
 
-**What it does when something fails.** Everything that can be refused is checked first: the project, the agent, the branch, the base, the folder, and that a Rex server answers. Until then nothing has been created. If a later step fails, the message says exactly what exists, for example `Created worktree … on new branch …; it was not removed`. Milo never deletes a worktree, a branch or a session it made, and never pushes, opens a pull request, merges or cleans up. Remove a worktree you no longer want with `git worktree remove`. An agent may ask whether it should trust the new folder before it reads your prompt; that question is the agent's, and Milo does not answer it.
+- **Amp takes no first prompt.** Its documentation gives one only through a pipe, which would take the terminal away from it. Leave `--prompt` out and type the task once Amp is open.
+- **Claude Code, Cline and Factory Droid run a one-word prompt as a command.** A single bare word such as `doctor` is run as the agent's own command of that name, so Milo asks for a few words.
+- **Cline is refused a prompt that begins with a dash**, because it looks for some of its own options in every argument.
+
+**What it does when something fails.** Everything that can be refused is checked first: the project, the agent, the prompt, the branch, the base, the folder, and that a Rex server answers or, with `--here`, that the command has a terminal. Until then nothing has been created. If a later step fails, the message says exactly what exists, for example `Created worktree … on new branch …; it was not removed`. Milo never deletes a worktree, a branch or a session it made, and never pushes, opens a pull request, merges or cleans up. Remove a worktree you no longer want with `git worktree remove`. An agent may ask whether it should trust the new folder before it reads your prompt; that question is the agent's, and Milo does not answer it.
 
 The agent runs with the environment of a new shell tab: your login shell's, with its interactive startup files read. An agent that starts and then exits within a moment is reported as a failure, and its session stays open so that you can read why.
 
-**From the command palette.** **Milo: New Agent Task…** asks the same questions in Rex's own prompts and then runs the same `milo task new`. It uses the project of the shell you run it from. It lists the agents installed on that host and skips the question when only one is; it offers the project's worktrees and **New worktree…**, which asks for a branch and where it starts; then it asks for the task. Closing any question ends the action with nothing created. From `rex do` or a key binding, pass any of `agent`, `worktree`, `branch`, `base` and `prompt` to skip that question: `rex do milo_new_agent_task agent=codex branch=fix/typo base=main prompt="Fix the typo in the README"`. The action answers with the worktree and the session ID. Rex starts actions with a short system search path, so here the agents are looked for on the path your login shell sets up, including what `~/.zshrc` or its like adds.
+**Without Rex.** `--here` runs the agent in the terminal you ran the command from, in place of a Rex session: `milo task new --here --branch fix/typo --base main --agent goose --prompt "Fix the typo in the README"`. Milo adds or finds the worktree as above, prints `worktree DIR`, and then the agent takes the terminal over in that folder with the environment of your shell. Your shell returns when you leave the agent, with the agent's exit status. No Rex server is asked for anything, so it needs no Rex, and it also works in a Rex pane. It needs a terminal on its input and output, so it is refused from a script or a pipe, and it cannot be combined with `--host`. With neither `--here` nor a Rex server that answers, nothing is started and the message says so. This was checked on macOS; [where it works](https://github.com/mcc0x/milo/blob/main/docs/integrations.md#agent-tasks) says what was not.
+
+**From the command palette.** **Milo: New Agent Task…** asks the same questions in Rex's own prompts and then runs the same `milo task new`, always for a background session. It uses the project of the shell you run it from. It lists the agents installed on that host and skips the question when only one is; it offers the project's worktrees and **New worktree…**, which asks for a branch and where it starts; then it asks for the task, unless the agent takes no first prompt. Closing any question ends the action with nothing created. From `rex do` or a key binding, pass any of `agent`, `worktree`, `branch`, `base` and `prompt` to skip that question: `rex do milo_new_agent_task agent=codex branch=fix/typo base=main prompt="Fix the typo in the README"`. The action answers with the worktree and the session ID. Rex starts actions with a short system search path, so here the agents are looked for on the path your login shell sets up, including what `~/.zshrc` or its like adds.
 
 **On another Rex host.** `--host HOST` starts the task on another host: a label from `rex hosts` or a server address, as for `rex -S`. The project, its worktree and the agent are all on that host, so write `--project`, and `--worktree` or `--path` if you pass them, in full as they are there. The host runs its own `milo task new`, so it needs this version of milo on the search path of its login shell, and the agent installed there. The result adds a third line, `host HOST`.
 
@@ -1453,9 +1461,46 @@ Milo works in a supported terminal without Rex or a connected account. Pick the 
 | oh-my-pi (OMP) | Saved Codex and Claude limit reports contribute to those tools’ readings, not a separate OMP quota. |
 | OpenCode | Today’s recorded tokens, steps and estimated cost from its local database. Not a remaining quota. |
 
-**Agent tasks** are separate too. `milo task new`, or **Milo: New Agent Task…** in the Rex command palette, starts Claude Code, Codex, oh-my-pi or OpenCode in a Git worktree and a background Rex session of its own, with the agent's full interactive screen. It starts only the agent you name, only if it is installed, and passes your prompt as written. Online provider accounts are not agents and cannot be started. See [starting an agent task](https://github.com/mcc0x/milo/blob/main/docs/setup.md#start-an-agent-task). On `main`; not in v0.1.7.
-
 **Agent patch review** is separate from usage detection: a harness that can hand over a recorded patch can use `milo review PATCH`. This shows that patch rather than treating every change in the worktree as the agent’s. See the [Milo agent skill](https://github.com/mcc0x/milo/blob/main/skills/milo/SKILL.md).
+
+## Agent tasks
+
+Starting an agent is separate from reading its usage: neither needs the other. `milo task new`, or **Milo: New Agent Task…** in the Rex command palette, starts one of the agents below in a Git worktree, with the agent's own full interactive screen. The screen goes to a background Rex session of its own or, with `--here`, to the terminal you ran the command in, which needs no Rex. Milo starts only the agent you name, only if its program is installed, and passes your prompt as written. It installs no agent, signs in to none, and never reads what an agent saved to sign in. See [starting an agent task](https://github.com/mcc0x/milo/blob/main/docs/setup.md#start-an-agent-task). On `main`; not in v0.1.7.
+
+`milo task agents` prints this table with what is installed on your computer, and `milo doctor` names the agents whose programs are on the search path it was run with. The table is the catalog in `src/task/harness.rs`; a test keeps the two the same.
+
+| `--agent` | Agent | Started as | Before it can reply | `milo usage` reads | Checked |
+| --- | --- | --- | --- | --- | --- |
+| `claude` | Claude Code | `claude -- PROMPT` | a Claude sign-in or an Anthropic API key | saved limit windows and today's transcript tokens | 2.1.311: prompt, reply and a typed follow-up |
+| `codex` | Codex | `codex -- PROMPT` | a ChatGPT sign-in or an OpenAI API key | limit windows recorded in recent sessions | 0.171.0: prompt, reply and a typed follow-up |
+| `omp` | oh-my-pi | `omp launch -- PROMPT` | a provider signed in to inside oh-my-pi | the Codex and Claude limit reports it saved, under those tools | 19.1.1: prompt, reply and a typed follow-up |
+| `opencode` | OpenCode | `opencode --prompt=PROMPT` | a model chosen inside OpenCode | today's tokens, steps and estimated cost | 1.19.6 and 2.4.1: prompt, reply and a typed follow-up |
+| `pi` | Pi | `pi -- PROMPT` | a model provider set up inside Pi | Nothing | 1.6.1: prompt, reply and a typed follow-up, from a stand-in model |
+| `amp` | Amp | `amp`; no first prompt | an Amp account | Nothing | 0.0.1795608053: opened, as far as its own sign-in or setup |
+| `copilot` | GitHub Copilot CLI | `copilot --interactive=PROMPT` | a GitHub account with Copilot, or a model provider set up for it | Nothing | 1.0.115: prompt, reply and a typed follow-up, from a stand-in model |
+| `cursor` | Cursor CLI | `cursor-agent agent -- PROMPT` | a Cursor account | Nothing | 2026.11.22: opened, as far as its own sign-in or setup |
+| `antigravity` | Antigravity CLI | `agy --prompt-interactive=PROMPT` | a Google account | Nothing | 1.5.17: opened, as far as its own sign-in or setup |
+| `kiro` | Kiro CLI | `kiro-cli chat -- PROMPT` | a Kiro sign-in | Nothing | 3.6.0: opened, as far as its own sign-in or setup |
+| `cline` | Cline CLI | `cline -i -- PROMPT` | a provider chosen in Cline's setup | Nothing | 3.0.75: prompt, reply and a typed follow-up, from a stand-in model |
+| `droid` | Factory Droid | `droid -- PROMPT` | a Factory account | Nothing | 1.20.0: opened, as far as its own sign-in or setup |
+| `goose` | Goose | `goose run --interactive --text=PROMPT` | a provider set up with goose configure | Nothing | 1.61.0: prompt, reply and a typed follow-up, from a stand-in model |
+| `qwen` | Qwen Code | `qwen --prompt-interactive=PROMPT` | a provider connected inside Qwen Code | Nothing | 0.28.4: prompt, reply and a typed follow-up, from a stand-in model |
+
+How to read it:
+
+- **Started as** is the vendor's documented way to open an interactive session with a first message, with the program's own name. The program is not always named like the word `--agent` takes: Cursor's is `cursor-agent`, Antigravity's `agy` and Kiro's `kiro-cli`. Amp documents no argument for a first message, so it opens idle and a `--prompt` for it is refused.
+- **Before it can reply** is the agent's own requirement, in short. Milo supplies none of it. An agent that lacks it opens on its own sign-in or setup screen in the session, where you answer it.
+- **`milo usage` reads** says what the usage pane shows of what that agent saved. *Nothing* means Milo has no reader for it, not that the agent used nothing: its tokens, cost and quota are unknown to Milo, in the pane and in the menu bar. The GitHub Copilot [online account](https://github.com/mcc0x/milo/blob/main/docs/integrations.md#online-provider-accounts) below is a different thing from the `copilot` program: it asks GitHub with a token you give Milo, and never uses the program's sign-in.
+- **Checked** names the release and how far it was followed. *Prompt, reply and a typed follow-up* were seen in a session Milo started, with the agent's own provider. *From a stand-in model* is the same with the replies from a stand-in on the same computer, which the agent could be pointed at with no sign-in; it shows that the prompt arrived as written, not what a real model does with it. *Opened* means the release drew its interactive screen for these arguments and stopped at its own sign-in, so no reply was seen. [The evidence notes](https://github.com/mcc0x/milo/blob/main/docs/evidence/harness-catalog/README.md) have each run, and what was not checked.
+
+**Where it works.** What a vendor publishes and what was checked with Milo are different things, and only the second is a claim about Milo:
+
+- **Checked with Milo: macOS on Apple Silicon only.** Every row of the table was run there. Each run used the vendor's `darwin-arm64` release.
+- **Linux: published by every vendor above, started by Milo for none.** Each vendor publishes its program for Linux on x86-64 and ARM64. Milo's own panes are checked on both ([#53](https://github.com/mcc0x/milo/issues/53)), and the launcher's tests run on Linux in CI beside stand-ins for the agents. No agent's Linux release has been started by Milo, and Milo inside Rex on Linux is not verified, so a background session there is unverified too; `--here` needs no Rex.
+- **WSL2: the Linux side only.** Milo there is a Linux program. It looks for an agent on the distro's own search path, and an agent installed on the Windows side is not one it starts. Nothing in the table was run under WSL2 ([#54](https://github.com/mcc0x/milo/issues/54)).
+- **Windows itself: not at all.** Some of these vendors publish Windows builds. Milo does not build for Windows, so no agent can be started from it, and a vendor's Windows build says nothing about Milo.
+
+With `--host`, the agent and the project are on that Rex host and the agent must be installed there. `--here` and `--host` cannot be combined.
 
 ## Online provider accounts
 
@@ -1519,11 +1564,15 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   the given shell. It creates and switches to nothing. Run it only when the
   user asks for that name.
 - `milo task new` adds a Git worktree and starts a coding agent in a new Rex
-  session. Run it, or `milo_new_agent_task`, only when the user asks for a
-  task to be started, with the agent, branch, base or worktree they named.
-  Never choose a different agent when theirs is missing: report the refusal.
-  It does not show the new session; leave switching to the user. It removes
-  nothing, so say what a failed launch left behind.
+  session, or with `--here` in the terminal it is run from. Run it, or
+  `milo_new_agent_task`, only when the user asks for a task to be started,
+  with the agent, branch, base or worktree they named. `milo task agents`
+  lists the agents and which are installed. Never choose a different agent
+  when theirs is missing or refuses the prompt: report the refusal. Never
+  sign an agent in or answer its sign-in or trust question. It does not show
+  the new session; leave switching to the user. Do not pass `--here` from a
+  shell without a terminal: it is refused. It removes nothing, so say what a
+  failed launch left behind.
 - `milo_open_output` (**Milo: Open File from Terminal Output…**) lets the user
   open a project file named in a pane's recent output, at its line. Write
   locations as `path:line` or `path:line:column`, relative to the project, so
@@ -1549,7 +1598,8 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
 | `milo view FILE [--commit ID \| --edit \| --line LINE[:COLUMN]]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. `--line` opens a working file at that line. |
 | `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. |
-| `milo task new --agent AGENT (--branch NAME [--base REF] \| --worktree DIR) [--prompt TEXT]` | Starts `claude`, `codex`, `omp` or `opencode` interactively in a Git worktree and a background Rex session. Prints `worktree DIR` and `session ID`. Pass the prompt as one quoted argument. `--host HOST --project DIR` starts it on another Rex host. |
+| `milo task new --agent AGENT (--branch NAME [--base REF] \| --worktree DIR) [--prompt TEXT] [--here]` | Starts one of fourteen agents interactively in a Git worktree and a background Rex session: `claude`, `codex`, `omp`, `opencode`, `pi`, `amp`, `copilot`, `cursor`, `antigravity`, `kiro`, `cline`, `droid`, `goose` or `qwen`. Prints `worktree DIR` and `session ID`. Pass the prompt as one quoted argument; `amp` takes none. `--here` runs the agent in the calling terminal instead. `--host HOST --project DIR` starts it on another Rex host. |
+| `milo task agents` | Lists those agents: whether each is installed here, how it is started, what it needs before it can reply, and how far it was checked. |
 | `milo setup` | Opens terminal settings. In Rex it can also manage the sidebar layout. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. |
 | `milo web --host HOST [--project DIR]` | Opens another Rex host's settings dashboard on this computer through a loopback Rex forward, and closes both when done. `HOST` is a label from `rex hosts`. |
@@ -1756,7 +1806,7 @@ On pushes and pull requests, website-, docs-, relay- and Railway-only changes sk
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, the login shell that is asked for its search path through `src/task/harness.rs`, `/usr/bin/sips` through `src/picture/sips.rs`, FFmpeg and FFprobe through `src/reader/video/decode.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, the login shell that is asked for its search path and a coding agent given this terminal through `src/task/harness.rs`, `/usr/bin/sips` through `src/picture/sips.rs`, FFmpeg and FFprobe through `src/reader/video/decode.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
 **It writes to a project only when the user saves or starts a task.** Every git command milo runs only reads, except the `git worktree add` of `milo task new`, which goes through `change` in `src/git/run.rs` and has no other caller. The one thing that changes a project's files is `Ctrl-S` in the reader's editor, and it goes through `src/reader/disk.rs`: the file is opened without following a link, read again, and written only if it is still what the edit started from or the user says to overwrite it. Do not add a second way to write, and do not let anything else (a formatter, a cache, a temporary file) write into the project. What milo keeps for itself, such as a draft from a reader that was ended, goes in its state folder.
 
@@ -1963,13 +2013,20 @@ Notes leave only as a copy. A note on the patch's lines (`src/review/`) is kept 
 
 [Starting an agent task](https://github.com/mcc0x/milo/blob/main/docs/setup.md#start-an-agent-task) says what a person sees. `milo task new` and the Rex action **Milo: New Agent Task…** both end in `launch` in `src/task.rs`. Keep it that way: the action in `src/setup/actions.lua` only asks for what was not passed, through `rex.ui`, and runs `milo task new` with each answer as an argument of its own. Do not give the launcher a pane, a Home entry or a page in the browser editor.
 
-Keep the order. Everything that can be refused is checked before anything is created; then the worktree is added, then the session. Nothing that was made is removed, and a failure after the worktree exists says what exists. A person closing a question in Rex ends the action before Milo is run. Never switch the checkout the task was asked from, reuse a worktree that was not named, or choose a branch's starting commit for the person.
+Keep the order. Everything that can be refused is checked before anything is created; then the worktree is added, then the agent is started. Nothing that was made is removed, and a failure after the worktree exists says what exists. A person closing a question in Rex ends the action before Milo is run. Never switch the checkout the task was asked from, reuse a worktree that was not named, or choose a branch's starting commit for the person.
 
-The session starts in the background. Do not select it, focus it, rename another session, type into it or answer an agent's trust question. Do not push, open a pull request, merge or remove a worktree.
+Keep which agent and where its screen goes apart. `Screen` in `src/task.rs` is the place: a background Rex session, or with `--here` the terminal the command was run in. Neither knows one agent from another, and no entry of the catalog may depend on one. A session starts in the background: do not select it, focus it, rename another session, type into it or answer an agent's trust or sign-in question. `--here` hands the terminal over by replacing Milo with the agent, so nothing can be done after it; check everything first, and never fall back from one screen to the other. Do not push, open a pull request, merge or remove a worktree.
 
-A harness goes in `HARNESSES` in `src/task/harness.rs` only with the interactive invocation its documentation gives, checked against a real install: that the agent's full screen appears in the worktree, that a prompt with shell syntax and a leading dash arrives as written, and that a follow-up can be typed. Never use a print, headless or one-shot mode, and never start one harness in place of another. Add the version to the table in `docs/setup.md`. An online usage account is not a harness.
+The catalog is `HARNESSES` in `src/task/harness.rs`, one plain entry per agent, and everything that names an agent reads it: `--agent`, `milo task agents`, the Rex action's list, the line in `milo doctor`, and the table in `docs/integrations.md`, which a test compares with it. Add to the catalog, not to those. An entry holds only what starting the agent needs and what a person is told:
 
-`cargo test --bin milo task:: worktrees::` runs the unit tests and `cargo test --test task` runs the real `milo task new` beside stand-ins for `rex` and the agents. With Lua 5.1, the fixtures above cover the action's questions, including closing each one. With Rex installed, `cargo test --test rex_lab -- --ignored a_task_starts` starts tasks from the command line and through the action on a disposable server. No test starts a real agent: do that by hand on a disposable Rex server and repository, and say in the pull request which agents and versions you ran. Only a Rex app can answer `rex.ui` questions, so say whether you answered them in an app or passed every choice as an argument.
+- **The interactive invocation its documentation gives**, with the program's own name. Never a print, headless or one-shot mode, never a flag that approves the agent's tools, and never one harness in place of another. Where the documentation gives no argument for a first prompt, the entry is `Prompt::Typed` and a prompt is refused; do not pipe one in.
+- **What it would misread.** Try a one-word prompt that is one of its commands, and a prompt that begins with a dash, against the release. Refuse what cannot be handed over as written. Never rewrite a prompt.
+- **`needs` and `usage` are statements, not features.** Starting an agent must not read what it saved, look for its sign-in, or ask its provider. `usage` says what `milo usage` already reads; a new reader is separate work under [Adding a usage source](https://github.com/mcc0x/milo/blob/main/CONTRIBUTING.md#adding-a-usage-source).
+- **`checked` is what was seen and no more.** `Opened` when the release drew its interactive screen for these arguments and stopped at its sign-in; `StandIn` when a session Milo started showed the prompt as written, a reply and a reply to a typed follow-up from a stand-in for a model on the same computer; `Replied` when the agent's own provider gave those replies. Unpack the vendor's release under `/tmp` and run it in a throwaway home: never install it, sign in for it, or spend a person's paid usage for a check. Record the release, its checksum and what was seen in `docs/evidence/harness-catalog/README.md`.
+
+An online usage account is not a harness.
+
+`cargo test --bin milo task:: worktrees::` runs the unit tests and `cargo test --test task` runs the real `milo task new` beside stand-ins for `rex` and the agents, with a terminal of the test's own for `--here`. With Lua 5.1, the fixtures above cover the action's questions, including closing each one. With Rex installed, `cargo test --test rex_lab -- --ignored a_task_starts` starts tasks from the command line and through the action on a disposable server. No test starts a real agent: do that by hand on a disposable Rex server and repository, and say in the pull request which agents and versions you ran. Only a Rex app can answer `rex.ui` questions, so say whether you answered them in an app or passed every choice as an argument.
 
 ### Adding a language to the reader
 
@@ -2190,9 +2247,9 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/syntax/markdown.rs` | Colours Markdown headings, code, links, list marks and quotes. |
 | `src/syntax/markup.rs` | Colours HTML and XML tags, and the scripts and styles inside them. |
 | `src/syntax/langs.rs` | Defines language rules and maps them to file names and extensions. |
-| `src/task.rs` | Runs `milo task new`: checks a request, adds or finds the worktree, starts the agent's session, and tells the Rex action what it can offer. |
-| `src/task/harness.rs` | Lists the coding agents a task can start, finds their programs, and gives each its interactive invocation. |
-| `src/task/tests.rs` | Checks requests, worktree plans and refusals, another host's reply, and what the action is told. |
+| `src/task.rs` | Runs `milo task new` and `milo task agents`: checks a request, adds or finds the worktree, starts the agent in a background session or in this terminal, and tells the Rex action what it can offer. |
+| `src/task/harness.rs` | Holds the catalog of coding agents a task can start: each one's program, interactive invocation, refused prompts and how far it was checked. Finds their programs and lists them. |
+| `src/task/tests.rs` | Checks requests, worktree plans and refusals, another host's reply, what the action is told, and that the help names every agent. |
 | `src/term.rs` | Sets and restores terminal modes and waits for events. |
 | `src/titles.rs` | Names Rex tabs and sessions after a Git project and remembers the titles Milo set. |
 | `src/tree.rs` | Builds file and folder rows, folds, and changed-file counts. |
@@ -2275,7 +2332,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/rex_hosts.rs` | Follows Doctor, a forwarded settings editor and a settings bundle across two disposable Rex servers, and checks the first host's files stay as they were. |
 | `tests/rex_lab.rs` | Exercises Rex layouts and presence on a disposable server, edits files in floating reader tabs, opens a floating review of an agent-supplied patch, copies review notes without touching other panes, starts agent tasks from the command line and the Rex action, and opens files named in a pane's output. |
 | `tests/settings-bench.py` | Times settings requests, a competing save and first state beside a responding Rex stand-in. |
-| `tests/task.rs` | Runs `milo task new` beside stand-ins for Rex and the four agents: the session asked for, literal prompts, refusals that create nothing, and what a late failure reports. |
+| `tests/task.rs` | Runs `milo task new` beside stand-ins for Rex and every agent: the session asked for, literal prompts, an agent given the test's own terminal, refusals that create nothing, and what a late failure reports. |
 | `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
@@ -2306,11 +2363,13 @@ Outside the project, milo keeps three things in its state folder for the editor:
 
 ## Starting a task
 
-`milo task new` is the one place Milo changes a repository and starts a session. It checks everything it can refuse before it creates anything: that the folder is in a Git project, that the agent's program is installed, that the branch, its starting commit and the worktree's folder are usable, and that a Rex server answers. Then it runs `git worktree add` when a new worktree was asked for, and asks Rex for a session whose terminal runs the agent in that worktree. The Rex action **Milo: New Agent Task…** collects the same choices in Rex's own prompts and runs the same command, so there is one way a task starts.
+`milo task new` is the one place Milo changes a repository and starts a session. It checks everything it can refuse before it creates anything: that the folder is in a Git project, that the agent's program is installed and can be handed the prompt, that the branch, its starting commit and the worktree's folder are usable, and that the agent's screen has somewhere to go. Then it runs `git worktree add` when a new worktree was asked for, and starts the agent in that worktree. The Rex action **Milo: New Agent Task…** collects the same choices in Rex's own prompts and runs the same command, so there is one way a task starts.
+
+Which agent runs and where its screen goes are separate. The agents are a fixed table in `src/task/harness.rs`: each one's program, the words its own documentation gives for an interactive session, the prompts it would misread, and how far that was checked. Nothing in the table is read from a project, a setting or the agent. The screen goes to a Rex session that Milo asks the server to create, or, with `--here`, to the terminal the command was run in: Milo then replaces itself with the agent, which gets that terminal and the shell's environment directly, and no Rex server is asked anything. Starting an agent reads nothing the agent saved. What `milo usage` shows comes from its own readers, which run no agent.
 
 The worktree is added as your own `git worktree add` would add it, with your Git settings, including checkout hooks and content filters: it is a checkout you will work in, and without them it would not hold the project's files. The new branch starts at the full commit ID Milo resolved, so it tracks no remote branch. The checkout the command was run from is never switched.
 
-The agent is found by its fixed name in a folder that the search path names in full, first on the path of the process that asked and then on the one your login shell sets up, which Milo asks that shell for once, apart from your terminal. The prompt goes from Milo to Rex to the agent as one argument and is never read by a shell. The session is created on the server and no app is asked to show it. See [starting an agent task](https://github.com/mcc0x/milo/blob/main/docs/setup.md#start-an-agent-task).
+The agent is found by its program's fixed name in a folder that the search path names in full, first on the path of the process that asked and then on the one your login shell sets up, which Milo asks that shell for once, apart from your terminal. The prompt goes from Milo to the agent as one argument, through Rex for a session, and is never read by a shell. A session is created on the server and no app is asked to show it. See [starting an agent task](https://github.com/mcc0x/milo/blob/main/docs/setup.md#start-an-agent-task).
 
 ## Updates and drawing
 

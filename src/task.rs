@@ -1,21 +1,25 @@
-//! Starts a coding agent on a task: a Git worktree for it and a Rex session showing the agent.
+//! Starts a coding agent on a task: a Git worktree for it, and the agent's own screen.
 //!
 //! `milo task new` and the Rex action **Milo: New Agent Task…** both end in
 //! `launch`, so there is one order of work and one set of refusals. Everything
 //! that can be refused is checked first, and nothing is created until it has
 //! been: the project, the agent's program, the worktree's branch and folder,
-//! and the Rex server. After that a worktree is added if a new one was asked
-//! for, then the session. Nothing made is ever removed again, and a failure
-//! names what exists.
+//! and the place for the agent's screen. After that a worktree is added if a
+//! new one was asked for, then the agent is started. Nothing made is ever
+//! removed again, and a failure names what exists.
 //!
-//! The launcher creates a session and shows none: it selects, focuses and
-//! renames nothing, and the person's pane stays where it was. It never
-//! pushes, opens a pull request, merges or cleans up.
+//! Which agent runs and where its screen goes are separate choices. The
+//! catalog in `harness` says how each agent is started, and [`Screen`] says
+//! where: a Rex session made in the background, or the terminal the command
+//! was run in. A session is created and never shown: nothing is selected,
+//! focused or renamed, and the person's pane stays where it was. The launcher
+//! never pushes, opens a pull request, merges or cleans up.
 
 mod harness;
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
+use std::io::{self, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::git::{self, worktrees};
@@ -25,21 +29,24 @@ use harness::{Harness, SearchPath};
 pub(crate) const HELP: &str = "\
 Usage: milo task new --agent AGENT --branch NAME [--base REF] [--path DIR] [--prompt TEXT]
        milo task new --agent AGENT --worktree DIR [--prompt TEXT]
-       either form: [--project DIR] [--host HOST]
+       either form: [--project DIR] [--host HOST | --here]
+       milo task agents
 
 Start a coding agent on a task, in a Git worktree and a Rex session of its own. The session opens in the background with the agent's full interactive screen: your pane keeps the focus, and you visit the session when you like.
 
-AGENT is claude (Claude Code), codex (Codex), omp (oh-my-pi) or opencode (OpenCode). It must be installed; Milo never starts a different agent in its place.
+AGENT is one of: claude (Claude Code), codex (Codex), omp (oh-my-pi), opencode (OpenCode), pi (Pi), amp (Amp), copilot (GitHub Copilot CLI), cursor (Cursor CLI), antigravity (Antigravity CLI), kiro (Kiro CLI), cline (Cline CLI), droid (Factory Droid), goose (Goose), qwen (Qwen Code). It must be installed; Milo never starts a different agent in its place, installs none and signs in to none.
+milo task agents lists them: which are installed here, how each is started, what each needs before it can reply, and how far each was checked.
 
 --branch NAME adds a worktree on that branch. A new branch needs --base REF, the commit it starts from; a branch that exists and is checked out nowhere takes no --base. The worktree goes in --path DIR, or beside the project in PROJECT-worktrees/NAME. The checkout you run this from is never switched.
 --worktree DIR uses a worktree the project already has, as it is.
---prompt TEXT is the agent's first message, passed as written; no shell reads it. Without it the agent opens idle.
+--prompt TEXT is the agent's first message, passed as written; no shell reads it. Without it the agent opens idle. Amp takes no first prompt, and a few agents refuse a prompt they would read as a command of their own: milo says so and starts nothing.
 --project DIR names the project; the current folder otherwise.
+--here runs the agent in this terminal instead of a Rex session, for a terminal without Rex. The agent takes the terminal over in the worktree's folder, and your shell returns when you leave it.
 --host HOST starts the task on another Rex host: a label from `rex hosts` or a server address, as for `rex -S`. --project, --worktree and --path are then folders on that host, written in full, and the host needs this version of milo on the search path of its login shell.
 
-On success two lines are printed, `worktree DIR` and `session ID`, with `host HOST` after them for another host. Everything is checked before anything is created. If a step fails after that, the message says what exists; Milo removes nothing, and never pushes, merges or cleans up.
+On success two lines are printed, `worktree DIR` and `session ID`, with `host HOST` after them for another host. With --here only `worktree DIR` is printed, before the agent's screen. Everything is checked before anything is created. If a step fails after that, the message says what exists; Milo removes nothing, and never pushes, merges or cleans up.
 
-In Rex, the action Milo: New Agent Task… asks for the same choices in the command palette and starts the task the same way.";
+In Rex, the action Milo: New Agent Task… asks for the same choices in the command palette and starts the task the same way, always in a background session.";
 
 const EXPECTED: &str = "see milo task --help";
 
@@ -52,6 +59,15 @@ enum Place<'a> {
     Branch { name: &'a str, base: Option<&'a str>, path: Option<&'a OsStr> },
 }
 
+/// Where the agent's screen goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Screen {
+    /// A new Rex session, made in the background.
+    Session,
+    /// The terminal the command was run in, which the agent takes over.
+    Here,
+}
+
 /// One task to start, as the command line or the Rex action named it.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Request<'a> {
@@ -60,18 +76,27 @@ pub(crate) struct Request<'a> {
     prompt: Option<&'a str>,
     project: Option<&'a OsStr>,
     host: Option<&'a OsStr>,
+    screen: Screen,
 }
 
 impl<'a> Request<'a> {
     pub(crate) fn parse(action: Option<&'a OsStr>, rest: &'a [OsString]) -> Result<Self, String> {
         if action != Some(OsStr::new("new")) {
-            return Err(format!("expected milo task new; {EXPECTED}"));
+            return Err(format!("expected milo task new or milo task agents; {EXPECTED}"));
         }
+        let mut screen = Screen::Session;
         let (mut agent, mut prompt, mut branch, mut base) = (None, None, None, None);
         let (mut worktree, mut path, mut project, mut host) = (None, None, None, None);
         let mut words = rest.iter().map(OsString::as_os_str);
         while let Some(flag) = words.next() {
             let name = flag.to_str().unwrap_or_default();
+            if name == "--here" {
+                if screen == Screen::Here {
+                    return Err("--here was given twice".into());
+                }
+                screen = Screen::Here;
+                continue;
+            }
             let missing = || format!("{name} needs a value; {EXPECTED}");
             let given = words.next().ok_or_else(missing);
             let value = given.clone().and_then(|value| if value.is_empty() { Err(missing()) } else { Ok(value) });
@@ -98,6 +123,9 @@ impl<'a> Request<'a> {
         if host.is_some_and(|host| host.as_encoded_bytes().starts_with(b"-")) {
             return Err("--host requires a host label from rex hosts, or a server address".into());
         }
+        if host.is_some() && screen == Screen::Here {
+            return Err("--here runs the agent in this terminal, so it cannot be combined with --host".into());
+        }
         let place = match (worktree, branch) {
             (Some(dir), None) if base.is_none() && path.is_none() => Place::Worktree(dir),
             (Some(_), None) => return Err("--base and --path belong to --branch; --worktree is used as it is".into()),
@@ -107,7 +135,7 @@ impl<'a> Request<'a> {
                 return Err(format!("say where the agent works: --worktree DIR or --branch NAME; {EXPECTED}"));
             }
         };
-        Ok(Self { agent, place, prompt: prompt.filter(|text| !text.is_empty()), project, host })
+        Ok(Self { agent, place, prompt: prompt.filter(|text| !text.is_empty()), project, host, screen })
     }
 }
 
@@ -219,6 +247,17 @@ pub(crate) fn command(request: &Request<'_>) -> Result<String, String> {
     }
 }
 
+/// What `milo task agents` prints.
+pub(crate) fn agents() -> String {
+    harness::listing(&SearchPath::new())
+}
+
+/// The line `milo doctor` gives agent tasks. It looks no further than this
+/// process's own search path: a report asks no shell to start.
+pub(crate) fn doctor() -> String {
+    harness::doctor(&SearchPath::own())
+}
+
 fn launch(request: &Request<'_>, search: &SearchPath) -> Result<String, String> {
     const UNTOUCHED: &str = "nothing was created";
     let harness = Harness::named(request.agent).ok_or("unknown agent")?;
@@ -231,8 +270,16 @@ fn launch(request: &Request<'_>, search: &SearchPath) -> Result<String, String> 
         .find(harness)
         .ok_or_else(|| format!("{} ({}) is not installed on this computer; {UNTOUCHED}", harness.name, harness.id))?;
     let plan = plan(&root, &request.place)?;
-    if !rex::task::reachable(None) {
-        return Err(format!("no Rex server answered; {UNTOUCHED}"));
+    match request.screen {
+        Screen::Session if !rex::task::reachable(None) => {
+            return Err(format!(
+                "no Rex server answered; {UNTOUCHED}. Without Rex, add --here to run the agent in this terminal"
+            ));
+        }
+        Screen::Here if !(io::stdin().is_terminal() && io::stdout().is_terminal()) => {
+            return Err(format!("--here gives the agent this terminal, and this is not one; {UNTOUCHED}"));
+        }
+        Screen::Session | Screen::Here => {}
     }
     if let Plan::New { path, branch, commit } = &plan {
         let start = match commit {
@@ -241,8 +288,16 @@ fn launch(request: &Request<'_>, search: &SearchPath) -> Result<String, String> 
         };
         worktrees::add(&root, path, &start).map_err(|why| format!("Git added no worktree: {why}"))?;
     }
+    match request.screen {
+        Screen::Session => in_session(harness, &plan, &program, &args),
+        Screen::Here => Err(here(harness, &plan, &program, &args)),
+    }
+}
+
+/// Starts the agent in a background Rex session and gives the two lines to print.
+fn in_session(harness: &Harness, plan: &Plan, program: &Path, args: &[OsString]) -> Result<String, String> {
     let label = titles::session_name(plan.path()).unwrap_or_default();
-    let Some(started) = rex::task::start(&label, plan.path(), &program, &args) else {
+    let Some(started) = rex::task::start(&label, plan.path(), program, args) else {
         return Err(format!("Rex started no session. {}", plan.made()));
     };
     if let Some(status) = started.exited_at_once() {
@@ -254,6 +309,16 @@ fn launch(request: &Request<'_>, search: &SearchPath) -> Result<String, String> 
         ));
     }
     Ok(format!("worktree {}\nsession {}", plan.path().display(), started.session))
+}
+
+/// Gives this terminal to the agent, which runs in Milo's place until the
+/// person leaves it. Comes back only with the reason the agent did not start.
+fn here(harness: &Harness, plan: &Plan, program: &Path, args: &[OsString]) -> String {
+    // The agent's screen follows at once, so the folder is said first.
+    println!("worktree {}", plan.path().display());
+    let _ = io::stdout().flush();
+    let why = harness::run_here(program, args, plan.path());
+    format!("{} did not start: {why}. {}", harness.name, plan.made())
 }
 
 /// Has the named host's own Milo start the task, since the project, the
@@ -339,6 +404,10 @@ fn options_text(cwd: &Path, search: &SearchPath) -> Result<String, &'static str>
     let mut text = format!("project {}\n", hex(root.as_os_str().as_encoded_bytes()));
     for harness in harness::installed(search) {
         writeln!(text, "agent {} {}", harness.id, harness.name).expect("writing to a string");
+        // The action asks for no task when the agent could not be handed one.
+        if !harness.takes_prompt() {
+            writeln!(text, "unprompted {}", harness.id).expect("writing to a string");
+        }
     }
     for tree in &listed {
         let here = if git::same_folder(&tree.path, &root) { "here" } else { "-" };

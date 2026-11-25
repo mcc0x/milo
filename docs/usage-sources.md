@@ -47,6 +47,22 @@ Ranked by how well the documented source fits one person's usage pane.
 | Cursor | Harness, remote | Team spend and events through the Admin API. One person's plan usage: no documented source | Enterprise team admins, with a key that can also change the team | **Deferred.** No documented personal source |
 | Amp | Harness | Nothing current locally; `amp usage` asks the server with the saved key | No documented HTTP endpoint | **Deferred.** Unsupported |
 
+### Agents a task can start whose usage is not read
+
+`milo task new` can start more agents than `milo usage` reads; [the agents table](integrations.md#agent-tasks) lists them. Starting one reads nothing it saved. For these, only the vendor's documentation was read, on 2026-11-25, to see whether a reader could exist. No release was checked against the rules above, no fixture exists, and nothing is shipped: every figure for them is unknown to Milo.
+
+| Agent | What its documentation says is saved locally | An account figure | Decision |
+| --- | --- | --- | --- |
+| Pi | Tokens and cost per message in session files under `~/.pi/agent/sessions/` | None of its own; each provider's | **Not started.** A candidate: needs a pinned release and fixtures |
+| Goose | Tokens, and cost where the provider reported one, in `sessions.db` under its data folder | None of its own; each provider's | **Not started.** A candidate: needs a pinned release and fixtures |
+| Qwen Code | Token logs under `~/.qwen/`, in formats its documentation does not promise | None for the chat account | **Not started.** No documented format |
+| GitHub Copilot CLI | No billing file; an opt-in OpenTelemetry file export | The GitHub Copilot account above, with a token of its own | **Account shipped** separately; nothing read from the program |
+| Cline CLI | A session store with no published usage format | Enterprise API only | **Not started.** No documented source |
+| Factory Droid | No published format | `/limits` inside its own screen; enterprise analytics API | **Not started.** No documented personal source |
+| Kiro CLI | Credits are not saved | `/usage` inside its own screen | **Not started.** No documented source |
+| Antigravity CLI | No published format; its status-line hook is handed quota figures | `/usage` inside its own screen | **Not started.** A status-line source would need the person to configure it |
+| Cursor CLI, Amp | As in the summary above | As in the summary above | **Deferred**, as above |
+
 ## OpenCode
 
 ### Releases checked
@@ -135,7 +151,7 @@ Amp's CLI is closed source. Checked: the official docs, and the published npm pa
 - **Threads live on the server.** [Security](https://ampcode.com/security) says the server handles "thread syncing and storage, and usage tracking" and keeps conversations in its own database. The January and March builds also wrote each thread to `~/.local/share/amp/threads/T-<uuid>.json`, where an assistant message could carry `usage: { model, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, timestamp }`. That writer is absent from the May and later builds.
 - **No cost on disk.** No currency or credit field was found in what the CLI itself wrote. Third-party tools report credit fields in some old thread files; that is not confirmed from Amp's side.
 - **No quota on disk.** [`amp usage`](https://ampcode.com/docs/pricing) asks the server for the balance with the account's API key, which is stored in `~/.local/share/amp/secrets.json`. That file is out of bounds.
-- **Streaming JSON is output, not storage.** [`--stream-json`](https://ampcode.com/docs/cli/streaming-json) prints a `usage` object per assistant message, but only to whoever ran the command. Milo does not run Amp.
+- **Streaming JSON is output, not storage.** [`--stream-json`](https://ampcode.com/docs/cli/streaming-json) prints a `usage` object per assistant message, but only to whoever ran the command. Milo runs no agent to read its usage; `milo task new` can start Amp's interactive screen for a person, and reads nothing from it.
 - **Logs.** `~/.cache/amp/logs/cli.log` is a diagnostic log; no usage record in it was verified.
 - **No format promise.** Amp's [docs](https://ampcode.com/docs) say "No backward compatibility, no legacy features", and no schema is published for thread files.
 

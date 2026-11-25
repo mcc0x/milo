@@ -17,15 +17,20 @@ fn a_request_names_one_agent_and_one_place_and_keeps_the_prompt_as_written() {
     assert_eq!(request.agent, "claude");
     assert_eq!(request.place, Place::Branch { name: "perf/scroll", base: Some("origin/main"), path: None });
     assert_eq!(request.prompt, Some(prompt), "what follows --prompt is the prompt, whatever it looks like");
-    assert_eq!((request.project, request.host), (None, None));
+    assert_eq!((request.project, request.host, request.screen), (None, None, Screen::Session));
+    let here = parsed(&["--here", "--agent", "goose", "--worktree", "."]).unwrap();
+    assert!(here.contains("screen: Here"), "{here}");
 
     let existing = parsed(&["--agent", "omp", "--worktree", "../other", "--prompt", ""]).unwrap();
     assert!(existing.contains("Worktree(\"../other\")") && existing.contains("prompt: None"), "{existing}");
 
     for (words, why) in [
-        (&["--branch", "b", "--base", "main"][..], "--agent is required: one of claude, codex, omp, opencode"),
-        (&["--agent", "cursor", "--branch", "b"], "cursor is not an agent milo can start"),
+        (&["--branch", "b", "--base", "main"][..], "--agent is required: one of claude, codex, omp, opencode, pi, amp"),
+        (&["--agent", "gemini", "--branch", "b"], "gemini is not an agent milo can start"),
+        (&["--agent", "cursor-agent", "--branch", "b"], "cursor-agent is not an agent milo can start"),
         (&["--agent", "openrouter", "--branch", "b"], "openrouter is not an agent milo can start"),
+        (&["--agent", "claude", "--worktree", ".", "--here", "--here"], "--here was given twice"),
+        (&["--agent", "claude", "--worktree", "/w", "--here", "--host", "devbox"], "cannot be combined with --host"),
         (&["--agent", "claude"], "say where the agent works"),
         (&["--agent", "claude", "--worktree", ".", "--branch", "b"], "not both"),
         (&["--agent", "claude", "--worktree", ".", "--base", "main"], "belong to --branch"),
@@ -118,7 +123,8 @@ fn a_missing_agent_or_project_stops_the_launch_before_git_or_rex_is_asked_to_mak
     let nowhere = SearchPath::with(OsString::new(), None);
     fn request<'a>(agent: &'a str, project: &'a Path) -> Request<'a> {
         let place = Place::Branch { name: "feature/x", base: Some("main"), path: None };
-        Request { agent, place, prompt: Some("go on"), project: Some(project.as_os_str()), host: None }
+        let project = Some(project.as_os_str());
+        Request { agent, place, prompt: None, project, host: None, screen: Screen::Session }
     }
     for harness in &harness::HARNESSES {
         let refused = launch(&request(harness.id, &f.root), &nowhere).unwrap_err();
@@ -159,6 +165,7 @@ fn a_task_on_another_host_needs_folders_written_in_full_before_that_host_is_aske
             prompt: None,
             project: project.map(OsStr::new),
             host: Some(OsStr::new("devbox")),
+            screen: Screen::Session,
         };
         on_host(OsStr::new("devbox"), &request).unwrap_err()
     };
@@ -175,11 +182,15 @@ fn the_action_is_told_the_installed_agents_and_the_projects_worktrees_and_branch
     let bin = f.root.parent().unwrap().join("bin");
     crate::format::tests::stand_in(&bin, "omp", "exit 0");
     crate::format::tests::stand_in(&bin, "claude", "exit 0");
+    // An agent is offered by its word and known by its program, and one that takes no first prompt says so.
+    crate::format::tests::stand_in(&bin, "kiro-cli", "exit 0");
+    crate::format::tests::stand_in(&bin, "amp", "exit 0");
     let search = SearchPath::with(bin.into_os_string(), None);
     let text = options_text(&linked.join("."), &search).unwrap();
     let path = |dir: &Path| hex(dir.as_os_str().as_encoded_bytes());
     let expected = format!(
-        "project {linked}\nagent claude Claude Code\nagent omp oh-my-pi\nworktree {main} {main_branch} -\n\
+        "project {linked}\nagent claude Claude Code\nagent omp oh-my-pi\nagent amp Amp\nunprompted amp\n\
+         agent kiro Kiro CLI\nworktree {main} {main_branch} -\n\
          worktree {linked} {topic} here\nbranch {parked}\nbase {topic}\n",
         linked = path(&linked),
         main = path(&f.root),
@@ -190,4 +201,12 @@ fn the_action_is_told_the_installed_agents_and_the_projects_worktrees_and_branch
     assert_eq!(text, expected);
     let outside = options_text(f.root.parent().unwrap(), &search).unwrap_err();
     assert_eq!(outside, "This shell is not in a Git project.");
+}
+
+#[test]
+fn the_help_names_every_agent_in_the_catalog_and_both_places_for_its_screen() {
+    for harness in &harness::HARNESSES {
+        assert!(HELP.contains(&format!("{} ({})", harness.id, harness.name)), "{} is missing", harness.id);
+    }
+    assert!(HELP.contains("--here runs the agent in this terminal") && HELP.contains("milo task agents"));
 }

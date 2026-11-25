@@ -25,11 +25,15 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   the given shell. It creates and switches to nothing. Run it only when the
   user asks for that name.
 - `milo task new` adds a Git worktree and starts a coding agent in a new Rex
-  session. Run it, or `milo_new_agent_task`, only when the user asks for a
-  task to be started, with the agent, branch, base or worktree they named.
-  Never choose a different agent when theirs is missing: report the refusal.
-  It does not show the new session; leave switching to the user. It removes
-  nothing, so say what a failed launch left behind.
+  session, or with `--here` in the terminal it is run from. Run it, or
+  `milo_new_agent_task`, only when the user asks for a task to be started,
+  with the agent, branch, base or worktree they named. `milo task agents`
+  lists the agents and which are installed. Never choose a different agent
+  when theirs is missing or refuses the prompt: report the refusal. Never
+  sign an agent in or answer its sign-in or trust question. It does not show
+  the new session; leave switching to the user. Do not pass `--here` from a
+  shell without a terminal: it is refused. It removes nothing, so say what a
+  failed launch left behind.
 - `milo_open_output` (**Milo: Open File from Terminal Output…**) lets the user
   open a project file named in a pane's recent output, at its line. Write
   locations as `path:line` or `path:line:column`, relative to the project, so
@@ -55,7 +59,8 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
 | `milo view FILE [--commit ID \| --edit \| --line LINE[:COLUMN]]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. `--line` opens a working file at that line. |
 | `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. |
-| `milo task new --agent AGENT (--branch NAME [--base REF] \| --worktree DIR) [--prompt TEXT]` | Starts `claude`, `codex`, `omp` or `opencode` interactively in a Git worktree and a background Rex session. Prints `worktree DIR` and `session ID`. Pass the prompt as one quoted argument. `--host HOST --project DIR` starts it on another Rex host. |
+| `milo task new --agent AGENT (--branch NAME [--base REF] \| --worktree DIR) [--prompt TEXT] [--here]` | Starts one of fourteen agents interactively in a Git worktree and a background Rex session: `claude`, `codex`, `omp`, `opencode`, `pi`, `amp`, `copilot`, `cursor`, `antigravity`, `kiro`, `cline`, `droid`, `goose` or `qwen`. Prints `worktree DIR` and `session ID`. Pass the prompt as one quoted argument; `amp` takes none. `--here` runs the agent in the calling terminal instead. `--host HOST --project DIR` starts it on another Rex host. |
+| `milo task agents` | Lists those agents: whether each is installed here, how it is started, what it needs before it can reply, and how far it was checked. |
 | `milo setup` | Opens terminal settings. In Rex it can also manage the sidebar layout. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. |
 | `milo web --host HOST [--project DIR]` | Opens another Rex host's settings dashboard on this computer through a loopback Rex forward, and closes both when done. `HOST` is a label from `rex hosts`. |

@@ -80,6 +80,7 @@ Usage: milo
        milo review PATCH [--from NAME] [--float]
        milo task new --agent AGENT --branch NAME [--base REF] [--prompt TEXT]
        milo task new --agent AGENT --worktree DIR [--prompt TEXT]
+       milo task agents
        milo PATH
        milo [setup] --skip-onboarding
        milo listen [--stop]
@@ -109,8 +110,9 @@ milo presence shows or changes the optional Discord Rich Presence, which is off
   until you turn it on.
 milo settings copies chosen pane settings to another host as a file, shows what
   an import would change, and undoes it.
-milo task new starts Claude Code, Codex, oh-my-pi or OpenCode on a task, in a
-  Git worktree and a background Rex session of its own. See milo task --help.
+milo task new starts a coding agent you have installed on a task, in a Git
+  worktree and a background Rex session of its own, or with --here in this
+  terminal. milo task agents lists the agents. See milo task --help.
 milo listen and milo claude-status are used by Rex and Claude Code.
 To open a directory named like a command, use a path such as ./history.
 In a git repository the outline shows the whole project and history shows
@@ -361,6 +363,7 @@ enum Command<'a> {
     Presence(presence::Request),
     Settings(setup::transfer::Request<'a>),
     Task(task::Request<'a>),
+    TaskAgents,
     ClaudeStatus,
     Help(&'static str),
     Version,
@@ -526,6 +529,7 @@ fn command<'a>(
         (Some("usage"), Some(flag)) if flag == "--menu-stream" => Command::UsageMenuStream,
         (Some("presence"), action) => Command::Presence(presence::Request::parse(action, rest)?),
         (Some("settings"), action) => Command::Settings(setup::transfer::Request::parse(action, rest)?),
+        (Some("task"), Some(action)) if action == "agents" && rest.is_empty() => Command::TaskAgents,
         (Some("task"), action) => Command::Task(task::Request::parse(action, rest)?),
         (Some("listen"), None) => Command::Listen(false),
         (Some("listen"), Some(flag)) if flag == "--stop" => Command::Listen(true),
@@ -653,6 +657,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         Command::Presence(request) => print_report(presence::command(request)),
         Command::Settings(request) => print_report(setup::transfer::command(request)),
         Command::Task(request) => print_report(task::command(&request)),
+        Command::TaskAgents => print_line(&task::agents()),
         Command::Listen(stop) => {
             if !stop {
                 // Rex runs this as it starts, which is when presence should come up too.

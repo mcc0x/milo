@@ -131,11 +131,13 @@ pub(crate) fn report() -> Result<String, String> {
     full_report(&store()?, None)
 }
 
-/// The report someone reads: the installation's health, then what the usage
-/// tools saved. That look opens their files and databases, so health checks
-/// alone do not run it.
+/// The report someone reads: the installation's health, then the coding
+/// agents on this search path and what the usage tools saved. The last
+/// opens the tools' files and databases, so health checks alone do not run it.
 pub(super) fn full_report(store: &Store, root: Option<&Path>) -> Result<String, String> {
     let (mut report, (tools, accounts)) = inspect(store, root)?;
+    report.push('\n');
+    report.push_str(&crate::task::doctor());
     for line in usage::doctor(tools, accounts) {
         report.push('\n');
         report.push_str(&line);

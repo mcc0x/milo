@@ -92,7 +92,7 @@ To review an agent’s edits without mixing in your own uncommitted work, have i
 
 ## Agent tasks
 
-In Rex, start a coding agent on a task without leaving your pane. `milo task new --branch fix/login --base origin/main --agent claude --prompt "Fix the login redirect"` adds a Git worktree for the branch and opens Claude Code, Codex, oh-my-pi or OpenCode there, in a new Rex session that starts in the background with the agent's full interactive screen. **Milo: New Agent Task…** in the command palette asks the same questions. Milo starts only the agent you name, never switches your checkout, and never pushes, merges or cleans up. See [starting an agent task](docs/setup.md#start-an-agent-task). This is on `main` and not in the v0.1.7 release.
+In Rex, start a coding agent on a task without leaving your pane. `milo task new --branch fix/login --base origin/main --agent claude --prompt "Fix the login redirect"` adds a Git worktree for the branch and opens the agent there, in a new Rex session that starts in the background with the agent's full interactive screen. **Milo: New Agent Task…** in the command palette asks the same questions. Outside Rex, add `--here` and the agent takes over the terminal you are in. Fourteen agents can be started this way, among them Claude Code, Codex, oh-my-pi, OpenCode, Pi, GitHub Copilot CLI, Cursor CLI and Goose: `milo task agents` lists them with what is installed, and [the agents table](docs/integrations.md#agent-tasks) says how far each was checked. Milo starts only the agent you name, installs and signs in to none, never switches your checkout, and never pushes, merges or cleans up. See [starting an agent task](docs/setup.md#start-an-agent-task). This is on `main` and not in the v0.1.7 release.
 
 ## What works in each terminal
 
@@ -107,7 +107,7 @@ In Rex, start a coding agent on a task without leaving your pane. `milo task new
 | `milo setup` | Terminal settings, including icon, Git mark and usage choices. The explicit command offers a skippable first-run guide. | Try, save, repair or remove managed layouts. |
 | `milo web [--no-open]` | Local settings dashboard. `--no-open` prints a private loopback link instead of opening the browser. | `--host HOST` uses Rex to forward **another** host’s editor. |
 | `milo settings export GROUPS` / `import FILE [--apply]` / `undo` | Transfer selected settings as a file. Import previews unless you ask to apply. | Saved rail geometry can be used by a Rex layout. |
-| `milo task new --agent AGENT …` | Not a standalone feature: the agent opens in a Rex session. | Adds or uses a Git worktree and starts the agent there in a background session. |
+| `milo task new --agent AGENT …` / `milo task agents` | With `--here`, adds or uses a Git worktree and runs the agent in this terminal. Without it the command is refused when no Rex server answers. `milo task agents` lists the agents and needs no terminal. | Adds or uses a Git worktree and starts the agent there in a background session. |
 | `milo doctor`, `--help`, `--version` | Plain output; no TTY needed. Doctor distinguishes local preferences from optional integrations. | Reports Rex host and integration health. |
 | `milo alerts`, `milo presence` | Inspect the settings without a running session. | Actual event mirroring and activity presence require Rex and explicit opt-in. |
 | `milo listen`, arrange/remember rails, title tabs | Not standalone features. Run a direct pane command instead. | Managed by the Rex integration. |

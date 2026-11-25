@@ -527,21 +527,29 @@ actions.milo_new_agent_task(ctx, { agent = "opencode", worktree = "/elsewhere", 
 assert(words(task_commands()[4]) == table.concat({ "task", "new", "--project", "/my project", "--agent", "opencode",
   "--worktree", "/elsewhere", "--prompt", "tidy up" }, "\0"))
 
+-- An agent that takes no first prompt is not asked for one, and is started without it.
+options_reply = { ok = true, stdout = two_agents .. "agent amp Amp\nunprompted amp\n" }
+answers({ "amp", "2" }, {})
+actions.milo_new_agent_task(ctx, {})
+assert(#questions == 2 and questions[2].title == "Where the agent works")
+assert(words(task_commands()[5]) == table.concat({ "task", "new", "--project", "/my project", "--agent", "amp",
+  "--worktree", "/my project-worktrees/fix it" }, "\0"))
+
 -- No agent installed, no app to ask, and Milo's own refusals all end the action with a reason.
 options_reply = { ok = true, stdout = "project " .. hex("/my project") .. "\n" }
 ok, why = pcall(actions.milo_new_agent_task, ctx, {})
-assert(not ok and why:match("Claude Code, Codex, oh%-my%-pi and OpenCode") and #task_commands() == 4)
+assert(not ok and why:match("No coding agent Milo can start is installed") and #task_commands() == 5)
 options_reply = { ok = false, stdout = "", stderr = "This shell is not in a Git project.\n" }
 ok, why = pcall(actions.milo_new_agent_task, ctx, {})
-assert(not ok and why == "This shell is not in a Git project." and #task_commands() == 4)
+assert(not ok and why == "This shell is not in a Git project." and #task_commands() == 5)
 options_reply = { ok = true, stdout = two_agents }
 pick_answer = function() return nil, "no_client" end
 ok, why = pcall(actions.milo_new_agent_task, ctx, {})
-assert(not ok and why:match("connected Rex app") and #task_commands() == 4)
+assert(not ok and why:match("connected Rex app") and #task_commands() == 5)
 task_reply = { ok = false, stdout = "", stderr = "milo: Codex (codex) is not installed on this computer; nothing was created\n" }
 ok, why = pcall(actions.milo_new_agent_task, ctx, { agent = "codex", branch = "b", base = "main", prompt = "" })
 assert(not ok and why == "Codex (codex) is not installed on this computer; nothing was created")
-assert(#task_commands() == 5 and not words(task_commands()[5]):match("%-%-prompt"))
+assert(#task_commands() == 6 and not words(task_commands()[6]):match("%-%-prompt"))
 task_reply = { ok = false, timed_out = true, stdout = "", stderr = "" }
 ok, why = pcall(actions.milo_new_agent_task, ctx, { agent = "claude", worktree = "/elsewhere", prompt = "x" })
 assert(not ok and why:match("did not finish in time"))
