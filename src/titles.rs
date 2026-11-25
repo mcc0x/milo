@@ -141,6 +141,13 @@ fn agent_name(name: &OsStr) -> Option<&str> {
     ((1..=16).contains(&name.len()) && plain).then_some(name)
 }
 
+/// The name for a session made to work in `dir`: `project`, or
+/// `project/worktree` in a linked worktree. None outside a Git project.
+pub(crate) fn session_name(dir: &Path) -> Option<String> {
+    let name = label(&git::checkout(dir).ok()??, None);
+    (!name.is_empty()).then_some(name)
+}
+
 /// `project`, or `project/worktree` in a linked worktree, then the agent running there.
 fn label(checkout: &Checkout, agent: Option<&str>) -> String {
     let mut name = checkout.project.clone();

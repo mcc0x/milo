@@ -2,7 +2,7 @@
 
 > milo provides small terminal panes for a live file tree, Git history, usage, and a file reader that can edit a working text file when asked. The panes work on their own or alongside your shell in Rex.
 
-milo writes to the project it displays only when you save a file you edited in its reader. The v0.1.7 prebuilt release is for Apple Silicon Macs running macOS 13 or later. Use `brew install mcc0x/milo/milo` or the release installer below. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
+milo writes to the project it displays only when you save a file you edited in its reader. On request, `milo task new` also adds a Git worktree for a coding agent's task. The v0.1.7 prebuilt release is for Apple Silicon Macs running macOS 13 or later. Use `brew install mcc0x/milo/milo` or the release installer below. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
 
 ## Using milo
 
@@ -12,7 +12,7 @@ milo writes to the project it displays only when you save a file you edited in i
 - [Release installer](https://github.com/mcc0x/milo/releases/download/v0.1.7/install.sh): Downloads the v0.1.7 binary from GitHub, verifies its SHA-256 checksum and installs it without a toolchain.
 - [Source installer](install.sh): Builds milo with Cargo and installs or removes the binary. It does not change Rex or Claude Code settings.
 - [Agent skill](skills/milo/SKILL.md): How to check milo, open a reader in the user's terminal, including at a Git commit, and show the user only the edits the agent itself made.
-- [Setup and removal](docs/setup.md): Effective worktree and global preferences, remembering a Rex rail, outline peeks, new shell tabs, opt-in tab titles and naming a session for its project, several Rex hosts (which host and Rex version this is, `milo web --host`, `milo settings export`, `import` and `undo`), opt-in mirroring of Rex alerts to Telegram or Discord, `milo doctor`, repair and ownership-aware removal.
+- [Setup and removal](docs/setup.md): Effective worktree and global preferences, remembering a Rex rail, outline peeks, new shell tabs, opt-in tab titles and naming a session for its project, starting a coding agent on a task in a Git worktree and a background Rex session (`milo task new`), several Rex hosts (which host and Rex version this is, `milo web --host`, `milo settings export`, `import` and `undo`), opt-in mirroring of Rex alerts to Telegram or Discord, `milo doctor`, repair and ownership-aware removal.
 - [Integrations](docs/integrations.md): Supported coding harnesses, provider accounts, messaging, external formatters and Reader tools.
 - [Keys and marks](docs/keys.md): Keyboard shortcuts and what the panes show.
 - [Usage limits](docs/usage.md): Provider quotas and activity, plus optional local CPU or memory indicators in the Mac menu bar.

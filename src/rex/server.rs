@@ -56,7 +56,12 @@ fn rex_command(exe: &OsStr, wait: &str) -> Command {
 /// A `rex` that never starts a server. With a host, the session and pane of
 /// this terminal are left out: they belong to another server.
 fn rex(host: Option<&OsStr>, wait: &str) -> Command {
-    let mut command = rex_command(OsStr::new("rex"), wait);
+    rex_from(OsStr::new("rex"), host, wait)
+}
+
+/// As `rex`, for a caller that has found which `rex` program to run.
+pub(super) fn rex_from(exe: &OsStr, host: Option<&OsStr>, wait: &str) -> Command {
+    let mut command = rex_command(exe, wait);
     if let Some(host) = host {
         command.arg("-S").arg(host).env_remove("REX_SESSION").env_remove("REX_BLOCK").env_remove("REX_SERVER");
     }
@@ -255,7 +260,7 @@ pub(crate) struct RemoteEditor {
     block: String,
 }
 
-fn parse_created(output: &[u8]) -> Option<(String, String)> {
+pub(super) fn parse_created(output: &[u8]) -> Option<(String, String)> {
     let [session, windows] = Value::parse(output)?.fields(["session_id", "initial_windows"]);
     let [blocks] = windows?.elements()?.next()?.fields(["block_ids"]);
     let session = session?.string(64)?;

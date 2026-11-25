@@ -24,6 +24,12 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   `milo_name_session` renames the session it is run in after the project of
   the given shell. It creates and switches to nothing. Run it only when the
   user asks for that name.
+- `milo task new` adds a Git worktree and starts a coding agent in a new Rex
+  session. Run it, or `milo_new_agent_task`, only when the user asks for a
+  task to be started, with the agent, branch, base or worktree they named.
+  Never choose a different agent when theirs is missing: report the refusal.
+  It does not show the new session; leave switching to the user. It removes
+  nothing, so say what a failed launch left behind.
 - Use `milo setup --repair` or `--remove` only when asked to change the
   integration. Do not change Rex's global theme, font or keyboard shortcuts.
 - Discord presence is off unless the user turned it on, and it publishes on
@@ -44,6 +50,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
 | `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
 | `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. |
+| `milo task new --agent AGENT (--branch NAME [--base REF] \| --worktree DIR) [--prompt TEXT]` | Starts `claude`, `codex`, `omp` or `opencode` interactively in a Git worktree and a background Rex session. Prints `worktree DIR` and `session ID`. Pass the prompt as one quoted argument. `--host HOST --project DIR` starts it on another Rex host. |
 | `milo setup` | Opens terminal settings. In Rex it can also manage the sidebar layout. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. |
 | `milo web --host HOST [--project DIR]` | Opens another Rex host's settings dashboard on this computer through a loopback Rex forward, and closes both when done. `HOST` is a label from `rex hosts`. |

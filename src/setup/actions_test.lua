@@ -35,12 +35,15 @@ local named, title_reply, rename_reply, rename_error = {}, { ok = true, stdout =
 local running = { child = { path = "/test/bin/milo", pid = 80 } }
 local processes = { [outline.block_id] = running, [history.block_id] = running, [usage.block_id] = running }
 local pick_answer, on_close, ps_reply
+local input_answer, options_reply, task_reply
 rex = {
   action = function(action) actions[action.name] = action.run end,
   exec = function(argv)
     if argv[1] == "/bin/ps" then return ps_reply end
     commands[#commands + 1] = argv
     if argv[2] == "tab-title" then return title_reply end
+    if argv[2] == "task-options" then return options_reply end
+    if argv[2] == "task" then return task_reply end
     return argv[3] == "read" and profile_reply or { ok = true, stdout = "" }
   end,
   call = function(name, args)
@@ -61,7 +64,10 @@ rex = {
     end
     return {}
   end,
-  ui = { pick = function(args) return assert(pick_answer, "unexpected picker")(args) end },
+  ui = {
+    pick = function(args) return assert(pick_answer, "unexpected picker")(args) end,
+    input = function(args) return assert(input_answer, "unexpected question")(args) end,
+  },
   session = {
     view = function() return session end,
     new_split = function(args)
@@ -421,6 +427,112 @@ assert(not ok and why == "Could not name this session." and #named == 2)
 title_reply.stdout, rename_reply, rename_error = "milo\n", nil, "not_found"
 ok, why = pcall(actions.milo_name_session, ctx)
 assert(not ok and why == "not_found" and #named == 3)
+
+-- A new agent task asks for what is missing and hands every answer to one
+-- `milo task new`, each as an argument of its own. It creates no session itself.
+local function hex(text)
+  return (text:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+end
+local two_agents = "project " .. hex("/my project") .. "\nagent claude Claude Code\nagent opencode OpenCode\n"
+  .. "worktree " .. hex("/my project") .. " " .. hex("main") .. " here\n"
+  .. "worktree " .. hex("/my project-worktrees/fix it") .. " " .. hex("fix/it") .. " -\n"
+  .. "worktree " .. hex("/elsewhere") .. " - -\n"
+  .. "branch " .. hex("parked") .. "\nbase " .. hex("main") .. "\nbase " .. hex("origin/main") .. "\n"
+local started_reply = { ok = true, stdout = "worktree /my project-worktrees/feature-x\n"
+  .. "session session:01a212ce-82f4-7ed0-bdb4-88aa2edd12fa\n" }
+local function task_commands()
+  local found = {}
+  for _, command in ipairs(commands) do
+    if command[2] == "task" then found[#found + 1] = command end
+  end
+  return found
+end
+local function words(command)
+  return table.concat(command, "\0", 2)
+end
+local literal = '--print $(touch /tmp/x); `id` "q"'
+local questions = {}
+local function answers(picks, inputs)
+  questions = {}
+  pick_answer = function(prompt)
+    questions[#questions + 1] = prompt
+    local answer = table.remove(picks, 1)
+    if answer == nil then return nil, "cancelled" end
+    return answer
+  end
+  input_answer = function(prompt)
+    questions[#questions + 1] = prompt
+    local answer = table.remove(inputs, 1)
+    if answer == nil then return nil, "cancelled" end
+    return answer
+  end
+end
+options_reply, task_reply = { ok = true, stdout = two_agents }, started_reply
+answers({ "claude", "new", { text = " origin/main " } }, { " feature/x ", literal })
+local result = actions.milo_new_agent_task(ctx, {})
+assert(result.worktree == "/my project-worktrees/feature-x")
+assert(result.session_id == "session:01a212ce-82f4-7ed0-bdb4-88aa2edd12fa")
+assert(#task_commands() == 1)
+assert(words(task_commands()[1]) == table.concat({ "task", "new", "--project", "/my project", "--agent", "claude",
+  "--branch", "feature/x", "--base", "origin/main", "--prompt", literal }, "\0"))
+assert(#questions == 5 and #questions[1].items == 2 and questions[1].items[2].title == "OpenCode")
+-- The worktree question lists a new worktree first, then each worktree with its branch and folder.
+local places = questions[2].items
+assert(#places == 4 and places[1].id == "new" and places[2].title == "main" and places[2].detail == "this checkout")
+assert(places[3].title == "fix/it" and places[3].subtitle == "/my project-worktrees/fix it")
+assert(places[4].title == "No branch" and places[4].subtitle == "/elsewhere")
+assert(questions[4].allow_other and questions[4].items[1].id == "main" and questions[4].items[2].id == "origin/main")
+assert(questions[5].title == "Task for Claude Code")
+
+-- With one agent installed nobody is asked which. An existing worktree takes
+-- no branch, and an empty task starts the agent with no prompt.
+options_reply = { ok = true, stdout = two_agents:gsub("agent opencode OpenCode\n", "") }
+answers({ "2" }, { "" })
+actions.milo_new_agent_task(ctx, {})
+assert(#questions == 2 and questions[1].title == "Where the agent works")
+assert(words(task_commands()[2]) == table.concat({ "task", "new", "--project", "/my project", "--agent", "claude",
+  "--worktree", "/my project-worktrees/fix it" }, "\0"))
+
+-- A branch that exists without a worktree is used as it is: no commit is asked for.
+answers({ "new" }, { "parked", "go" })
+actions.milo_new_agent_task(ctx, {})
+assert(#questions == 3)
+assert(words(task_commands()[3]):match("%-%-agent%z" .. "claude%z%-%-branch%zparked%z%-%-prompt%zgo$"))
+
+-- Closing any question starts nothing: no worktree and no session can exist.
+options_reply = { ok = true, stdout = two_agents }
+for _, given in ipairs{ { {}, {} }, { { "opencode" }, {} }, { { "opencode", "new" }, {} },
+  { { "opencode", "new" }, { "feature/y" } }, { { "opencode", "new", "main" }, { "feature/y" } },
+  { { "opencode", "1" }, {} } } do
+  answers(given[1], given[2])
+  assert(actions.milo_new_agent_task(ctx, {}) == nil and #task_commands() == 3)
+end
+
+-- Every choice passed as an argument asks nothing, as from `rex do` or a key binding.
+pick_answer, input_answer = nil, nil
+actions.milo_new_agent_task(ctx, { agent = "opencode", worktree = "/elsewhere", prompt = "tidy up" })
+assert(words(task_commands()[4]) == table.concat({ "task", "new", "--project", "/my project", "--agent", "opencode",
+  "--worktree", "/elsewhere", "--prompt", "tidy up" }, "\0"))
+
+-- No agent installed, no app to ask, and Milo's own refusals all end the action with a reason.
+options_reply = { ok = true, stdout = "project " .. hex("/my project") .. "\n" }
+ok, why = pcall(actions.milo_new_agent_task, ctx, {})
+assert(not ok and why:match("Claude Code, Codex, oh%-my%-pi and OpenCode") and #task_commands() == 4)
+options_reply = { ok = false, stdout = "", stderr = "This shell is not in a Git project.\n" }
+ok, why = pcall(actions.milo_new_agent_task, ctx, {})
+assert(not ok and why == "This shell is not in a Git project." and #task_commands() == 4)
+options_reply = { ok = true, stdout = two_agents }
+pick_answer = function() return nil, "no_client" end
+ok, why = pcall(actions.milo_new_agent_task, ctx, {})
+assert(not ok and why:match("connected Rex app") and #task_commands() == 4)
+task_reply = { ok = false, stdout = "", stderr = "milo: Codex (codex) is not installed on this computer; nothing was created\n" }
+ok, why = pcall(actions.milo_new_agent_task, ctx, { agent = "codex", branch = "b", base = "main", prompt = "" })
+assert(not ok and why == "Codex (codex) is not installed on this computer; nothing was created")
+assert(#task_commands() == 5 and not words(task_commands()[5]):match("%-%-prompt"))
+task_reply = { ok = false, timed_out = true, stdout = "", stderr = "" }
+ok, why = pcall(actions.milo_new_agent_task, ctx, { agent = "claude", worktree = "/elsewhere", prompt = "x" })
+assert(not ok and why:match("did not finish in time"))
+pick_answer, input_answer = nil, nil
 
 local function mac_shell(pid, login)
   local wrapper = { pid = login, name = "login", path = "/usr/bin/login", user_id = 0 }

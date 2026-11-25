@@ -89,6 +89,50 @@ The listener starts Milo to ask about a directory once, and with titles on once 
 
 Both need the installed Rex integration. After upgrading Milo, run `milo setup --repair` so Rex loads the current actions and listener.
 
+## Start an agent task
+
+`milo task new` starts a coding agent on a task from a shell in your project. It adds a Git worktree for the task, or uses one the project already has, and opens the agent in a new Rex session named after it, `project/worktree`. The session starts in the background: your pane keeps the focus, and no app is asked to show the new session. Visit it whenever you like. It shows the agent's own full screen, so you can read along, answer its questions and type a follow-up. On `main`; not in the v0.1.7 release.
+
+```sh
+milo task new --branch perf/reader-scroll --base origin/main --agent claude --prompt "Speed up scrolling in large files"
+milo task new --worktree ../milo-worktrees/perf-reader-scroll --agent codex
+```
+
+On success it prints two lines for a script to read, the worktree's folder and the session's ID:
+
+```
+worktree /Users/you/dev/milo-worktrees/perf-reader-scroll
+session session:01a212ce-82f4-7ed0-bdb4-88aa2edd12fa
+```
+
+**Where the agent works.** Name one of two things, and Milo uses exactly that:
+
+- `--branch NAME` adds a worktree on that branch. A new branch needs `--base REF`, the commit it starts from: a branch, a tag or a commit ID. Milo never picks one for you, and the new branch tracks no remote branch. A branch that already exists and is checked out nowhere gets a worktree as it is and takes no `--base`. The worktree goes in `--path DIR`, or else beside the project's main folder in `PROJECT-worktrees/NAME`, with each `/` of the name as a `-`. A branch that is already checked out is refused, with the folder to pass to `--worktree`.
+- `--worktree DIR` uses a worktree the project already has, with whatever is in it. A folder that is not one of this project's worktrees is refused.
+
+The checkout you run the command from is never switched or changed. `--project DIR` names the project when the current folder is not in it.
+
+**Which agent.** `--agent` is `claude`, `codex`, `omp` or `opencode`. Milo starts each the way its own documentation starts an interactive session with a first message, never a print or one-shot mode:
+
+| Agent | `--agent` | Started as | Checked with |
+| --- | --- | --- | --- |
+| Claude Code | `claude` | `claude -- PROMPT` | 2.1.311 |
+| Codex | `codex` | `codex -- PROMPT` | 0.171.0 |
+| oh-my-pi | `omp` | `omp launch -- PROMPT` | 19.1.1 |
+| OpenCode | `opencode` | `opencode --prompt=PROMPT` | 1.19.6 and 2.4.1 |
+
+The agent must be installed: its program is looked for by that name on your shell's search path. If it is not there, Milo says which agent is missing and stops before any worktree or session exists. It never starts a different agent in its place. Online usage accounts such as OpenRouter are not agents and cannot be started.
+
+**The prompt.** `--prompt TEXT` is the agent's first message. It reaches the agent as one argument, exactly as written: no shell reads it, so quotes, `$(…)`, backticks and a leading dash are only text. The agent then reads it as it reads anything you type to it, so a slash command or an `@file` mention means what it means there. Without `--prompt` the agent opens idle. One limit: Claude Code runs a prompt that is a single bare word, such as `doctor`, as its own command of that name, so Milo refuses a one-word prompt for it and asks for a few words.
+
+**What it does when something fails.** Everything that can be refused is checked first: the project, the agent, the branch, the base, the folder, and that a Rex server answers. Until then nothing has been created. If a later step fails, the message says exactly what exists, for example `Created worktree … on new branch …; it was not removed`. Milo never deletes a worktree, a branch or a session it made, and never pushes, opens a pull request, merges or cleans up. Remove a worktree you no longer want with `git worktree remove`. An agent may ask whether it should trust the new folder before it reads your prompt; that question is the agent's, and Milo does not answer it.
+
+The agent runs with the environment of a new shell tab: your login shell's, with its interactive startup files read. An agent that starts and then exits within a moment is reported as a failure, and its session stays open so that you can read why.
+
+**From the command palette.** **Milo: New Agent Task…** asks the same questions in Rex's own prompts and then runs the same `milo task new`. It uses the project of the shell you run it from. It lists the agents installed on that host and skips the question when only one is; it offers the project's worktrees and **New worktree…**, which asks for a branch and where it starts; then it asks for the task. Closing any question ends the action with nothing created. From `rex do` or a key binding, pass any of `agent`, `worktree`, `branch`, `base` and `prompt` to skip that question: `rex do milo_new_agent_task agent=codex branch=fix/typo base=main prompt="Fix the typo in the README"`. The action answers with the worktree and the session ID. Rex starts actions with a short system search path, so here the agents are looked for on the path your login shell sets up, including what `~/.zshrc` or its like adds.
+
+**On another Rex host.** `--host HOST` starts the task on another host: a label from `rex hosts` or a server address, as for `rex -S`. The project, its worktree and the agent are all on that host, so write `--project`, and `--worktree` or `--path` if you pass them, in full as they are there. The host runs its own `milo task new`, so it needs this version of milo on the search path of its login shell, and the agent installed there. The result adds a third line, `host HOST`.
+
 ## Browser editor
 
 Run `milo web` from the project you want to configure, or choose **Open browser settings** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the editor doesn’t open, use the private link printed in the terminal. `milo web --no-open` prints that link without opening a browser. The link is printed at once; a page opened from it waits the moment Milo takes to read your settings. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
@@ -218,6 +262,7 @@ Saving installs these actions in the Rex command palette:
 | Remember the current rail | `milo_remember_layout` |
 | Reset a remembered layout | `milo_reset_layout` |
 | Name the session after this project | `milo_name_session` |
+| Milo: New Agent Task… | `milo_new_agent_task` |
 
 Milo does not install key bindings. For an optional shortcut, check Rex's shortcut settings and `rex keymap` first; the latter lists config bindings, not every Mac app shortcut. If the chord is free, put a binding such as `rex.bind("cmd+shift+m", "milo_peek_outline")` in your own Rex `init.lua`. Actions also work directly in the palette without any binding.
 
