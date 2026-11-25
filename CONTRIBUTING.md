@@ -187,6 +187,8 @@ Mirroring stays off until the user turns it on. The setup screen and the browser
 
 A secret goes from standard input or the browser editor to `secret.rs` and from there to curl's standard input. Never put one in an argument, a settings file, a status note, a log, or anything sent back to a settings page. Destinations are fixed hosts; do not add one the user can type.
 
+Start every program the mirroring process runs with `fs_ops::spawn`, never `Command::spawn`, `output` or `status`. The worker delivers to each destination on a thread of its own, and macOS has no way to make a pipe that other programs cannot inherit from the start. A program one thread starts while another is making a pipe keeps that pipe open for as long as it runs: a held Telegram request then holds up reading the Discord secret, and with it Discord's delivery.
+
 Lifecycle notice consent is bound to the exact provider credential and, for Telegram, the chat. The versioned local tag is salted separately for each approval; it is not a credential and cannot be used to send a message. Do not accept a missing, unknown, or mismatched tag. If Rust changes the hash algorithm used by the tag, notices require explicit reapproval; regular forwarding and saved connections are unchanged.
 
 `cargo test alerts` runs the unit tests and `cargo test --test alerts` runs the real `milo alerts` against stand-ins: a `rex` that prints the events a test writes, and a server on the loopback address for both destinations. `MILO_ALERTS_TEST_ENDPOINT` names that server, and is refused unless it is `http://127.0.0.1:PORT`. On macOS `MILO_ALERTS_KEYCHAIN` names a keychain file of the test's own, so that tests never touch yours. Only a development build reads either variable: a release build has no setting that changes where a secret is kept or sent, so with `--release` these tests do nothing. No test may use a real token, webhook or chat, or post to Telegram or Discord.
@@ -353,7 +355,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/diff/words.rs` | Finds the words that differ between paired lines, within fixed limits. |
 | `src/fixture.rs` | Makes throwaway projects and Git repositories for tests. |
 | `src/format.rs` | Finds an installed formatter for a kind of file and runs it over a draft, within limits. |
-| `src/fs_ops.rs` | Opens files without following final links and stages atomic replacements. |
+| `src/fs_ops.rs` | Opens files without following final links, stages atomic replacements, and starts programs one at a time so that none inherits another's pipe. |
 | `src/git.rs` | Finds repositories and keeps their status, file lists, and history. |
 | `src/git/parse.rs` | Reads Git status, diff, and log output. |
 | `src/git/pending.rs` | Counts lines in pending changes and reuses tracked-file counts across unrelated edits. |

@@ -20,7 +20,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::term;
+use crate::{fs_ops, term};
 
 const PROBE_WAIT: Duration = Duration::from_secs(3);
 /// How long a script or a settings command may take before it is ended. Rex allows each
@@ -57,24 +57,38 @@ fn layout_catalog(output: &[u8]) -> Option<bool> {
     Some(false)
 }
 
-/// The shell that opened setup, even if focus has moved somewhere else.
+/// The pane that ran Milo, even if focus has moved somewhere else.
 pub struct Target {
-    pub session: OsString,
+    /// The session ID an older Rex put in the environment. Rex preview.23 and later name
+    /// only the block, and its session is whichever one holds that block now.
+    pub session: Option<OsString>,
     pub block: OsString,
 }
 
 impl Target {
     pub fn current() -> Option<Self> {
-        let session = inherited_id("REX_SESSION")?;
-        let block = inherited_id("REX_BLOCK")?;
-        let known = match term::host() {
-            term::Host::Rex => true,
-            term::Host::Unknown if detached() => {
-                exact_id(&session, "session:").is_some() && exact_block(&block).is_some()
-            }
+        Self::inherited(inherited_id("REX_SESSION"), inherited_id("REX_BLOCK"), term::host(), detached())
+    }
+
+    /// A terminal Rex drew vouches for the IDs it was given. A caller with no terminal, or
+    /// one named by its block alone, must carry whole IDs: a label or the end of an ID could
+    /// select some other session.
+    fn inherited(session: Option<OsString>, block: Option<OsString>, host: term::Host, detached: bool) -> Option<Self> {
+        let block = block?;
+        let whole = exact_block(&block).is_some()
+            && session.as_ref().is_none_or(|session| exact_id(session, "session:").is_some());
+        let known = match host {
+            term::Host::Rex => session.is_some() || whole,
+            term::Host::Unknown if detached => whole,
             _ => false,
         };
         known.then_some(Self { session, block })
+    }
+
+    /// What `-s` takes for this pane's session. Rex accepts a whole block ID there and
+    /// uses the session that holds the block.
+    pub fn selector(&self) -> &OsStr {
+        self.session.as_deref().unwrap_or(&self.block)
     }
 }
 
@@ -106,7 +120,7 @@ pub(crate) fn diagnostic_script(target: &Target, lua: &str, caller: &str) -> Opt
     let mut command = Command::new("rex");
     command
         .args(["--autostart=false", "--timeout", "3s", "do", "-e", lua, "-s"])
-        .arg(&target.session)
+        .arg(target.selector())
         .arg("-b")
         .arg(&target.block)
         .args(["milo_operation=doctor", caller]);
@@ -125,7 +139,7 @@ fn output_within(command: &mut Command, input: Option<&str>, wait: Duration) -> 
     const LIMIT: usize = 1 << 20;
     let deadline = Instant::now() + wait;
     let stdin = if input.is_some() { Stdio::piped() } else { Stdio::null() };
-    let mut child = command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut child = fs_ops::spawn(command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::null())).ok()?;
     // Written from a thread that can be left behind: a program that never reads, or one that
     // hands the pipe to another, must not hold a pane past the deadline.
     let written = input.zip(child.stdin.take()).map(|(input, mut pipe)| {
@@ -196,7 +210,7 @@ pub fn run(args: &[&OsStr]) -> bool {
 /// Whether a program succeeded within `wait`. One that has not ended by then is ended.
 fn finished(command: &mut Command, wait: Duration) -> bool {
     let deadline = Instant::now() + wait;
-    let Ok(mut child) = command.spawn() else { return false };
+    let Ok(mut child) = fs_ops::spawn(command) else { return false };
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
@@ -370,12 +384,13 @@ impl AlertSource {
         if !self.is_current() {
             return Err(io::ErrorKind::NotConnected.into());
         }
-        alert_command(self.endpoint())
-            .args(["--timeout=2s", "events", "--all", "--json"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
+        fs_ops::spawn(
+            alert_command(self.endpoint())
+                .args(["--timeout=2s", "events", "--all", "--json"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
     }
 }
 
@@ -448,14 +463,25 @@ fn detached() -> bool {
 }
 
 /// Interactive panes need Rex's terminal identity as well as inherited IDs.
-/// Detached callers can carry a complete session ID without terminal metadata.
+/// Detached callers can carry a complete session or block ID without terminal metadata.
 pub fn inside() -> bool {
-    let Some(session) = inherited_id("REX_SESSION") else { return false };
-    match term::host() {
-        term::Host::Rex => inherited_id("REX_BLOCK").is_some() || detached(),
-        term::Host::Unknown if detached() => exact_id(&session, "session:").is_some(),
+    inside_with(inherited_id("REX_SESSION"), inherited_id("REX_BLOCK"), term::host(), detached())
+}
+
+fn inside_with(session: Option<OsString>, block: Option<OsString>, host: term::Host, detached: bool) -> bool {
+    // Rex preview.23 and later name only the block, which then has to be enough for a target.
+    let Some(session) = session else { return Target::inherited(None, block, host, detached).is_some() };
+    match host {
+        term::Host::Rex => block.is_some() || detached,
+        term::Host::Unknown if detached => exact_id(&session, "session:").is_some(),
         _ => false,
     }
+}
+
+/// Whether Rex put this terminal's session in the environment, as releases before
+/// preview.23 did. Later ones name only its block.
+pub fn names_session() -> bool {
+    inherited_id("REX_SESSION").is_some()
 }
 
 /// Opens a floating reader in the caller's tab and returns its block ID.
@@ -499,7 +525,7 @@ fn float(
         args.push_str(&json(origin));
     }
     args.push('}');
-    script(Some(target), &target.session, include_str!("rex_reader.lua"), ["--args", &args])
+    script(Some(target), target.selector(), include_str!("rex_reader.lua"), ["--args", &args])
         .filter(|reply| exact_block(OsStr::new(reply)).is_some())
 }
 
@@ -507,7 +533,7 @@ fn float(
 pub fn focus(block: &str, file: &Path) -> bool {
     let Some(target) = Target::current() else { return false };
     let args = format!(r#"{{"block":{},"label":{}}}"#, json(block), file_label(file));
-    script(Some(&target), &target.session, include_str!("rex_reader_show.lua"), ["--args", &args]).is_some()
+    script(Some(&target), target.selector(), include_str!("rex_reader_show.lua"), ["--args", &args]).is_some()
 }
 
 /// The label of a reader showing `file`: the file's name.
@@ -566,7 +592,7 @@ impl ShellObserver {
         let args = format!(r#"{{"anchor":{},"pane":{}}}"#, json(anchor), json(pane));
         let mut child = Command::new("rex")
             .args(["--autostart=false", "do", "--session"])
-            .arg(target.session)
+            .arg(target.selector())
             .args(["--fail-fast", "--args", &args, "-e", include_str!("rex_shell.lua")])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -842,9 +868,10 @@ fn unhex(code: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Frame, ShellChange, exact_block, finished, json, layout_catalog, probe_output, reader_command, reader_label,
-        review_command, scripted,
+        Frame, ShellChange, Target, exact_block, finished, inside_with, json, layout_catalog, probe_output,
+        reader_command, reader_label, review_command, scripted,
     };
+    use crate::term::Host;
     use std::ffi::OsStr;
     use std::io::Cursor;
     use std::path::Path;
@@ -945,6 +972,68 @@ mod tests {
         assert!(parse("block:01a1f929-dc65-7cc5-9ba2-cac3108697bf"));
         assert!(!parse("block:01a1f929dc65-7-cc5-9ba2-cac3108697bf"));
         assert!(!parse("block:------------------------------------"));
+    }
+
+    const SESSION: &str = "session:01a1f929-dc65-7cc5-9ba2-cac3108697b0";
+    const BLOCK: &str = "block:01a1f929-dc65-7cc5-9ba2-cac3108697bf";
+
+    fn target(session: Option<&str>, block: Option<&str>, host: Host, detached: bool) -> Option<Target> {
+        Target::inherited(session.map(Into::into), block.map(Into::into), host, detached)
+    }
+
+    #[test]
+    fn a_pane_named_only_by_its_block_selects_the_session_that_holds_it() {
+        // Rex preview.23 and later: an interactive pane, and an agent's shell with no terminal.
+        for (host, detached) in [(Host::Rex, false), (Host::Rex, true), (Host::Unknown, true)] {
+            let target = target(None, Some(BLOCK), host, detached).unwrap();
+            assert!(target.session.is_none());
+            assert_eq!((target.selector(), target.block.as_os_str()), (OsStr::new(BLOCK), OsStr::new(BLOCK)));
+            assert!(inside_with(None, Some(BLOCK.into()), host, detached));
+        }
+        // A label or the end of an ID is no session selector, wherever it came from.
+        for partial in ["shell", "block:97bf", "8697bf", SESSION] {
+            for (host, detached) in [(Host::Rex, false), (Host::Rex, true), (Host::Unknown, true)] {
+                assert!(target(None, Some(partial), host, detached).is_none(), "{partial}");
+                assert!(!inside_with(None, Some(partial.into()), host, detached), "{partial}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pane_an_older_rex_named_keeps_its_inherited_session() {
+        let named = target(Some(SESSION), Some(BLOCK), Host::Rex, false).unwrap();
+        assert_eq!((named.selector(), named.block.as_os_str()), (OsStr::new(SESSION), OsStr::new(BLOCK)));
+        // A Rex terminal vouches for what it was given, whole IDs or not.
+        assert_eq!(target(Some("test"), Some("test"), Host::Rex, false).unwrap().selector(), "test");
+        assert!(inside_with(Some("test".into()), Some("test".into()), Host::Rex, false));
+        assert!(inside_with(Some("test".into()), None, Host::Rex, true));
+        assert!(!inside_with(Some("test".into()), None, Host::Rex, false));
+        // Without a terminal the IDs must be whole.
+        assert!(target(Some(SESSION), Some(BLOCK), Host::Unknown, true).is_some());
+        assert!(target(Some("test"), Some(BLOCK), Host::Unknown, true).is_none());
+        assert!(target(Some(SESSION), Some("shell"), Host::Unknown, true).is_none());
+        assert!(inside_with(Some(SESSION.into()), None, Host::Unknown, true));
+        assert!(!inside_with(Some("test".into()), Some(BLOCK.into()), Host::Unknown, true));
+        // A session alone names no pane to act on.
+        assert!(target(Some(SESSION), None, Host::Rex, false).is_none());
+    }
+
+    #[test]
+    fn rex_ids_left_in_another_terminal_or_outside_rex_are_not_a_target() {
+        for session in [None, Some(SESSION)] {
+            for host in [Host::Graphics, Host::Multiplexer, Host::Other] {
+                for detached in [false, true] {
+                    assert!(target(session, Some(BLOCK), host, detached).is_none());
+                    assert!(!inside_with(session.map(Into::into), Some(BLOCK.into()), host, detached));
+                }
+            }
+            assert!(target(session, Some(BLOCK), Host::Unknown, false).is_none());
+            assert!(!inside_with(session.map(Into::into), Some(BLOCK.into()), Host::Unknown, false));
+        }
+        for (host, detached) in [(Host::Rex, false), (Host::Rex, true), (Host::Unknown, true)] {
+            assert!(target(None, None, host, detached).is_none());
+            assert!(!inside_with(None, None, host, detached));
+        }
     }
 
     #[test]

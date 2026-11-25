@@ -535,7 +535,7 @@ fn leaving_only_undoes_the_trial_after_an_exit_choice_and_stays_on_undo_failure(
     .unwrap();
     fs::set_permissions(rex, fs::Permissions::from_mode(0o700)).unwrap();
     let f = Fixture::folder();
-    let target = rex::Target { session: "session:test".into(), block: "block:shell".into() };
+    let target = rex::Target { session: Some("session:test".into()), block: "block:shell".into() };
     let mut pane = Setup::new(Some(store(&f)), true, Some(target), None, |_| panic!("discard never saves"));
     choose(&mut pane, Row::Tree);
     pane.key(Key::Char('a'));

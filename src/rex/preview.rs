@@ -69,7 +69,9 @@ fn executable(project: &Project, path: &Path) -> Option<PathBuf> {
 struct Rex {
     exe: PathBuf,
     project: Project,
-    session: String,
+    /// Known from the start only where an older Rex named it. Otherwise Rex says which
+    /// session holds the caller's block, in the same request that finds its tab.
+    session: Option<String>,
     caller: String,
     endpoint: Option<String>,
     uid: u32,
@@ -78,7 +80,10 @@ struct Rex {
 impl Rex {
     fn local(root: &Path) -> Option<Self> {
         let target = Target::current()?;
-        let session = exact_id(&target.session, "session:")?.to_owned();
+        let session = match &target.session {
+            Some(session) => Some(exact_id(session, "session:")?.to_owned()),
+            None => None,
+        };
         let caller = exact_block(&target.block)?.to_owned();
         let project = Project::open(root)?;
         let exe = trusted_rex(root)?;
@@ -112,12 +117,15 @@ impl Rex {
         if let Some(endpoint) = &self.endpoint {
             command.args(["-S", endpoint]);
         }
-        command.args(["--timeout", "1s", "do", "-", "-s", &self.session, "-b", &self.caller, "--args", args]);
+        // A whole block ID selects the session that holds it.
+        let session = self.session.as_deref().unwrap_or(&self.caller);
+        command.args(["--timeout", "1s", "do", "-", "-s", session, "-b", &self.caller, "--args", args]);
         scripted(&mut command, include_str!("preview.lua"), WAIT)
     }
 
     fn arguments(&self) -> String {
-        format!(r#"{{"uid":{},"session":"{}","caller":"{}""#, self.uid, self.session, self.caller)
+        let session = self.session.as_ref().map_or_else(String::new, |id| format!(r#""session":"{id}","#));
+        format!(r#"{{"uid":{},{session}"caller":"{}""#, self.uid, self.caller)
     }
 }
 
@@ -137,16 +145,24 @@ fn source(encoded: Option<&str>) -> Option<String> {
     Some(format!(r#"{{"session":"{session}","window":"{window}","block":"{block}","explicit":{explicit}}}"#))
 }
 
-fn tab(reply: &str) -> Option<(&str, &str)> {
+/// The server, tab and session the first request found the caller in.
+struct Tab<'a> {
+    instance: &'a str,
+    window: &'a str,
+    session: &'a str,
+}
+
+fn tab(reply: &str) -> Option<Tab<'_>> {
     let mut words = reply.split_ascii_whitespace();
     let instance = words.next()?;
     let window = exact_id(OsStr::new(words.next()?), "window:")?;
-    (uuid(instance) && words.next().is_none()).then_some((instance, window))
+    let session = exact_id(OsStr::new(words.next()?), "session:")?;
+    (uuid(instance) && words.next().is_none()).then_some(Tab { instance, window, session })
 }
 
 /// The private, per-user ownership ledger is only meaningful until Rex restarts.
 /// A lock serializes requests from independent Milo processes in the same tab.
-fn record(rex: &Rex, instance: &str, window: &str) -> Result<File, &'static str> {
+fn record(rex: &Rex, tab: &Tab<'_>) -> Result<File, &'static str> {
     let cwd = Project::open(Path::new(".")).ok_or(RECORD)?;
     // A login shell and a floating Reader can have different TMPDIRs.
     // Use one base so independent Milo processes share the tab's lock and ID.
@@ -170,7 +186,7 @@ fn record(rex: &Rex, instance: &str, window: &str) -> Result<File, &'static str>
     if meta.uid() != rex.uid || meta.mode() & 0o077 != 0 {
         return Err(RECORD);
     }
-    let name = CString::new(format!("{instance}-{}-{window}", rex.session)).map_err(|_| RECORD)?;
+    let name = CString::new(format!("{}-{}-{}", tab.instance, tab.session, tab.window)).map_err(|_| RECORD)?;
     let file = fs_ops::open_at(&dir, &name, libc::O_RDWR | libc::O_CREAT, 0o600).map_err(|_| RECORD)?;
     let meta = file.metadata().map_err(|_| RECORD)?;
     if !meta.is_file() || meta.uid() != rex.uid || meta.nlink() != 1 || meta.mode() & 0o077 != 0 {
@@ -189,14 +205,20 @@ pub(crate) fn available(root: &Path) -> bool {
 }
 
 pub(crate) fn launch(root: &Path, tool: &Path, file: &Path) -> Result<(), &'static str> {
-    let rex = Rex::local(root).ok_or(CONTEXT)?;
+    let mut rex = Rex::local(root).ok_or(CONTEXT)?;
     let tool = executable(&rex.project, tool).ok_or("Could not find a trusted tkmp executable.")?;
     let env = executable(&rex.project, Path::new("/usr/bin/env")).ok_or(FAILED)?;
     let file = file.to_str().filter(|_| file.is_absolute()).ok_or(FAILED)?;
+    let reply = rex.request(&format!("{}}}", rex.arguments())).ok_or(CONTEXT)?;
+    let tab = tab(&reply).ok_or(CONTEXT)?;
+    let (instance, window) = (tab.instance, tab.window);
+    if rex.session.as_deref().is_some_and(|session| session != tab.session) {
+        return Err(CONTEXT);
+    }
+    let mut record = record(&rex, &tab)?;
+    // The second request names the session, so a pane moved to another one meanwhile is refused.
+    rex.session = Some(tab.session.to_owned());
     let base = rex.arguments();
-    let reply = rex.request(&format!("{base}}}")).ok_or(CONTEXT)?;
-    let (instance, window) = tab(&reply).ok_or(CONTEXT)?;
-    let mut record = record(&rex, instance, window)?;
     let mut bytes = [0; 64];
     let len = record.read(&mut bytes).map_err(|_| RECORD)?;
     let old = exact_block(OsStr::from_bytes(&bytes[..len])).unwrap_or("");
@@ -236,8 +258,13 @@ mod tests {
         assert!(source(Some(&framed.replace(BLOCK, "block:1fd7"))).is_none());
         assert!(source(Some(&framed.replace("shell", "focus"))).is_none());
         assert!(source(Some(&format!("{framed} extra"))).is_none());
-        assert_eq!(tab(&format!("{SERVER}\t{WINDOW}")), Some((SERVER, WINDOW)));
-        assert_eq!(tab(&format!("{SERVER} {BLOCK}")), None);
-        assert_eq!(tab(&format!("{SERVER} {WINDOW} {BLOCK}")), None);
+        let reply = format!("{SERVER}\t{WINDOW}\t{SESSION}");
+        let found = tab(&reply).unwrap();
+        assert_eq!((found.instance, found.window, found.session), (SERVER, WINDOW, SESSION));
+        // The session must be a literal ID: a block ID only selects one.
+        assert!(tab(&format!("{SERVER} {WINDOW} {BLOCK}")).is_none());
+        assert!(tab(&format!("{SERVER} {WINDOW}")).is_none());
+        assert!(tab(&format!("{SERVER} {BLOCK} {SESSION}")).is_none());
+        assert!(tab(&format!("{SERVER} {WINDOW} {SESSION} extra")).is_none());
     }
 }
