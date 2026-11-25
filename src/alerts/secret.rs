@@ -73,7 +73,8 @@ impl Store {
             Self::Keychain { path, service } => {
                 let mut find = Command::new(SECURITY);
                 find.args(["find-generic-password", "-s", service.as_ref(), "-a", destination.name(), "-w"]);
-                let output = find.args(path).stdin(Stdio::null()).stderr(Stdio::null()).output()?;
+                find.args(path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+                let output = fs_ops::spawn(&mut find)?.wait_with_output()?;
                 match output.status.code() {
                     Some(0) => String::from_utf8(output.stdout)
                         .map(|secret| Some(secret.trim_end().to_owned()))
@@ -104,12 +105,9 @@ impl Store {
                     "add-generic-password -U -s {service} -a {} -l \"Milo alert mirroring\" -w {secret}{keychain}\n",
                     destination.name()
                 );
-                let mut security = Command::new(SECURITY)
-                    .arg("-i")
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()?;
+                let mut security = Command::new(SECURITY);
+                security.arg("-i").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+                let mut security = fs_ops::spawn(&mut security)?;
                 let written = security.stdin.take().map(|mut input| input.write_all(add.as_bytes()));
                 security.wait()?;
                 written.transpose()?;
@@ -134,8 +132,8 @@ impl Store {
             Self::Keychain { path, service } => {
                 let mut delete = Command::new(SECURITY);
                 delete.args(["delete-generic-password", "-s", service.as_ref(), "-a", destination.name()]);
-                let status =
-                    delete.args(path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status()?;
+                delete.args(path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+                let status = fs_ops::spawn(&mut delete)?.wait()?;
                 match status.code() {
                     Some(0 | NOT_FOUND) => Ok(()),
                     _ => Err(io::Error::other("the Keychain did not answer")),

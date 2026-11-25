@@ -504,6 +504,27 @@ impl Lab {
         }
     }
 
+    /// A program run from `block` with no terminal, as a coding agent's shell there would
+    /// run it: with the variables this Rex gives a terminal and nothing else of one.
+    /// Releases before preview.23 name the session as well as the block, so a lab
+    /// terminal is asked which it was given.
+    fn in_pane(&self, program: &Path, session: &str, block: &str) -> Command {
+        let seen = self.root.join("pane-variables");
+        let print = format!("printf '%s' \"${{REX_SESSION:+session }}${{REX_BLOCK:+block}}\" >'{}'", seen.display());
+        let made = self.rex(&["run", "-s", session, "--focus=false", "--json", "--wait", "--", "sh", "-c", &print]);
+        let _ = self.rex_output(&["window", "close", "-s", session, &id(&made, "window_id")]);
+        let mut command = self.command(program);
+        command.env("REX_BLOCK", block);
+        match self.read("pane-variables").as_str() {
+            "block" => {}
+            "session block" => {
+                command.env("REX_SESSION", session);
+            }
+            other => panic!("a lab terminal has neither Rex variable Milo reads: {other:?}"),
+        }
+        command
+    }
+
     /// The process ID and command line of each layout listener serving the lab.
     fn listeners(&self) -> Vec<(String, String)> {
         let processes = self.command("ps").args(["-axww", "-o", "pid=,command="]).output().unwrap();
@@ -826,14 +847,7 @@ impl Scene {
                 tab.panes.iter().map(|pane| &pane.block).eq(view.tab(restored).panes.iter().map(|pane| &pane.block))
             );
         };
-        let report = lab
-            .command(&lab.milo)
-            .current_dir(second)
-            .env("REX_SESSION", session)
-            .env("REX_BLOCK", &shell)
-            .arg("doctor")
-            .output()
-            .unwrap();
+        let report = lab.in_pane(&lab.milo, session, &shell).current_dir(second).arg("doctor").output().unwrap();
         let report = String::from_utf8(report.stdout).unwrap();
         assert!(report.contains("Live sidebar: restored shells, not Milo panes."), "{report}");
         let arrange = lab.rex_output(&["do", "milo_layout", "-s", session, "-b", &shell]).unwrap();
@@ -1049,6 +1063,9 @@ fn a_floating_reader_holds_the_outlines_files_as_tabs_and_keeps_their_unsaved_ed
 #[path = "rex_lab/file_actions.rs"]
 mod file_actions;
 
+#[path = "rex_lab/output_files.rs"]
+mod output_files;
+
 #[cfg(target_os = "macos")]
 #[path = "rex_lab/rich_reader.rs"]
 mod rich_reader;
@@ -1090,10 +1107,8 @@ fn a_floating_review_marks_only_the_handed_over_edits_and_says_when_it_cannot() 
     let shell = lab.view().tab(&tab).panes[0].block.clone();
     // What an agent's shell in that tab would run: no terminal, only the pane's Rex variables.
     let output = lab
-        .command(&lab.milo)
+        .in_pane(&lab.milo, &session, &shell)
         .current_dir(&dir)
-        .env("REX_SESSION", &session)
-        .env("REX_BLOCK", &shell)
         .args(["review", patch.to_str().unwrap(), "--from", "the agent", "--float"])
         .output()
         .unwrap();
@@ -1139,6 +1154,230 @@ fn a_floating_review_marks_only_the_handed_over_edits_and_says_when_it_cannot() 
     assert!(soon(|| pane("Patch review").is_none()), "{:?}", lab.view());
     assert_eq!(fs::read_to_string(dir.join("app.txt")).unwrap(), now.replace("four, by the agent", "four, rewritten"));
     assert!(!lab.root.join("home/.local/state/milo").exists(), "the review kept something in Milo's state folder");
+}
+
+/// A person takes notes on a patch in a tab of their own. The notes leave
+/// through that tab's clipboard and nowhere else: not into the pane that holds
+/// an unsent draft, nor into a pane that took a closed one's place and has focus.
+#[test]
+#[ignore = "needs an installed Rex; starts a disposable server"]
+fn review_notes_are_copied_out_and_never_typed_into_another_pane() {
+    let lab = Lab::start();
+    let dir = lab.root.join("notes");
+    fs::create_dir_all(&dir).unwrap();
+    lab.git(&dir, &["init", "-q", "-b", "main"]);
+    fs::write(dir.join("app.txt"), "one\ntwo\nthree\nfour\nfive\nsix\n").unwrap();
+    lab.git(&dir, &["add", "-A"]);
+    lab.git(&dir, &["commit", "-q", "-m", "base"]);
+    let now = "one\ntwo\nthree\nfour, by the agent\nfive\nsix\n";
+    fs::write(dir.join("app.txt"), now).unwrap();
+    let patch = lab.root.join("edits.patch");
+    fs::write(&patch, "--- a/app.txt\n+++ b/app.txt\n@@ -3,3 +3,3 @@\n three\n-four\n+four, by the agent\n five\n")
+        .unwrap();
+
+    let [session, agent_tab] = lab.new_session("notes", "agent", &dir);
+    let shell_of = |tab: &str| lab.view().tab(tab).panes[0].block.clone();
+    let screen = |block: &str| lab.rex(&["capture", "-s", &session, "-b", block, "--trim"]);
+    let drafted = |block: &str, draft: &str| {
+        // A shell still starting would echo the words twice: once as typed ahead, once at its prompt.
+        let prompt = || screen(block).lines().last().is_some_and(|line| line.ends_with('%'));
+        assert!(soon(prompt), "{}", screen(block));
+        lab.rex(&["send", "-s", &session, "-b", block, draft]);
+        assert!(soon(|| screen(block).contains(draft)), "{}", screen(block));
+        screen(block)
+    };
+    // Where the agent would be: a prompt with words typed and not sent.
+    let agent = shell_of(&agent_tab);
+    let before = drafted(&agent, "half a prompt, not sent");
+
+    let made = lab.rex(&[
+        "window",
+        "new",
+        "Review",
+        "-s",
+        &session,
+        "-c",
+        dir.to_str().unwrap(),
+        "--json",
+        "--",
+        lab.milo.to_str().unwrap(),
+        "review",
+        patch.to_str().unwrap(),
+        "--from",
+        "the agent",
+    ]);
+    let review = id(&made, "block_ids");
+    let shows =
+        |text: &str| assert!(soon(|| screen(&review).contains(text)), "expected {text:?} on:\n{}", screen(&review));
+    let keys = |keys: &[&str]| {
+        lab.rex(&[["send-key", "-s", session.as_str(), "-b", review.as_str()].as_slice(), keys].concat());
+    };
+    let write = |text: &str| lab.rex(&["send", "-s", &session, "-b", &review, text]);
+    let clipboard = |copy: &str| {
+        let asked = format!("{{\"id\":{copy}}}");
+        lab.rex(&["block", "call", "-s", &session, "-b", &review, "clipboard_read", &asked])
+    };
+    shows("patch from the agent");
+
+    // One note, copied at once: it reaches the review's own clipboard and no pane.
+    keys(&["i"]);
+    shows("Enter write");
+    keys(&["enter"]);
+    shows("Note on app.txt, removed line 4 (old numbering)");
+    write("Why four?");
+    shows("Why four?");
+    keys(&["ctrl+y"]);
+    shows("Copied this note");
+    let first = clipboard("1");
+    assert!(
+        first.contains("app.txt, removed line 4 (old numbering):") && first.contains("4 - four\\nWhy four?"),
+        "{first}"
+    );
+    assert_eq!(screen(&agent), before, "the pane with a draft changed");
+
+    // That pane closes and another takes its place, with a draft of its own and the focus.
+    lab.close_tab(&session, &agent_tab);
+    let replacement_tab = lab.new_tab(&session, &dir);
+    let replacement = shell_of(&replacement_tab);
+    lab.rex(&["focus", "-s", &session, &replacement_tab]);
+    let before = drafted(&replacement, "someone else is typing here");
+
+    // Two notes kept, then copied as one message. Still nothing is typed anywhere.
+    for (down, text) in [(1, "Say who."), (2, "And this?")] {
+        keys(&["i"]);
+        shows("Enter write");
+        keys(&vec!["down"; down]);
+        keys(&["enter"]);
+        shows("Note on app.txt, line");
+        write(text);
+        shows(text);
+        keys(&["enter"]);
+        shows("Kept for review");
+    }
+    keys(&["p"]);
+    shows("All 2 waiting notes, as one message");
+    keys(&["y"]);
+    shows("Copied the waiting notes as one message");
+    let batch = clipboard("2");
+    assert!(batch.contains("Review notes (2)") && batch.contains("Say who.") && batch.contains("And this?"), "{batch}");
+    assert!(!batch.contains("Why four?"), "the note copied earlier was copied again: {batch}");
+    assert_eq!(screen(&replacement), before, "the pane that took the closed one's place changed");
+
+    // Everything was copied, so the review closes without asking. It wrote nothing.
+    keys(&["q"]);
+    shows("i note · p notes");
+    keys(&["q"]);
+    assert!(soon(|| !lab.rex(&["block", "ls", "-s", &session, "--json"]).contains(&review)), "the review stayed open");
+    assert_eq!(fs::read_to_string(dir.join("app.txt")).unwrap(), now);
+    assert!(!lab.root.join("home/.local/state/milo").exists(), "the review kept something in Milo's state folder");
+}
+
+/// `milo task new` and the Rex action start an agent in a worktree and a
+/// session of its own, on a real server. The agent is a stand-in that records
+/// how it was started and stays, as an interactive agent does. A real app is
+/// needed to answer the action's questions, so here every choice is passed.
+#[test]
+#[ignore = "needs an installed Rex; starts a disposable server"]
+fn a_task_starts_its_agent_in_a_background_session_from_the_command_line_and_the_rex_action() {
+    let lab = Lab::start();
+    let [first, _] = lab.worktrees();
+    let [session, tab] = lab.new_session("lab", "caller", &first);
+    lab.check_terminals(&session);
+    // The server's settings hold the shipped actions under the values a save writes above them.
+    let above = format!(
+        "local column_width, outline_share, usage_rows = 0.2, 0.7, 2\nlocal chosen = {{ outline = true }}\n\
+         local milo = \"{}\"\n",
+        lab.milo.display()
+    );
+    let actions = include_str!("../src/setup/actions.lua");
+    fs::create_dir_all(lab.root.join("home/.config/rex")).unwrap();
+    fs::write(lab.root.join("home/.config/rex/init.lua"), above + actions).unwrap();
+    lab.rex(&["config", "reload"]);
+    let ran = |branch: &str| lab.root.join(format!("ran-{branch}"));
+    let agent = format!(
+        "#!/bin/sh\n{{ pwd; printf '%s\\n' \"$#\"; printf '%s\\n' \"$@\"; }} >'{}'/ran-\"$(basename \"$PWD\")\"\nexec sleep 600\n",
+        lab.root.display()
+    );
+    let program = lab.root.join("bin/codex");
+    fs::write(&program, agent).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    let shell = lab.view().tab(&tab).panes.iter().find(|pane| pane.program == "shell").unwrap().block.clone();
+    let front = || {
+        let caller = lab.rex(&["session", "inspect", &session, "--json"]);
+        (id(&caller, "active_window_id"), id(&caller, "focused_block_id"))
+    };
+    let before = front();
+    let sessions = || lab.rex(&["ls", "--json"]).matches("\"session_id\"").count();
+    let existing = sessions();
+    let prompt = "--print $(touch pwned); `touch pwned` \"q\" 'q' | & ;";
+    let started = |tree: &Path, id: &str, label: &str| {
+        let record = ran(tree.file_name().unwrap().to_str().unwrap());
+        assert!(soon(|| record.is_file()), "the agent did not start in {}", tree.display());
+        let expected = format!("{}\n2\n--\n{prompt}\n", tree.display());
+        assert!(soon(|| fs::read_to_string(&record).unwrap() == expected), "{:?}", fs::read_to_string(&record));
+        let made = lab.rex(&["session", "inspect", id, "--json"]);
+        assert!(made.contains(&format!("\"label\": \"{label}\"")), "{made}");
+        assert!(!tree.join("pwned").exists() && !first.join("pwned").exists());
+    };
+
+    // From a shell in the project, with no terminal of Rex's own to lean on.
+    let output = lab
+        .command(&lab.milo)
+        .current_dir(&first)
+        .args(["task", "new", "--agent", "codex", "--branch", "task/one", "--base", "main", "--prompt", prompt])
+        .output()
+        .unwrap();
+    let said = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success(), "{said}{}", String::from_utf8_lossy(&output.stderr));
+    let one = lab.root.join("first-worktrees/task-one");
+    let (worktree, made) = said.trim_end().split_once('\n').unwrap();
+    assert_eq!(worktree, format!("worktree {}", one.display()));
+    started(&one, made.strip_prefix("session ").unwrap(), "first/task-one");
+
+    // The same launch through the installed action, run by the server as the command palette runs it.
+    let reply = lab.rex(&[
+        "do",
+        "milo_new_agent_task",
+        "-s",
+        &session,
+        "-b",
+        &shell,
+        "--json",
+        "agent=codex",
+        "branch=task/two",
+        "base=main",
+        &format!("prompt={prompt}"),
+    ]);
+    let two = lab.root.join("first-worktrees/task-two");
+    assert!(reply.contains(&format!("\"worktree\": \"{}\"", two.display())), "{reply}");
+    started(&two, &id(&reply, "session_id"), "first/task-two");
+
+    // Neither launch moved the person: the caller's tab and pane are still in front of its session.
+    assert_eq!(front(), before);
+    assert_eq!(sessions(), existing + 2);
+    lab.git(&first, &["diff", "--quiet", "HEAD", "--", "shared.txt"]);
+    let branch = lab.command("git").current_dir(&first).args(["branch", "--show-current"]).output().unwrap();
+    assert_eq!(String::from_utf8(branch.stdout).unwrap().trim(), "main");
+
+    // An agent that is not installed, and a question nobody can be asked, each end with nothing made.
+    let action = |args: &[&str]| {
+        let base = ["do", "milo_new_agent_task", "-s", session.as_str(), "-b", shell.as_str()];
+        let output = lab.rex_output(&[&base[..], args].concat()).unwrap();
+        assert!(!output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        String::from_utf8(output.stderr).unwrap()
+    };
+    let missing = action(&["agent=claude", "branch=task/three", "base=main", "prompt=go on"]);
+    assert!(
+        missing.contains("Claude Code (claude) is not installed on this computer; nothing was created"),
+        "{missing}"
+    );
+    let unasked = action(&["agent=codex"]);
+    assert!(unasked.contains("Answer in a connected Rex app"), "{unasked}");
+    assert_eq!(sessions(), existing + 2);
+    let mut trees: Vec<_> =
+        fs::read_dir(lab.root.join("first-worktrees")).unwrap().map(|e| e.unwrap().file_name()).collect();
+    trees.sort();
+    assert_eq!(trees, ["task-one", "task-two"]);
 }
 
 #[path = "rex_lab/tab_sets.rs"]

@@ -57,7 +57,11 @@ mod mac {
     }
 
     enum Route<'a> {
-        Rex { session: &'a OsStr, block: &'a OsStr },
+        /// An older Rex names the session too. A newer one leaves it for Rex to report.
+        Rex {
+            session: Option<&'a OsStr>,
+            block: &'a OsStr,
+        },
         Standalone,
     }
 
@@ -69,9 +73,9 @@ mod mac {
         rex_server: bool,
     ) -> Result<Route<'a>, &'static str> {
         match host {
-            Host::Rex => match (session, block) {
-                (Some(session), Some(block)) => Ok(Route::Rex { session, block }),
-                _ => Err(REX_UNCONFIRMED),
+            Host::Rex => match block {
+                Some(block) => Ok(Route::Rex { session, block }),
+                None => Err(REX_UNCONFIRMED),
             },
             Host::Multiplexer => Err(MULTIPLEXER),
             // Launch Services may pass the launching process's Rex environment to a different
@@ -229,14 +233,19 @@ mod mac {
         }
 
         #[test]
-        fn rex_branding_requires_both_ids_and_never_falls_back() {
+        fn rex_branding_requires_the_callers_block_and_never_falls_back() {
             let ids = (Some(OsStr::new(SESSION)), Some(OsStr::new(BLOCK)));
-            for (session, block) in [(None, None), (ids.0, None), (None, ids.1)] {
-                assert!(matches!(route(Host::Rex, None, session, block, false), Err(REX_UNCONFIRMED)));
+            for session in [None, ids.0] {
+                assert!(matches!(route(Host::Rex, None, session, None, false), Err(REX_UNCONFIRMED)));
             }
             assert!(matches!(
                 route(Host::Rex, None, ids.0, ids.1, true),
-                Ok(Route::Rex { session, block }) if session == SESSION && block == BLOCK
+                Ok(Route::Rex { session: Some(session), block }) if session == SESSION && block == BLOCK
+            ));
+            // Rex preview.23 and later name the block alone.
+            assert!(matches!(
+                route(Host::Rex, None, None, ids.1, true),
+                Ok(Route::Rex { session: None, block }) if block == BLOCK
             ));
         }
 
@@ -247,6 +256,7 @@ mod mac {
                     route(host, None, Some(OsStr::new(SESSION)), Some(OsStr::new(BLOCK)), false),
                     Err(REX_UNCONFIRMED)
                 ));
+                assert!(matches!(route(host, None, None, Some(OsStr::new(BLOCK)), false), Err(REX_UNCONFIRMED)));
                 assert!(matches!(route(host, None, None, None, true), Err(REX_UNCONFIRMED)));
             }
         }

@@ -56,7 +56,12 @@ fn rex_command(exe: &OsStr, wait: &str) -> Command {
 /// A `rex` that never starts a server. With a host, the session and pane of
 /// this terminal are left out: they belong to another server.
 fn rex(host: Option<&OsStr>, wait: &str) -> Command {
-    let mut command = rex_command(OsStr::new("rex"), wait);
+    rex_from(OsStr::new("rex"), host, wait)
+}
+
+/// As `rex`, for a caller that has found which `rex` program to run.
+pub(super) fn rex_from(exe: &OsStr, host: Option<&OsStr>, wait: &str) -> Command {
+    let mut command = rex_command(exe, wait);
     if let Some(host) = host {
         command.arg("-S").arg(host).env_remove("REX_SESSION").env_remove("REX_BLOCK").env_remove("REX_SERVER");
     }
@@ -146,8 +151,10 @@ fn native_connection(principal: Value<'_>, uid: u64) -> Option<NativeConnection>
     }
 }
 
+/// The session the local server says holds the caller's block. A session ID the
+/// terminal inherited from an older Rex must be that one.
 #[cfg(any(target_os = "macos", test))]
-fn native_identity(output: &[u8], session: &str, block: &str, uid: u64) -> Result<(), &'static str> {
+fn native_identity(output: &[u8], session: Option<&str>, block: &str, uid: u64) -> Result<String, &'static str> {
     let [principal, endpoint, session_id, block_id] =
         Value::parse(output).ok_or(NATIVE_UNKNOWN)?.fields(["principal", "endpoint", "session_id", "block_id"]);
     match native_connection(principal.ok_or(NATIVE_UNKNOWN)?, uid).ok_or(NATIVE_UNKNOWN)? {
@@ -158,8 +165,10 @@ fn native_identity(output: &[u8], session: &str, block: &str, uid: u64) -> Resul
     let unix_socket = endpoint
         .strip_prefix("unix:///")
         .is_some_and(|path| !path.is_empty() && !path.bytes().any(|b| b.is_ascii_control()));
-    if unix_socket && session_id.is_some_and(|id| id.is(session)) && block_id.is_some_and(|id| id.is(block)) {
-        Ok(())
+    let found = session_id.and_then(|id| id.string(44)).ok_or(NATIVE_UNKNOWN)?;
+    let whole = exact_id(OsStr::new(&*found), "session:").is_some();
+    if unix_socket && whole && session.is_none_or(|id| id == found) && block_id.is_some_and(|id| id.is(block)) {
+        Ok(found.into_owned())
     } else {
         Err(NATIVE_UNKNOWN)
     }
@@ -226,10 +235,10 @@ fn native_program(root: &Path, cwd: &Path, parent: Option<&Path>, path: &OsStr) 
 /// Check the same session and pane the local CLI sees, then count the apps
 /// attached to that session. The web editor's server-wide viewer hint is not an authorization check.
 #[cfg(target_os = "macos")]
-pub(crate) fn native_app(root: &Path, session: &OsStr, block: &OsStr) -> Result<(), &'static str> {
+pub(crate) fn native_app(root: &Path, session: Option<&OsStr>, block: &OsStr) -> Result<(), &'static str> {
     use std::time::Instant;
 
-    let session = exact_id(session, "session:").ok_or(NATIVE_UNKNOWN)?;
+    let session = session.map(|id| exact_id(id, "session:").ok_or(NATIVE_UNKNOWN)).transpose()?;
     let block = exact_id(block, "block:").ok_or(NATIVE_UNKNOWN)?;
     let parent = super::parent_program();
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -243,9 +252,9 @@ pub(crate) fn native_app(root: &Path, session: &OsStr, block: &OsStr) -> Result<
     // SAFETY: Getting the current effective user ID touches no memory.
     let uid = u64::from(unsafe { libc::geteuid() });
     let who = probe(&["whoami", "--json"]).ok_or(NATIVE_UNKNOWN)?;
-    native_identity(&who, session, block, uid)?;
-    let clients = probe(&["client", "ls", "-s", session, "--json"]).ok_or(NATIVE_UNKNOWN)?;
-    native_clients(&clients, session, uid).ok_or(NATIVE_UNKNOWN)?
+    let session = native_identity(&who, session, block, uid)?;
+    let clients = probe(&["client", "ls", "-s", &session, "--json"]).ok_or(NATIVE_UNKNOWN)?;
+    native_clients(&clients, &session, uid).ok_or(NATIVE_UNKNOWN)?
 }
 
 /// The session a host runs its settings editor in, and that editor's terminal.
@@ -255,7 +264,7 @@ pub(crate) struct RemoteEditor {
     block: String,
 }
 
-fn parse_created(output: &[u8]) -> Option<(String, String)> {
+pub(super) fn parse_created(output: &[u8]) -> Option<(String, String)> {
     let [session, windows] = Value::parse(output)?.fields(["session_id", "initial_windows"]);
     let [blocks] = windows?.elements()?.next()?.fields(["block_ids"]);
     let session = session?.string(64)?;
@@ -440,9 +449,18 @@ mod tests {
         let reply = format!(
             r#"{{"principal":{PEER},"endpoint":"unix:///tmp/rex.sock","session_id":"{SESSION}","block_id":"{BLOCK}"}}"#
         );
-        assert_eq!(native_identity(reply.as_bytes(), SESSION, BLOCK, 501), Ok(()));
+        let identity = |reply: &str| native_identity(reply.as_bytes(), Some(SESSION), BLOCK, 501);
+        assert_eq!(identity(&reply).as_deref(), Ok(SESSION));
+        // A pane named by its block alone learns its session from the same reply.
+        assert_eq!(native_identity(reply.as_bytes(), None, BLOCK, 501).as_deref(), Ok(SESSION));
+        for partial in ["session:5bd5", "milo", BLOCK] {
+            let reply = reply.replace(SESSION, partial);
+            assert_eq!(native_identity(reply.as_bytes(), None, BLOCK, 501), Err(NATIVE_UNKNOWN), "{partial}");
+        }
+        let other = reply.replace(SESSION, "session:01a1fe07-6593-7bcb-a091-bfac0d945bd6");
+        assert_eq!(identity(&other), Err(NATIVE_UNKNOWN));
         let remote = reply.replace(PEER, REMOTE);
-        assert_eq!(native_identity(remote.as_bytes(), SESSION, BLOCK, 501), Err(NATIVE_REMOTE));
+        assert_eq!(identity(&remote), Err(NATIVE_REMOTE));
         for bad in [
             reply.replace(SESSION, "session:5bd5"),
             reply.replace(BLOCK, "block:737c"),
@@ -452,7 +470,7 @@ mod tests {
             reply.replace("501", "\"501\""),
             reply.replace("\"peer\"", "null"),
         ] {
-            assert_eq!(native_identity(bad.as_bytes(), SESSION, BLOCK, 501), Err(NATIVE_UNKNOWN), "{bad}");
+            assert_eq!(identity(&bad), Err(NATIVE_UNKNOWN), "{bad}");
         }
     }
 

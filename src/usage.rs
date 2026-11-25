@@ -11,7 +11,7 @@ mod opencode;
 mod signature;
 mod sqlite;
 mod status;
-mod time;
+pub(crate) mod time;
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};

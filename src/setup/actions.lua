@@ -17,8 +17,8 @@ local source = debug and debug.getinfo and debug.getinfo(1, "S").source or ""
 local config_home = source:match("^@(/.*)/milo/rex%.lua$")
 if source == "@/milo/rex.lua" then config_home = "/" end
 
-local function profile_exec(argv, timeout)
-  local options = { timeout = timeout }
+local function profile_exec(argv, timeout, stdin)
+  local options = { timeout = timeout, stdin = stdin }
   if config_home then options.env = { XDG_CONFIG_HOME = config_home } end
   return rex.exec(argv, options)
 end
@@ -29,6 +29,16 @@ local errors = {
   no_tab = "Could not find this Rex tab.",
   zoomed = "Unzoom the tab first.",
   trial = "Finish or undo the Milo setup trial in this tab first.",
+  no_terminal = "Focus the terminal whose output names the file, then try again.",
+  milo_pane = "This is a Milo pane. Focus the terminal whose output names the file, then try again.",
+  other_host = "This pane's output may name files on another computer, so Milo opened nothing.",
+  no_folder = "Milo could not tell which folder this pane is working in, so it opened nothing.",
+  no_output = "Milo could not read this pane's recent output.",
+  no_files = "No project files found in this pane's recent output.",
+  outside_only = "This pane's recent output names only files outside its worktree, so Milo opened nothing.",
+  not_offered = "That file is not in this pane's recent output.",
+  no_picker = "Choose a file in a connected Rex app, or pass choice.",
+  no_reader = "Rex could not open the reader.",
 }
 
 local function raise(why)
@@ -1012,6 +1022,295 @@ local function name_session(ctx)
   return "Named this session " .. label .. "."
 end
 rex.action{ name = "milo_name_session", title = "Milo: Name Session from This Project", run = name_session }
+
+-- How much of a pane's most recent output is read when someone asks to open a
+-- file from it. Nothing is read before that, and nothing is kept afterwards.
+local output_bytes = 256 * 1024
+-- Programs whose output comes from another computer, where the same path is another file.
+local remote_programs = { ssh = true, slogin = true, autossh = true, mosh = true, ["mosh-client"] = true,
+  telnet = true, et = true }
+
+local function runs_milo(process)
+  local child = process and process.child
+  return child and (child.path == milo or child.invoked_path == milo) and child
+end
+
+-- The terminal the action was run in, and the folder its program works in.
+-- Refuse rather than guess whose files its output names.
+local function output_source(ctx)
+  local window = tab(ctx)
+  if not window then raise("no_tab") end
+  local block, layer = find_block(window, ctx.block_id)
+  if not block or block.creator_name ~= terminal then raise("no_terminal") end
+  local process = terminal_call(ctx, block.block_id, "process")
+  if (block.label or ""):sub(1, 5) == "milo:" or runs_milo(process) then raise("milo_pane") end
+  local server = rex.call("server.status")
+  local host = server and server.host_id
+  if type(host) ~= "string" or host == "" or block.host_id ~= host then raise("other_host") end
+  local front = process and (process.foreground or process.child)
+  if not front then raise("no_folder") end
+  if remote_programs[front.name] then raise("other_host") end
+  for _, parent in ipairs(process.ancestors or {}) do
+    if remote_programs[parent.name] then raise("other_host") end
+  end
+  if type(front.cwd) ~= "string" or front.cwd:sub(1, 1) ~= "/" then raise("no_folder") end
+  return { block = block.block_id, cwd = front.cwd, tiled = layer.kind == "tiled" }
+end
+
+-- The end of what the terminal shows and has scrolled, as plain text. Rex
+-- returns the start of long output first, so its end is read from the result
+-- Rex kept.
+local function recent_output(ctx, block)
+  local function ask(method, args)
+    return rex.call(terminal .. "." .. method, { session_id = ctx.session_id, block_id = block, args = args })
+  end
+  local reply = ask("format", { format = "text", trim = true, unwrap = true, max_bytes = output_bytes })
+  if not reply or type(reply.content) ~= "string" then raise("no_output") end
+  if not reply.id then return reply.content end
+  local total = tonumber(reply.total)
+  if not total then raise("no_output") end
+  local offset, parts, size, whole = math.max(0, total - output_bytes), {}, 0, false
+  for _ = 1, 64 do
+    local part = ask("blob_read", { id = reply.id, offset = offset + size, max_bytes = output_bytes })
+    if not part or type(part.data) ~= "string" then raise("no_output") end
+    parts[#parts + 1], size, whole = part.data, size + #part.data, part.eof
+    if whole or #part.data == 0 then break end
+  end
+  -- Without its end, the output would be missing what was printed last.
+  if not whole then raise("no_output") end
+  local text = table.concat(parts)
+  -- The read may begin partway through a line.
+  if offset > 0 then text = text:match("^[^\n]*\n(.*)$") or "" end
+  return text
+end
+
+-- The floating terminals of a tab that are not Milo's rails or peeks. Rex does
+-- not say on every system what runs in one, so Milo asks each: only a reader
+-- listens, and only one opened for the same worktree takes the file.
+local function floating_terminals(window)
+  local found = {}
+  for _, layer in ipairs(window.layers or {}) do
+    for _, block in ipairs(layer.kind == "floating" and layer.blocks or {}) do
+      if block.creator_name == terminal and (block.label or ""):sub(1, 5) ~= "milo:" then
+        found[#found + 1] = { block = block.block_id, layer = layer.layer_id }
+      end
+    end
+  end
+  return found
+end
+
+local function fields(line)
+  local found = {}
+  for field in (line .. "\t"):gmatch("([^\t]*)\t") do found[#found + 1] = field end
+  return found
+end
+
+local function output_reply(reply, fallback)
+  if reply and reply.ok and type(reply.stdout) == "string" then return reply.stdout end
+  raise(reply and reply.stderr and reply.stderr:match("[^\r\n]+") or fallback)
+end
+
+-- Shows one place of the source's worktree: in a reader the tab already has
+-- for that worktree, which keeps its drafts, or else in a new one. No pane is
+-- closed or replaced, and the source terminal is not written to.
+local function show_place(ctx, source, place)
+  -- The context names the pane the action was run in, wherever the focus is by now.
+  local window = tab(ctx)
+  if not window then raise("no_tab") end
+  local readers = floating_terminals(window)
+  local argv = { milo, "output-files", "open", source.cwd, place }
+  for _, reader in ipairs(readers) do argv[#argv + 1] = reader.block end
+  local answer = fields(output_reply(profile_exec(argv, 10), "no_reader"):match("^([^\n]*)\n$") or "")
+  local label = answer[#answer] ~= "" and answer[#answer] or nil
+  if answer[1] == "shown" and #answer == 3 then
+    for _, reader in ipairs(readers) do
+      if reader.block == answer[2] then
+        rex.call("session.set_layer_state", { session_id = ctx.session_id, layer_id = reader.layer, state = "normal" })
+        rex.session.raise_layer{ session_id = ctx.session_id, layer_id = reader.layer }
+        local shown, err = rex.session.focus_block{ session_id = ctx.session_id, block_id = reader.block }
+        if not shown then raise(err or "no_reader") end
+        if label then
+          rex.session.set_block_label{ session_id = ctx.session_id, block_id = reader.block, label = label }
+        end
+        return
+      end
+    end
+  elseif answer[1] == "view" and #answer == 5 then
+    local command = { milo, "view", answer[3] }
+    if answer[4] ~= "-" then command[4], command[5] = "--line", answer[4] end
+    if source.tiled then
+      -- A Markdown preview opened from this reader goes beside the source terminal.
+      local origin = table.concat({ ctx.session_id, window.window_id, "shell", source.block }, " ")
+      table.insert(command, 1, "MILO_PREVIEW_SOURCE=" .. origin)
+      table.insert(command, 1, "/usr/bin/env")
+    end
+    local made, err = rex.session.new_layer{
+      session_id = ctx.session_id, window_id = window.window_id, focus = true, bounds = {0.12, 0.08, 0.76, 0.84},
+      layout = rex.layout.block{ flavor = shell_flavor, label = label,
+        options = { command = command, shell = "none", cwd = answer[2] } },
+    }
+    if not made or not made.block_ids or not made.block_ids[1] then raise(err or "no_reader") end
+    return
+  end
+  raise("no_reader")
+end
+
+-- Reads the invoking terminal's recent output once, offers the project files
+-- it names, and opens the one chosen. The output is only text to look
+-- through: nothing in it is run, opened as an address or kept.
+local function open_output(ctx, args)
+  local source = output_source(ctx)
+  local text = recent_output(ctx, source.block)
+  local listed = output_reply(profile_exec({ milo, "output-files", "list", source.cwd }, 10, text), "no_output")
+  local head, rows = listed:match("^([^\n]*)\n(.*)$")
+  local outside = (head or ""):match("^found %d+ outside (%d+)$")
+  if not outside then raise("no_output") end
+  local items, offered = {}, {}
+  for place, said in rows:gmatch("([^\t\n]+)\t([^\n]*)\n") do
+    items[#items + 1] = { id = place, title = place, subtitle = said ~= "" and said or nil, icon = "document" }
+    offered[place] = true
+  end
+  if #items == 0 then raise(tonumber(outside) > 0 and "outside_only" or "no_files") end
+  local place = args.choice
+  if place then
+    if not offered[place] then raise("not_offered") end
+  elseif #items == 1 then
+    place = items[1].id
+  else
+    local why
+    place, why = rex.ui.pick{ title = "Open file from terminal output", placeholder = "Filter files and messages",
+      items = items }
+    if not place then
+      if why == "cancelled" then return end
+      raise("no_picker")
+    end
+  end
+  show_place(ctx, source, place)
+end
+rex.action{ name = "milo_open_output", title = "Milo: Open File from Terminal Output…", args = { choice = "string?" },
+  description = "Open a project file, at the line printed with it, from this pane's recent output.",
+  keywords = "error diagnostic compiler path line reader",
+  run = function(ctx, args) return open_output(ctx, args or {}) end }
+-- Starts a coding agent on a task. `milo task new` does all of it: this
+-- action only asks for what was not passed and hands the answers over, each
+-- as an argument of its own. Closing any question ends the action before
+-- Milo is asked to start anything, so nothing has been created.
+local function unhex(code)
+  return (code:gsub("%x%x", function(byte) return string.char(tonumber(byte, 16)) end))
+end
+
+local function first_line(reply, fallback)
+  local said = reply and reply.stderr and reply.stderr:match("[^\r\n]+")
+  return said and said:gsub("^milo: ", "") or fallback
+end
+
+local function task_options(cwd)
+  local reply = profile_exec({ milo, "task-options", cwd }, 10)
+  if not reply or not reply.ok then raise(first_line(reply, "Could not read this project.")) end
+  local found = { agents = {}, worktrees = {}, bases = {}, free = {} }
+  for line in reply.stdout:gmatch("[^\n]+") do
+    local id, name = line:match("^agent (%S+) (.+)$")
+    local path, branch, here = line:match("^worktree (%x+) (%S+) (%S+)$")
+    local base, free = line:match("^base (%x+)$"), line:match("^branch (%x+)$")
+    if id then
+      found.agents[#found.agents + 1] = { id = id, name = name }
+    elseif path then
+      found.worktrees[#found.worktrees + 1] = { path = unhex(path), branch = branch ~= "-" and unhex(branch) or nil,
+        here = here == "here" }
+    elseif base then
+      found.bases[#found.bases + 1] = unhex(base)
+    elseif free then
+      found.free[unhex(free)] = true
+    end
+  end
+  return found
+end
+
+-- An answer, or nothing when the person closed the question. Any other
+-- reason for having no answer is an error: the action never guesses one.
+local function answered(value, why)
+  if value ~= nil then return value end
+  if why == "cancelled" then return nil end
+  raise("Answer in a connected Rex app, or pass every choice as an argument.")
+end
+
+local function task_agent(found)
+  if #found.agents == 0 then
+    raise("None of Claude Code, Codex, oh-my-pi and OpenCode is installed on this host.")
+  end
+  -- With one agent installed there is nothing to choose.
+  if #found.agents == 1 then return found.agents[1].id end
+  local items = {}
+  for i, agent in ipairs(found.agents) do
+    items[i] = { id = agent.id, title = agent.name, subtitle = agent.id, icon = "terminal" }
+  end
+  return answered(rex.ui.pick{ title = "New agent task", placeholder = "Choose a coding agent", items = items })
+end
+
+-- The worktree to use, or the branch to add one for and where that branch starts.
+local function task_place(found)
+  local items = { { id = "new", title = "New worktree…", subtitle = "On a branch you name", icon = "plus" } }
+  for i, tree in ipairs(found.worktrees) do
+    items[#items + 1] = { id = tostring(i), title = tree.branch or "No branch", subtitle = tree.path,
+      icon = "folder", detail = tree.here and "this checkout" or nil }
+  end
+  local picked = answered(rex.ui.pick{ title = "Where the agent works", placeholder = "Choose a worktree",
+    items = items })
+  if not picked then return end
+  if picked ~= "new" then return { worktree = found.worktrees[tonumber(picked)].path } end
+  local branch = answered(rex.ui.input{ title = "Branch for the new worktree", placeholder = "feature/…",
+    confirm = "Use this branch" })
+  if not branch then return end
+  branch = branch:match("^%s*(.-)%s*$")
+  if branch == "" then raise("A new worktree needs a branch name.") end
+  -- A branch that exists and has no worktree is used as it is.
+  if found.free[branch] then return { branch = branch } end
+  local bases = {}
+  for i, base in ipairs(found.bases) do
+    bases[i] = { id = base, title = base, icon = "branch" }
+  end
+  local base = answered(rex.ui.pick{ title = "Start " .. branch .. " from", items = bases, allow_other = true,
+    placeholder = "A branch, tag or commit" })
+  if not base then return end
+  if type(base) == "table" then base = base.text:match("^%s*(.-)%s*$") end
+  if base == "" then raise("A new branch needs a commit to start from.") end
+  return { branch = branch, base = base }
+end
+
+local function new_task(ctx, args)
+  local window = tab(ctx)
+  if not window then raise("no_tab") end
+  local _, cwd = anchor(ctx, window, true)
+  if not cwd then raise("no_shell") end
+  local found = task_options(cwd)
+  local agent = args.agent or task_agent(found)
+  if not agent then return end
+  local place = (args.worktree or args.branch) and { worktree = args.worktree, branch = args.branch, base = args.base }
+    or task_place(found)
+  if not place then return end
+  local name = agent
+  for _, known in ipairs(found.agents) do
+    if known.id == agent then name = known.name end
+  end
+  local prompt = args.prompt or answered(rex.ui.input{ title = "Task for " .. name, confirm = "Start " .. name,
+    placeholder = "What should it do? Leave this empty to start without a task." })
+  if not prompt then return end
+  local argv = { milo, "task", "new", "--project", cwd, "--agent", agent }
+  for _, flag in ipairs{ "worktree", "branch", "base" } do
+    if place[flag] then argv[#argv + 1], argv[#argv + 2] = "--" .. flag, place[flag] end
+  end
+  if prompt ~= "" then argv[#argv + 1], argv[#argv + 2] = "--prompt", prompt end
+  local reply = profile_exec(argv, 20)
+  if reply and reply.timed_out then
+    raise("Milo did not finish in time. Run git worktree list to see whether a worktree was added.")
+  end
+  local path, session = (reply and reply.ok and reply.stdout or ""):match("^worktree ([^\n]+)\nsession (session:[%x%-]+)\n$")
+  if not session then raise(first_line(reply, "Could not start the task.")) end
+  return { worktree = path, session_id = session }
+end
+rex.action{ name = "milo_new_agent_task", title = "Milo: New Agent Task…",
+  args = { agent = "string?", worktree = "string?", branch = "string?", base = "string?", prompt = "string?" },
+  run = function(ctx, args) return new_task(ctx, args or {}) end }
 rex.action{
   name = "milo_close", title = "Milo: Close Panes in This Tab",
   run = function(ctx)

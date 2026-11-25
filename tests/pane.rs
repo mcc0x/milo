@@ -1206,7 +1206,7 @@ fn help_and_version_write_to_stdout_and_argument_errors_write_to_stderr() {
         (&["usage", "--help"][..], "Usage: milo usage [--menu-stream]"),
         (&["menubar", "--help"][..], "Usage: milo menubar install | uninstall"),
         (&["setup", "--help"][..], "Usage: milo setup"),
-        (&["view", "--help"][..], "Usage: milo view FILE [--commit ID | --edit]"),
+        (&["view", "--help"][..], "Usage: milo view FILE [--commit ID | --edit | --line LINE[:COLUMN]]"),
         (&["listen", "--help"][..], "Usage: milo listen [--stop]"),
         (&["claude-status", "--help"][..], "Usage: milo claude-status"),
     ] {
@@ -1217,7 +1217,9 @@ fn help_and_version_write_to_stdout_and_argument_errors_write_to_stderr() {
     }
     for (args, message) in [
         (&["not-a-milo-command"][..], "milo: not-a-milo-command is not a directory; see milo --help for commands\n"),
-        (&["view"][..], "milo: missing file; use milo view FILE [--commit ID | --edit]\n"),
+        (&["view"][..], "milo: missing file; use milo view FILE [--commit ID | --edit | --line LINE[:COLUMN]]\n"),
+        (&["view", "page.txt", "--line", "0"][..], "milo: --line requires LINE or LINE:COLUMN, counted from 1\n"),
+        (&["view", "page.txt", "--line", "3:x"][..], "milo: --line requires LINE or LINE:COLUMN, counted from 1\n"),
     ] {
         let output = run(args);
         assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
@@ -1245,8 +1247,17 @@ fn a_pane_started_without_a_terminal_says_what_works_without_one() {
         .arg("outline")
         .output()
         .unwrap();
-    let in_rex = format!("{NEEDS}, and rex run -s \"$REX_SESSION\" -- milo COMMAND opens a pane in a Rex tab\n");
-    assert_eq!((output.status.code(), String::from_utf8(output.stderr).unwrap()), (Some(1), in_rex));
+    let in_rex =
+        |variable: &str| format!("{NEEDS}, and rex run -s \"${variable}\" -- milo COMMAND opens a pane in a Rex tab\n");
+    assert_eq!((output.status.code(), String::from_utf8(output.stderr).unwrap()), (Some(1), in_rex("REX_SESSION")));
+    // Rex preview.23 and later name only the pane's block, which selects its session.
+    let block_only = |block: &str| {
+        let output =
+            project.command(env!("CARGO_BIN_EXE_milo")).env("REX_BLOCK", block).arg("outline").output().unwrap();
+        (output.status.code(), String::from_utf8(output.stderr).unwrap())
+    };
+    assert_eq!(block_only("block:00000000-0000-0000-0000-000000000002"), (Some(1), in_rex("REX_BLOCK")));
+    assert_eq!(block_only("block:0002"), (Some(1), format!("{NEEDS}\n")));
     // A mistake in the command is still reported as that mistake.
     let output = project.command(env!("CARGO_BIN_EXE_milo")).args(["outline", "missing"]).output().unwrap();
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "milo: missing is not a directory\n");
@@ -1349,13 +1360,9 @@ fn doctor_and_removal_do_not_install_anything_on_a_fresh_account() {
     let original = br#"{"statusLine":{"type":"command","command":"mine"}}"#;
     fs::write(&settings, original).unwrap();
     for args in [&["doctor"][..], &["setup", "--remove"]] {
-        let out = project
-            .command(env!("CARGO_BIN_EXE_milo"))
-            .env_remove("REX_CONFIG")
-            .env("PI_CODING_AGENT_DIR", project.0.join("agent"))
-            .args(args)
-            .output()
-            .unwrap();
+        // A Rex on the developer's path keeps a file of its own in the state folder
+        // it is given, so this account is one that has no Rex either.
+        let out = project.standalone().env("PI_CODING_AGENT_DIR", project.0.join("agent")).args(args).output().unwrap();
         assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
         assert!(!project.0.join("config").exists() && !project.0.join("state").exists());
         assert_eq!(fs::read(&settings).unwrap(), original);
@@ -1878,6 +1885,25 @@ fn claude_status_starts_fresh_when_the_account_changes_in_the_same_profile() {
 }
 
 #[test]
+fn the_reader_opens_at_a_named_line_and_edits_from_its_column() {
+    let project = Project::new();
+    let file = project.0.join("project/long.txt");
+    let lines: String = (1..=200).map(|n| format!("line {n}\n")).collect();
+    fs::write(&file, &lines).unwrap();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut tty = Terminal::run(command.args(["view", "long.txt", "--line", "120:6"]));
+    tty.shows("Line 120:6");
+    let screen = tty.screen();
+    assert!(screen[1].contains("117   line 117") && screen[4].contains("120   line 120"), "{screen:?}");
+
+    tty.master.write_all(b"e").unwrap();
+    tty.shows("^S save");
+    tty.master.write_all(b"here \x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read_to_string(&file).unwrap(), lines.replace("line 120\n", "line here 120\n"));
+}
+
+#[test]
 fn the_reader_edits_a_file_and_asks_before_ctrl_c_can_lose_the_draft() {
     let project = Project::new();
     let file = project.0.join("project/page.txt");
@@ -1959,7 +1985,7 @@ fn view_edit_opens_a_read_only_file_for_reading_and_says_why() {
 
     let both = project.command(env!("CARGO_BIN_EXE_milo")).args(["view", "x", "--edit", "--commit"]).output().unwrap();
     assert!(!both.status.success());
-    assert!(String::from_utf8_lossy(&both.stderr).contains("[--commit ID | --edit]"));
+    assert!(String::from_utf8_lossy(&both.stderr).contains("[--commit ID | --edit | --line LINE[:COLUMN]]"));
 }
 
 #[test]
@@ -2000,6 +2026,56 @@ fn the_outline_edits_a_file_in_its_own_pane_and_returns_to_the_same_file() {
     tty.master.write_all(b"qq").unwrap();
     assert!(tty.wait_for_exit().success());
     assert!(tty.restored());
+}
+
+#[test]
+fn the_outline_opens_its_reader_beside_the_pane_rex_named_with_or_without_a_session() {
+    let project = Project::new();
+    fs::write(project.0.join("project/page.txt"), "more\n").unwrap();
+    let pane = "block:22222222-2222-2222-2222-222222222222";
+    let rex = project.0.join("rex");
+    // Every request is noted by all its arguments, which say which session and pane Rex is to act in.
+    let script = "#!/bin/sh\n[ \"$1\" = ready ] && exit 0\ncat >/dev/null\necho \"$*\" >> \"$HOME/requests\"\n\
+                  echo block:11111111-1111-1111-1111-111111111111\n";
+    fs::write(&rex, script).unwrap();
+    fs::set_permissions(&rex, fs::Permissions::from_mode(0o700)).unwrap();
+    // A sibling test's new process can hold the script open for writing for a moment.
+    let until = Instant::now() + TEST_WAIT;
+    while let Err(error) = project.command(&rex).arg("ready").status() {
+        assert!(
+            error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < until,
+            "cannot run stand-in rex: {error}"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let mut paths = vec![project.0.clone()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    // Rex preview.23 and later name only the block, whose ID then selects the session. An
+    // older Rex names the session too, and a newer one's request must not replace it.
+    for (requests, session) in [(1, None), (2, Some("session:33333333-3333-3333-3333-333333333333"))] {
+        let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+        command.env("PATH", std::env::join_paths(&paths).unwrap()).env("TERM_PROGRAM", "rex").env("REX_BLOCK", pane);
+        if let Some(session) = session {
+            command.env("REX_SESSION", session);
+        }
+        let mut outline = Terminal::run(command.arg("outline"));
+        outline.shows("page.txt");
+        outline.master.write_all(b"\r").unwrap();
+        let until = Instant::now() + TEST_WAIT;
+        let log = loop {
+            let log = fs::read_to_string(project.0.join("requests")).unwrap_or_default();
+            if log.lines().count() == requests {
+                break log;
+            }
+            assert!(Instant::now() < until, "expected {requests} requests to Rex, not:\n{log}");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let request = log.lines().last().unwrap();
+        let target = format!(" do - -s {} -b {pane} --args ", session.unwrap_or(pane));
+        assert!(request.contains(&target) && request.contains(r#""view""#), "{request}");
+        outline.master.write_all(b"q").unwrap();
+        assert!(outline.wait_for_exit().success());
+    }
 }
 
 #[test]
@@ -2101,8 +2177,14 @@ fn a_reader_ended_from_outside_says_which_tabs_drafts_it_kept() {
     tty.master.write_all(b"one ").unwrap();
     tty.shows("unsaved");
 
-    // What a pane writes to ask for a second file: its path, and no commit.
-    let pipe = fs::read_dir(project.0.join("state/milo/readers")).unwrap().next().unwrap().unwrap().path();
+    // What a pane writes to ask for a second file: its path, and no commit. The reader's
+    // pipe is the one entry that is a pipe; its note of the project lies beside it.
+    let pipe = fs::read_dir(project.0.join("state/milo/readers"))
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .find(|entry| std::os::unix::fs::FileTypeExt::is_fifo(&entry.file_type().unwrap()))
+        .expect("the reader listens on a pipe")
+        .path();
     let request = format!("{}\0\0", project.0.join("project/b.txt").display());
     fs::OpenOptions::new().write(true).open(pipe).unwrap().write_all(request.as_bytes()).unwrap();
     tty.shows("*a.txt  b.txt ×");
@@ -2442,4 +2524,50 @@ fn the_tabs_a_reader_closed_with_reopen_from_the_shell_after_a_preview() {
     let refused = milo().args(["tabs", "--first"]).output().unwrap();
     assert_eq!(refused.status.code(), Some(1));
     assert!(String::from_utf8(refused.stderr).unwrap().contains("expected milo tabs [--last]"));
+}
+
+/// A note on a handed-over patch is text: `q`, `?` and a paste go into it, and
+/// Ctrl-C asks before it or a kept note is dropped. Its copy goes to this
+/// terminal as a clipboard request, and nothing is written to the project.
+#[test]
+fn a_review_note_takes_keys_as_text_and_leaves_only_as_a_clipboard_request() {
+    let project = Project::new();
+    let root = project.0.join("project");
+    project.git(&["init", "-q", "-b", "main"]);
+    fs::write(root.join("app.txt"), "one\ntwo\nthree\n").unwrap();
+    project.git(&["add", "-A"]);
+    project.git(&["commit", "-q", "-m", "base"]);
+    let now = "one\ntwo, by the agent\nthree\n";
+    fs::write(root.join("app.txt"), now).unwrap();
+    let patch = project.0.join("edits.patch");
+    fs::write(&patch, "--- a/app.txt\n+++ b/app.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+two, by the agent\n three\n")
+        .unwrap();
+
+    let mut tty = Terminal::run(project.standalone().arg("review").arg(&patch).args(["--from", "the agent"]));
+    tty.shows("patch from the agent");
+    tty.master.write_all(b"i").unwrap();
+    tty.shows("Enter write");
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows("Note on app.txt, removed line 2 (old numbering)");
+    tty.master.write_all(b"q? \x1b[200~pasted\nwords\x1b[201~\x03").unwrap();
+    tty.shows("Discard this note? y discard");
+    tty.shows("q? pasted");
+    tty.master.write_all(b"n\r").unwrap();
+    tty.shows("Kept for review");
+    assert!(!tty.output().contains("\x1b]52;"), "a note was copied before anyone asked");
+
+    tty.master.write_all(b"\x03").unwrap();
+    tty.shows("1 note was not copied. y close anyway");
+    tty.master.write_all(b"p").unwrap();
+    tty.shows("Notes · 1 to copy · 0 copied");
+    tty.master.write_all(b"y").unwrap();
+    tty.shows("Notes · 0 to copy · 1 copied");
+    // "Review note\n\napp.txt, removed line 2 (old numbering):\n> 2 - two\nq? pasted\nwords\n", in base64.
+    let copy = "\x1b]52;c;UmV2aWV3IG5vdGUKCmFwcC50eHQsIHJlbW92ZWQgbGluZSAyIChvbGQgbnVtYmVyaW5nKToKPiAyIC0gdHdvCnE/IHBhc3RlZAp3b3Jkcwo=\x1b\\";
+    assert!(tty.output().contains(copy), "{:?}", tty.output());
+    tty.master.write_all(b"qq").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+    assert_eq!(fs::read_to_string(root.join("app.txt")).unwrap(), now);
+    assert!(!project.0.join("state").exists() && !project.0.join("config").exists());
 }

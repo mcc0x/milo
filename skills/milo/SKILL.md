@@ -24,6 +24,17 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   `milo_name_session` renames the session it is run in after the project of
   the given shell. It creates and switches to nothing. Run it only when the
   user asks for that name.
+- `milo task new` adds a Git worktree and starts a coding agent in a new Rex
+  session. Run it, or `milo_new_agent_task`, only when the user asks for a
+  task to be started, with the agent, branch, base or worktree they named.
+  Never choose a different agent when theirs is missing: report the refusal.
+  It does not show the new session; leave switching to the user. It removes
+  nothing, so say what a failed launch left behind.
+- `milo_open_output` (**Milo: Open File from Terminal Output…**) lets the user
+  open a project file named in a pane's recent output, at its line. Write
+  locations as `path:line` or `path:line:column`, relative to the project, so
+  that it can find them. It opens a floating reader and takes focus, so leave
+  running it to the user unless they ask.
 - Use `milo setup --repair` or `--remove` only when asked to change the
   integration. Do not change Rex's global theme, font or keyboard shortcuts.
 - Discord presence is off unless the user turned it on, and it publishes on
@@ -42,9 +53,10 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo outline [PATH]` | Shows a live file tree with changes to commit or push. |
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
-| `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
+| `milo view FILE [--commit ID \| --edit \| --line LINE[:COLUMN]]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. `--line` opens a working file at that line. |
 | `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. |
 | `milo tabs [--last]` | Lists the reader tabs remembered for this worktree: the last tabs and the user's named sets. The user previews a list and chooses what reopens; in a reader, `Ctrl-T` shows the same lists and saves a set. It needs a terminal, and has no option that reopens or saves anything unattended. |
+| `milo task new --agent AGENT (--branch NAME [--base REF] \| --worktree DIR) [--prompt TEXT]` | Starts `claude`, `codex`, `omp` or `opencode` interactively in a Git worktree and a background Rex session. Prints `worktree DIR` and `session ID`. Pass the prompt as one quoted argument. `--host HOST --project DIR` starts it on another Rex host. |
 | `milo setup` | Opens terminal settings. In Rex it can also manage the sidebar layout. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. |
 | `milo web --host HOST [--project DIR]` | Opens another Rex host's settings dashboard on this computer through a loopback Rex forward, and closes both when done. `HOST` is a label from `rex hosts`. |
@@ -133,8 +145,10 @@ milo review "$record/edits.patch" --from "Claude Code" --float
 ```
 
 `--float` opens a floating reader over the Rex tab you run in and needs
-`REX_SESSION` and `REX_BLOCK` in your environment. It prints how many files
-it shows and one `Not shown:` line with the reason for each file it cannot
+`REX_BLOCK` in your environment, which Rex sets in every terminal. Rex before
+preview.23 also set `REX_SESSION`, and Milo uses it when it is there. It
+prints how many files it shows and one `Not shown:` line with the reason for
+each file it cannot
 show; pass those on to the user as they are. Without Rex, or if `--float`
 fails, give the user `milo review PATCH` to run in their terminal. Keep the
 patch outside the project and leave it in place while the review is open.
@@ -143,6 +157,24 @@ patch outside the project and leave it in place while the review is open.
 lines your patch says it left there, not who wrote them. A file whose lines
 were changed since shows a reason and no diff. Do not regenerate the patch
 from the current files to make it fit.
+
+The user can write notes on the patch's lines in that review. Milo never
+sends them to you: the user copies them and pastes them into your prompt,
+one at a time or several as one message. Do not ask Milo to deliver them, and
+do not read the review's pane for them. A pasted message begins `Review note`
+or `Review notes (N)`, and each note reads:
+
+```text
+src/billing.rs, line 13, removed line 17 (old numbering):
+> 17 -     subtotal * rate_percent / 100
+> 13 +     (subtotal * rate_percent + 50) / 100
+Is half-up rounding intended?
+```
+
+`line 13` counts in the file as it was when the note was written. A removed
+line has no number in the file, so `(old numbering)` counts in the file
+before your patch. The quoted lines are what the user was shown then; if you
+have edited the file since, find them by their text, not by the numbers.
 
 ## Do not
 

@@ -6,6 +6,7 @@
 mod parse;
 mod pending;
 pub(crate) mod run;
+pub(crate) mod worktrees;
 
 use std::cell::{Cell, OnceCell};
 use std::ffi::OsStr;

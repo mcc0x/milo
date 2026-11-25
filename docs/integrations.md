@@ -13,6 +13,8 @@ Milo works in a supported terminal without Rex or a connected account. Pick the 
 | oh-my-pi (OMP) | Saved Codex and Claude limit reports contribute to those tools’ readings, not a separate OMP quota. |
 | OpenCode | Today’s recorded tokens, steps and estimated cost from its local database. Not a remaining quota. |
 
+**Agent tasks** are separate too. `milo task new`, or **Milo: New Agent Task…** in the Rex command palette, starts Claude Code, Codex, oh-my-pi or OpenCode in a Git worktree and a background Rex session of its own, with the agent's full interactive screen. It starts only the agent you name, only if it is installed, and passes your prompt as written. Online provider accounts are not agents and cannot be started. See [starting an agent task](setup.md#start-an-agent-task). On `main`; not in v0.1.7.
+
 **Agent patch review** is separate from usage detection: a harness that can hand over a recorded patch can use `milo review PATCH`. This shows that patch rather than treating every change in the worktree as the agent’s. See the [Milo agent skill](../skills/milo/SKILL.md).
 
 ## Online provider accounts
@@ -32,11 +34,11 @@ See [account setup](usage.md#accounts-asked-online) and the [provider evidence](
 
 | Integration | What it adds | Where to start |
 | --- | --- | --- |
-| Rex | Remembered pane layouts, floating Reader tabs, shell following and access to another host’s local settings dashboard. | [Setup and hosts](setup.md) |
+| Rex | Remembered pane layouts, floating Reader tabs, shell following, agent tasks in background sessions and access to another host’s local settings dashboard. | [Setup and hosts](setup.md) |
 | Discord alerts | Forward selected Rex events to a channel. Pair through Milo or use your own webhook. Delivery goes directly from your device to Discord. | [Alert forwarding](setup.md#mirror-rex-alerts) |
 | Telegram alerts | Pair with Milo’s bot in a private chat (delivery uses the hosted relay), or configure your own bot and chat without the relay. Can run alongside Discord. | [Alert forwarding](setup.md#mirror-rex-alerts) |
 | Discord Rich Presence | Optionally show Rex activity in Discord. Separate from alerts; session and project names are separate opt-ins. | [Presence and privacy](presence.md) |
-| Milo for macOS | Optional menu app for agent quota or local CPU/memory readings, with access to settings. Included in the Apple Silicon release; installed separately with `milo menubar install`. | [Menu bar guide](usage.md#macos-menu-bar) |
+| Milo for macOS | Optional menu app for agent quota or local CPU/memory readings, with access to settings. An opt-in **Needs you** section lists the Rex panes whose program waits for you, failed or finished, and jumps to them; it needs no messaging account. Included in the Apple Silicon release; installed separately with `milo menubar install`. | [Menu bar guide](usage.md#macos-menu-bar) and [panes that need you](usage.md#rex-panes-that-need-you) |
 
 ## Reader, media and file tools
 

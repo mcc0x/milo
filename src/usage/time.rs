@@ -4,8 +4,8 @@ use crate::json::Value;
 use crate::when::{DAY, HOUR, MINUTE};
 
 /// Subseconds break ties between reports that arrived in the same second.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct Timestamp {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Timestamp {
     pub seconds: i64,
     nanos: u32,
 }
@@ -23,7 +23,7 @@ impl Timestamp {
     }
 
     /// Transcripts order readings by their full timestamp, including fractional seconds.
-    pub(super) fn iso(value: Value<'_>) -> Option<Self> {
+    pub(crate) fn iso(value: Value<'_>) -> Option<Self> {
         let string = value.string(96)?;
         let b = string.as_bytes();
         let [_, _, _, _, b'-', _, _, b'-', _, _, b'T' | b't', _, _, b':', _, _, b':', _, _, ..] = b else {

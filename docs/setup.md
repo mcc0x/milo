@@ -67,7 +67,7 @@ Turn on **Arrange new shell tabs** to apply the layout to new shell tabs, includ
 
 Use the appearance choices to preview icons, choose text change marks, and turn animated activity marks off. Usage shows Codex, Claude Code and OpenCode only while each has a figure to show; choose **Always show** or **Hide** for a tool to [decide that yourself](usage.md#which-tools-appear). Use the workflow choices to pin Outline and History to the starting project or follow the shell they were opened beside. Milo does not change Rex's font, theme, shortcuts or notification settings.
 
-**After Rex restarts, a sidebar can come back as shells instead of Milo.** The dividers and pane labels survive, but on Rex preview.21 (server API 18) the running programs do not. To restore the sidebar, focus its tab’s working shell and run **Milo: Arrange This Tab** in the Rex app. Milo checks what’s running before it offers to rebuild. New shell tabs are arranged as before.
+**After Rex restarts, a sidebar can come back as shells instead of Milo.** The dividers and pane labels survive, but on Rex preview.23 (server API 19) the running programs do not. To restore the sidebar, focus its tab’s working shell and run **Milo: Arrange This Tab** in the Rex app. Milo checks what’s running before it offers to rebuild. New shell tabs are arranged as before.
 
 **Text zoom is separate from split size.** On Rex preview.21 (server API 18), Milo can read a terminal's cell dimensions, but creating or resizing a terminal does not set the font the Mac app renders. The app exposes relative font actions and an app-wide [starting font size](https://www.superlogical.com/rex/docs/reference/mac-settings.md#setting-typography-font-size), not an absolute per-pane zoom setting. Milo therefore remembers divider positions, not text zoom, for Outline, History and Usage.
 
@@ -88,6 +88,50 @@ The listener starts Milo to ask about a directory once, and with titles on once 
 **Milo: Name Session from This Project** renames the session you run it in after the project of its shell: `project`, or `project/worktree` in a linked worktree, without the agent. It is the only way Milo names a session, and it happens only when you run the action: from the command palette, with a key you bound to it, or with `rex do milo_name_session`. It creates no session and switches to none. Outside a Git project it changes nothing and says so. Milo does not remember the name or keep it up to date, so rename the session again whenever you like. The action does not depend on **Title Rex tabs**.
 
 Both need the installed Rex integration. After upgrading Milo, run `milo setup --repair` so Rex loads the current actions and listener.
+
+## Start an agent task
+
+`milo task new` starts a coding agent on a task from a shell in your project. It adds a Git worktree for the task, or uses one the project already has, and opens the agent in a new Rex session named after it, `project/worktree`. The session starts in the background: your pane keeps the focus, and no app is asked to show the new session. Visit it whenever you like. It shows the agent's own full screen, so you can read along, answer its questions and type a follow-up. On `main`; not in the v0.1.7 release.
+
+```sh
+milo task new --branch perf/reader-scroll --base origin/main --agent claude --prompt "Speed up scrolling in large files"
+milo task new --worktree ../milo-worktrees/perf-reader-scroll --agent codex
+```
+
+On success it prints two lines for a script to read, the worktree's folder and the session's ID:
+
+```
+worktree /Users/you/dev/milo-worktrees/perf-reader-scroll
+session session:01a212ce-82f4-7ed0-bdb4-88aa2edd12fa
+```
+
+**Where the agent works.** Name one of two things, and Milo uses exactly that:
+
+- `--branch NAME` adds a worktree on that branch. A new branch needs `--base REF`, the commit it starts from: a branch, a tag or a commit ID. Milo never picks one for you, and the new branch tracks no remote branch. A branch that already exists and is checked out nowhere gets a worktree as it is and takes no `--base`. The worktree goes in `--path DIR`, or else beside the project's main folder in `PROJECT-worktrees/NAME`, with each `/` of the name as a `-`. A branch that is already checked out is refused, with the folder to pass to `--worktree`.
+- `--worktree DIR` uses a worktree the project already has, with whatever is in it. A folder that is not one of this project's worktrees is refused.
+
+The checkout you run the command from is never switched or changed. `--project DIR` names the project when the current folder is not in it.
+
+**Which agent.** `--agent` is `claude`, `codex`, `omp` or `opencode`. Milo starts each the way its own documentation starts an interactive session with a first message, never a print or one-shot mode:
+
+| Agent | `--agent` | Started as | Checked with |
+| --- | --- | --- | --- |
+| Claude Code | `claude` | `claude -- PROMPT` | 2.1.311 |
+| Codex | `codex` | `codex -- PROMPT` | 0.171.0 |
+| oh-my-pi | `omp` | `omp launch -- PROMPT` | 19.1.1 |
+| OpenCode | `opencode` | `opencode --prompt=PROMPT` | 1.19.6 and 2.4.1 |
+
+The agent must be installed: its program is looked for by that name on your shell's search path. If it is not there, Milo says which agent is missing and stops before any worktree or session exists. It never starts a different agent in its place. Online usage accounts such as OpenRouter are not agents and cannot be started.
+
+**The prompt.** `--prompt TEXT` is the agent's first message. It reaches the agent as one argument, exactly as written: no shell reads it, so quotes, `$(…)`, backticks and a leading dash are only text. The agent then reads it as it reads anything you type to it, so a slash command or an `@file` mention means what it means there. Without `--prompt` the agent opens idle. One limit: Claude Code runs a prompt that is a single bare word, such as `doctor`, as its own command of that name, so Milo refuses a one-word prompt for it and asks for a few words.
+
+**What it does when something fails.** Everything that can be refused is checked first: the project, the agent, the branch, the base, the folder, and that a Rex server answers. Until then nothing has been created. If a later step fails, the message says exactly what exists, for example `Created worktree … on new branch …; it was not removed`. Milo never deletes a worktree, a branch or a session it made, and never pushes, opens a pull request, merges or cleans up. Remove a worktree you no longer want with `git worktree remove`. An agent may ask whether it should trust the new folder before it reads your prompt; that question is the agent's, and Milo does not answer it.
+
+The agent runs with the environment of a new shell tab: your login shell's, with its interactive startup files read. An agent that starts and then exits within a moment is reported as a failure, and its session stays open so that you can read why.
+
+**From the command palette.** **Milo: New Agent Task…** asks the same questions in Rex's own prompts and then runs the same `milo task new`. It uses the project of the shell you run it from. It lists the agents installed on that host and skips the question when only one is; it offers the project's worktrees and **New worktree…**, which asks for a branch and where it starts; then it asks for the task. Closing any question ends the action with nothing created. From `rex do` or a key binding, pass any of `agent`, `worktree`, `branch`, `base` and `prompt` to skip that question: `rex do milo_new_agent_task agent=codex branch=fix/typo base=main prompt="Fix the typo in the README"`. The action answers with the worktree and the session ID. Rex starts actions with a short system search path, so here the agents are looked for on the path your login shell sets up, including what `~/.zshrc` or its like adds.
+
+**On another Rex host.** `--host HOST` starts the task on another host: a label from `rex hosts` or a server address, as for `rex -S`. The project, its worktree and the agent are all on that host, so write `--project`, and `--worktree` or `--path` if you pass them, in full as they are there. The host runs its own `milo task new`, so it needs this version of milo on the search path of its login shell, and the agent installed there. The result adds a third line, `host HOST`.
 
 ## Browser editor
 
@@ -127,12 +171,14 @@ Several Rex apps attached to one server, such as a Mac and a phone, are one host
 
 ```
 Host: studio (Rex host d4744373)
-Rex server: 0.1.0-preview.21, API 18; rex command: the same
-Rex compatibility: checked with API 18. This is the Rex API Milo was checked with.
+Rex server: 0.1.0-preview.23, API 19; rex command: the same
+Rex compatibility: checked with API 19. This is the Rex API Milo was checked with.
 Rex apps: open on this computer
 ```
 
-Milo’s Rex files are checked against API revision 18. A newer server is noted and is no warning, because Rex keeps older calls working. Health warns in two cases: the server is older than that revision, or the `rex` command and the server are different versions. In the second case, restart or update Rex before saving a layout, because Milo validates its Rex files with the command and the server is what reads them.
+Milo’s Rex files are checked against API revision 19, which is Rex Server & CLI 0.1.0-preview.23. A newer server is noted and is no warning, because Rex keeps older calls working. Health warns in two cases: the server is older than that revision, or the `rex` command and the server are different versions. In the second case, restart or update Rex before saving a layout, because Milo validates its Rex files with the command and the server is what reads them.
+
+Milo acts on the pane it was run in, never on whichever pane has focus. It knows that pane from `REX_BLOCK`, which Rex sets in every terminal, and lets Rex find the session that holds it. Rex before preview.23 also set `REX_SESSION`; where a terminal still has it, Milo uses that session as before.
 
 The computer’s name stays on that computer and in the pages its editor serves. It is not sent to Telegram, Discord or the relay.
 
@@ -220,10 +266,14 @@ Saving installs these actions in the Rex command palette:
 | Remember the current rail | `milo_remember_layout` |
 | Reset a remembered layout | `milo_reset_layout` |
 | Name the session after this project | `milo_name_session` |
+| Milo: New Agent Task… | `milo_new_agent_task` |
+| Milo: Open File from Terminal Output… | `milo_open_output` |
 
 Milo does not install key bindings. For an optional shortcut, check Rex's shortcut settings and `rex keymap` first; the latter lists config bindings, not every Mac app shortcut. If the chord is free, put a binding such as `rex.bind("cmd+shift+m", "milo_peek_outline")` in your own Rex `init.lua`. Actions also work directly in the palette without any binding.
 
 Peek opens a floating outline and takes focus. Invoking it again raises the same peek. Dismiss it to return to the originating pane. Adding the docked Outline instead keeps the shell focused. Your existing custom actions remain yours.
+
+Open File from Terminal Output reads the recent output of the pane you run it in, once, and opens a project file it names in the reader. [Opening a file from a terminal's output](panes.md#opening-a-file-from-a-terminals-output) says what it reads and what it refuses. An installation keeps the actions it was saved with, so after updating Milo, save the layout again to get an action added since; until then `milo doctor` reports `Server actions: not current`.
 
 Setup adds two marked lines at the top of `~/.config/rex/init.lua` (after the interpreter line, if it has one) and asks Rex to reload. The actions live in `~/.config/milo/rex.lua`. `~/.config/milo/listener.lua` watches for divider changes even when arranging new shell tabs is off, and titles tabs when you have chosen that. If `$XDG_CONFIG_HOME` is an absolute path, both folders live there instead. `$REX_CONFIG` can point directly to a different settings file. Milo keeps its saved state in `~/.local/state/milo` or under an absolute `$XDG_STATE_HOME`.
 
@@ -305,7 +355,7 @@ Deduplication lasts for one continuous Rex subscription. Changing the label or c
 
 **When things go wrong.** Ordinary alerts are spaced about a second apart and limited to 20 a minute. Milo drops excess alerts and says how many were omitted in the next message. If a destination asks it to slow down, Milo waits and retries the alert if the requested wait is within a minute. A failing destination gets up to three attempts per alert. After a confirmed credential refusal, Milo stops automatic sends to that destination, including notices. Check the connection, then re-save it or turn that provider off and on to retry. A refusal by Telegram does not pause Discord, or vice versa. `milo alerts` reports the last outcome.
 
-**When Rex goes away.** Milo keeps your forwarding choices. One worker listens for fresh events; if it exits unexpectedly, Milo retries it, and if Rex disconnects, Milo waits and reconnects. Repeated failures increase the wait up to 30 seconds. `milo alerts` and Settings distinguish waiting for Rex or retrying the worker from a user pause. `milo alerts off` pauses both destinations, even during a retry. Use `milo alerts off discord` (or `telegram`) to pause just one. Reconnecting Rex or starting the login listener does not undo a pause.
+**When Rex goes away.** Milo keeps your forwarding choices. One worker listens for fresh events; if it exits unexpectedly, Milo retries it, and if Rex disconnects, Milo waits and reconnects. Repeated failures increase the wait up to 30 seconds. When Rex starts again and starts Milo’s [saved layout listener](#in-rex), a waiting worker reconnects within a few seconds instead of finishing that wait; without the layout integration it reconnects at its next retry. Rex does not repeat an alert raised before Milo reconnects. `milo alerts` and Settings distinguish waiting for Rex or retrying the worker from a user pause. `milo alerts off` pauses both destinations, even during a retry. Use `milo alerts off discord` (or `telegram`) to pause just one. Reconnecting Rex or starting the login listener does not undo a pause.
 
 Use **Refresh status** in the browser or `r` in the setup panel to check again without changing forwarding. See [Waiting for Rex and per-destination lifecycle notices](img/alert-forwarding-after.webp) in desktop and mobile Settings.
 

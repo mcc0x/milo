@@ -66,7 +66,7 @@ See how much of each reported limit you have left. Milo reads local reports save
 
 ### In the macOS menu bar
 
-Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside your lowest fresh remaining percentage by default. Click it for reset times, switch to **CPU** or **Memory** under **More options → Menu bar indicator**, or choose **Browser settings…** to open the browser editor.
+Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside your lowest fresh remaining percentage by default. Click it for reset times, switch to **CPU** or **Memory** under **More options → Menu bar indicator**, or choose **Browser settings…** to open the browser editor. Turn on **More options → Needs you** to also list the Rex panes whose agent is waiting for you, failed or finished, and click one to go to it; it is off until you choose it.
 
 <p align="center"><img src="docs/img/menu-bar.webp" width="312" alt="Milo’s macOS menu showing example Codex and Claude Code limits, reset times and a Settings button"></p>
 
@@ -88,7 +88,11 @@ The working-file Reader can also [view pictures, play supported MP4s, and render
 
 Press `e` to edit a working text file where you are reading it. The edit is a draft until you save with `Ctrl-S`, and a save never replaces a file that changed on disk without asking. `Ctrl-F` formats the draft with a [formatter you have installed](docs/panes.md#formatting); `Ctrl-Z` takes it back. See [editing files](docs/panes.md#editing-files).
 
-To review an agent’s edits without mixing in your own uncommitted work, have it hand you its recorded patch and run `milo review PATCH`. In Rex, `--float` opens that [read-only review](docs/panes.md#reviewing-an-agents-edits) over the current tab. Milo checks that the patch still fits, not who wrote it.
+To review an agent’s edits without mixing in your own uncommitted work, have it hand you its recorded patch and run `milo review PATCH`. In Rex, `--float` opens that [read-only review](docs/panes.md#reviewing-an-agents-edits) over the current tab. Milo checks that the patch still fits, not who wrote it. Press `i` to [write notes on its lines](docs/panes.md#notes-on-the-patchs-lines) and copy them, one now or all together, to paste back to the agent.
+
+## Agent tasks
+
+In Rex, start a coding agent on a task without leaving your pane. `milo task new --branch fix/login --base origin/main --agent claude --prompt "Fix the login redirect"` adds a Git worktree for the branch and opens Claude Code, Codex, oh-my-pi or OpenCode there, in a new Rex session that starts in the background with the agent's full interactive screen. **Milo: New Agent Task…** in the command palette asks the same questions. Milo starts only the agent you name, never switches your checkout, and never pushes, merges or cleans up. See [starting an agent task](docs/setup.md#start-an-agent-task). This is on `main` and not in the v0.1.7 release.
 
 ## What works in each terminal
 
@@ -97,17 +101,18 @@ To review an agent’s edits without mixing in your own uncommitted work, have i
 | `milo` (Home) | Choose Outline, History, Usage or settings. No first-run guide on this path. Quit a pane to return to Home. | The existing settings and maintenance Home, with a first-run guide. |
 | `milo outline [DIR]` or `milo DIR` | Browse and search a plain folder or Git worktree; open a file in place. | Managed sidebar, floating reader tabs, optional shell-following and temporary outline peek. |
 | `milo history [DIR]` | Browse Git commits, expand a commit and read its file at that revision in place. | Managed sidebar and floating reader tabs. |
-| `milo view FILE` / `--edit` / `--commit ID` | Read in the current terminal. Edit a working text file; save explicitly. A commit is read-only. | Same direct command. |
+| `milo view FILE` / `--edit` / `--line LINE` / `--commit ID` | Read in the current terminal, at a line if you name one. Edit a working text file; save explicitly. A commit is read-only. | [Open a file named in a pane's output](docs/panes.md#opening-a-file-from-a-terminals-output), at its line, from the command palette. |
 | `milo review PATCH [--from NAME]` | Read a handed-over patch in place. | `--float` can open the review from a non-interactive caller in a Rex pane. |
 | `milo tabs [--last]` | Preview and reopen the tabs the reader last had open in this worktree, or a set of tabs you saved under a name. | **Milo: Reopen Last Reader Tabs…** and **Milo: Open a Reader Tab Set…** open the same lists in a floating pane. |
 | `milo usage` / `usage --menu-stream` | Show available local figures in a pane, or emit a stream for the menu app. No provider sign-in required. | Optional compact Usage rail. |
 | `milo setup` | Terminal settings, including icon, Git mark and usage choices. The explicit command offers a skippable first-run guide. | Try, save, repair or remove managed layouts. |
 | `milo web [--no-open]` | Local settings dashboard. `--no-open` prints a private loopback link instead of opening the browser. | `--host HOST` uses Rex to forward **another** host’s editor. |
 | `milo settings export GROUPS` / `import FILE [--apply]` / `undo` | Transfer selected settings as a file. Import previews unless you ask to apply. | Saved rail geometry can be used by a Rex layout. |
+| `milo task new --agent AGENT …` | Not a standalone feature: the agent opens in a Rex session. | Adds or uses a Git worktree and starts the agent there in a background session. |
 | `milo doctor`, `--help`, `--version` | Plain output; no TTY needed. Doctor distinguishes local preferences from optional integrations. | Reports Rex host and integration health. |
 | `milo alerts`, `milo presence` | Inspect the settings without a running session. | Actual event mirroring and activity presence require Rex and explicit opt-in. |
 | `milo listen`, arrange/remember rails, title tabs | Not standalone features. Run a direct pane command instead. | Managed by the Rex integration. |
-| `milo menubar install` / `uninstall` / `indicator` | Optional on macOS with a menu-enabled build; choosing an indicator does not install the app. | Not Rex-dependent. |
+| `milo menubar install` / `uninstall` / `indicator` / `attention` | Optional on macOS with a menu-enabled build; choosing an indicator or what the menu lists does not install the app. | The opt-in **Needs you** section lists Rex panes that wait for you and jumps to them. |
 | `milo claude-status` | Status-line helper for an explicitly configured Claude Code profile, not an interactive pane. | Not Rex-dependent. |
 
 `milo setup --skip-onboarding` records a skip without opening a TUI or applying settings. Direct pane commands never run the guide. See [Using the panes](docs/panes.md) for input and display fallbacks, and [terminal checks and measurements](docs/evidence/terminal-portability/README.md) for the environments actually exercised.

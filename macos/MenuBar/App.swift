@@ -146,6 +146,57 @@ private final class Model: ObservableObject {
     @Published private(set) var savingIndicator = false
     private var pendingIndicator: MenuIndicator?
     private var sleeping = false
+    let attention = AttentionWatch()
+    @Published private(set) var attentionChoice = AttentionChoice()
+    @Published private(set) var savingAttention = false
+
+    /// Turning the section off ends its watch, so nothing asks Rex on its behalf.
+    private func applyAttention(_ choice: AttentionChoice) {
+        if attentionChoice != choice { attentionChoice = choice }
+        attention.setEnabled(choice.show != .off) { [weak self] in
+            self?.bundledProcess(["menubar", "attention", "watch"])
+        }
+    }
+
+    func selectAttentionShow(_ show: AttentionShow) {
+        guard show != attentionChoice.show else { return }
+        saveAttention([show.rawValue])
+    }
+
+    func setAttentionState(_ state: AttentionState, included: Bool) {
+        guard let list = attentionChoice.statesArgument(setting: state, to: included) else { return }
+        saveAttention(["states", list])
+    }
+
+    /// The bundled Milo validates and saves the choice; the menu only shows what the next frame reports.
+    private func saveAttention(_ words: [String]) {
+        guard !savingAttention else { return }
+        let what = "the Needs you choice"
+        if case .invalidProfile = installation { settingError(.invalidProfile, saving: what); return }
+        guard let process = bundledProcess(["menubar", "attention"] + words) else {
+            settingError(.writeFailed, saving: what); return
+        }
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        savingAttention = true
+        process.terminationHandler = { [weak self] process in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.savingAttention = false
+                guard process.terminationStatus == 0 else { self.settingError(.writeFailed, saving: what); return }
+                self.attention.reread()
+                // NUL has the reader report the saved choice without refreshing providers.
+                guard let input = self.input else { self.refresh(); return }
+                do { try input.write(contentsOf: Data([0])) } catch { self.readerDisconnected() }
+            }
+        }
+        do { try process.run() } catch { savingAttention = false; settingError(.writeFailed, saving: what) }
+    }
+
+    func jump(to entry: AttentionEntry) {
+        attention.jump(to: entry, using: bundledProcess(["menubar", "attention", "jump", entry.host, entry.block]))
+    }
 
     private func applyIndicator(_ choice: MenuIndicator) {
         guard choice != indicator else { return }
@@ -157,7 +208,7 @@ private final class Model: ObservableObject {
         guard choice != indicator, !savingIndicator else { return }
         switch indicatorSaveProcess(choice) {
         case let .success(process): saveIndicator(choice, using: process)
-        case let .failure(issue): indicatorError(issue)
+        case let .failure(issue): settingError(issue, saving: "the menu bar indicator")
         }
     }
 
@@ -183,13 +234,13 @@ private final class Model: ObservableObject {
                 guard let self else { return }
                 guard process.terminationStatus == 0 else {
                     self.savingIndicator = false
-                    self.indicatorError(.writeFailed)
+                    self.settingError(.writeFailed, saving: "the menu bar indicator")
                     return
                 }
                 self.indicatorSaved(choice)
             }
         }
-        do { try process.run() } catch { savingIndicator = false; indicatorError(.writeFailed) }
+        do { try process.run() } catch { savingIndicator = false; settingError(.writeFailed, saving: "the menu bar indicator") }
     }
 
     private func indicatorSaved(_ choice: MenuIndicator) {
@@ -210,9 +261,9 @@ private final class Model: ObservableObject {
         savingIndicator = false
     }
 
-    private func indicatorError(_ issue: IndicatorSaveIssue) {
+    private func settingError(_ issue: IndicatorSaveIssue, saving what: String) {
         let alert = NSAlert()
-        alert.messageText = "Couldn’t save the menu bar indicator"
+        alert.messageText = "Couldn’t save \(what)"
         switch issue {
         case .invalidProfile:
             alert.informativeText = """
@@ -317,6 +368,7 @@ private final class Model: ObservableObject {
     }
 
     func quit() {
+        attention.stop()
         monitor.setEnabled(false)
         handoffs.removeAll()
         if !independentSettings { stopSettings() }
@@ -381,7 +433,9 @@ private final class Model: ObservableObject {
         var frame = incoming
         // A damaged installed profile still supports the existing quota reader,
         // but its fallback HOME cannot opt this installation into system sampling.
-        if case .invalidProfile = installation { frame.indicator = nil }
+        if case .invalidProfile = installation { frame.indicator = nil; frame.attention = nil }
+        applyAttention(AttentionChoice(show: frame.attention, states: frame.attentionStates))
+        frame.attention = nil; frame.attentionStates = nil
         let choice = MenuIndicator(rawValue: frame.indicator ?? "") ?? .quota
         if pendingIndicator == nil {
             applyIndicator(choice)
@@ -451,6 +505,9 @@ private struct Content: View {
                    indicator: Binding(get: { model.indicator }, set: model.selectIndicator),
                    savingIndicator: model.savingIndicator, monitor: model.monitor,
                    alertThreshold: Binding(get: { alerts.threshold }, set: { alerts.select($0) }), alertIssue: alerts.issue,
+                   attention: model.attention, attentionChoice: model.attentionChoice, savingAttention: model.savingAttention,
+                   setAttentionShow: model.selectAttentionShow, setAttentionState: { model.setAttentionState($0, included: $1) },
+                   jump: model.jump,
                    refresh: model.refresh, openSettings: model.openSettings, quit: { NSApp.terminate(nil) },
                    loginStatus: model.loginStatus, setLoginEnabled: model.setLoginEnabled).fixedSize()
     }
@@ -485,6 +542,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         host.sizingOptions = [.preferredContentSize]; popover.contentViewController = host
         model.changed = { [weak self] in self?.updateBadge() }
         model.monitor.changed = { [weak self] in self?.drawIndicator() }
+        model.attention.changed = { [weak self] in self?.drawIndicator() }
         updateBadge(); model.start()
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(woke), name: NSWorkspace.didWakeNotification, object: nil)
@@ -516,7 +574,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
 
     private func drawIndicator() {
         guard let button = status?.button else { return }
-        let label: String, title: String, width: CGFloat
+        var label: String
+        let title: String, width: CGFloat
         switch model.indicator {
         case .quota:
             label = model.badge?.label(at: model.badgeUpdatedAt) ?? "Milo"
@@ -531,9 +590,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
             label = "\(cpu ? "CPU busy across all cores" : "Physical memory used"): \(percent == nil ? "not available yet" : value)"
             width = 98
         }
-        if button.title != title {
-            button.title = title
-            status.length = width
+        // The dot is the only thing the section adds to the menu bar: no sound, no notification, no colour.
+        let needed = model.attention.needsYou
+        if needed {
+            let count = model.attention.count
+            label += count == 1 ? " One Rex pane needs you." : " \(count) Rex panes need you."
+        }
+        let image = needed ? MiloMark.needed : MiloMark.awake
+        if button.title != title || button.image !== image {
+            button.title = title; button.image = image
+            status.length = width == NSStatusItem.variableLength ? width : width + image.size.width - MiloMark.awake.size.width
         }
         if button.toolTip != label {
             button.toolTip = label; button.setAccessibilityLabel(label)
@@ -544,6 +610,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         guard let button = status?.button else { return }
         model.refreshLoginStatus()
         model.alerts.refreshPermission()
+        model.attention.clearNote()
         updateBadge(opening: true); popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
     }

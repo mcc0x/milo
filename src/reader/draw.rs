@@ -6,7 +6,7 @@ use std::time::Instant;
 use super::changes::{Fold, Row};
 use super::edit::Editor;
 use super::handed::Handed;
-use super::{Body, JumpNotice, MarkdownBody, Reader, Source, markdown};
+use super::{Body, JumpNotice, MarkdownBody, Reader, Source, Spot, markdown};
 use crate::diff::{Line, LineKind};
 use crate::git::Kind;
 use crate::icons;
@@ -261,6 +261,7 @@ impl Reader {
     }
 
     fn draw_body(&mut self, s: &mut Screen) {
+        self.place_spot();
         if !self.markdown_source
             && let Some(body) = self.markdown_body()
         {
@@ -281,6 +282,10 @@ impl Reader {
             self.reveal_first_change();
         }
         self.clamp_top();
+        if let Some(line) = self.pick_cursor() {
+            // A panel under the file can have taken the cursor's row.
+            self.show_cursor(line);
+        }
         let focused = self.focused_fold();
         let note = match &self.body {
             Body::Note(note) => Some(*note),
@@ -306,6 +311,7 @@ impl Reader {
                     .saturating_sub(width);
                 self.pan = self.pan.min(self.pan_limit);
                 let mut painter = LinePainter { x, width, pan: self.pan, lang: text.lang, spans: &mut self.spans };
+                let marked = self.spot.map(|spot| spot.line);
                 let mut starts = text.starts.as_slice();
                 let mut state = &State::Code;
                 let mut skipped = true;
@@ -317,7 +323,14 @@ impl Reader {
                                 state = &starts[used - 1].1;
                                 starts = &starts[used..];
                             }
-                            painter.draw_line(s, i + 1, &text.lines[line], state);
+                            let shown = &text.lines[line];
+                            painter.draw_line(s, i + 1, shown, state);
+                            if x > 0 && shown.kind != LineKind::Del && marked == Some(shown.number) {
+                                // The line the reader was asked for keeps its number picked out.
+                                s.paint(x - 3 - text.digits, i + 1, text.digits, Style::PLAIN.bold().reverse());
+                            }
+                            let shown = super::pick::Shown { line, gutter: x > 0 };
+                            super::pick::draw_marks(self.pick, &self.noted, s, i + 1, shown);
                             skipped = false;
                         }
                         Row::Fold(fold) => {
@@ -339,11 +352,17 @@ impl Reader {
         }
     }
 
-    /// The hints of one file among several of a handed-over patch. Moving
-    /// between the files is kept longest, and says which file this is where
-    /// the heading has no room to.
-    fn draw_files_hint(&self, s: &mut Screen, handed: &Handed) -> Option<Range<usize>> {
-        let counted = if handed_place_fits(handed, s.w) {
+    /// The hints of a file of a handed-over patch. With several files, moving
+    /// between them is kept longest, and says which file this is where the
+    /// heading has no room to. Middle hints are given up from the left, so
+    /// what the notes need stays longest.
+    fn draw_handed_hint(&self, s: &mut Screen, handed: &Handed) -> Option<Range<usize>> {
+        if self.pick.is_some() {
+            // None of these opens the help, so none is a place to click for it.
+            crate::help::draw_hint(s, "↑↓ line", &["v range", "n N changes", "Esc back"], "Enter write");
+            return None;
+        }
+        let counted = if handed.total == 1 || handed_place_fits(handed, s.w) {
             String::new()
         } else {
             let spelled = format!("[ ] file {} of {}", handed.number, handed.total);
@@ -353,13 +372,32 @@ impl Reader {
                 format!("[ ] {}/{}", handed.number, handed.total)
             }
         };
-        let files = if counted.is_empty() { "[ ] files" } else { &counted };
+        let files = match (handed.total, counted.is_empty()) {
+            (1, _) => "",
+            (_, true) => "[ ] files",
+            (_, false) => &counted,
+        };
         let fold = self.can_fold().then(|| if self.review.is_compact() { "c full file" } else { "c changes only" });
         let changes = self.can_fold() || self.has_changes_among_other_lines();
+        let text = matches!(&self.body, Body::Text(text) if !text.lines.is_empty());
         let scroll = matches!(self.body, Body::Text(_)).then_some("↑↓ scroll");
-        let mut middle = [""; 4];
+        let waiting = match self.waiting_notes {
+            None => String::new(),
+            Some(0) => "p notes".to_string(),
+            Some(1) => "p 1 note".to_string(),
+            Some(notes) => format!("p {notes} notes"),
+        };
+        let hints = [
+            scroll,
+            Some("q close"),
+            fold,
+            changes.then_some("n N changes"),
+            text.then_some("i note"),
+            (!waiting.is_empty()).then_some(waiting.as_str()),
+        ];
+        let mut middle = [""; 6];
         let mut count = 0;
-        for item in [scroll, Some("q close"), fold, changes.then_some("n N changes")].into_iter().flatten() {
+        for item in hints.into_iter().flatten() {
             middle[count] = item;
             count += 1;
         }
@@ -396,10 +434,8 @@ impl Reader {
             self.draw_reader_hint(s, action, middle);
             return;
         }
-        if let Source::Handed(handed) = &self.source
-            && handed.total > 1
-        {
-            self.hints.help = self.draw_files_hint(s, handed);
+        if let Source::Handed(handed) = &self.source {
+            self.hints.help = self.draw_handed_hint(s, handed);
             return;
         }
         if self.can_fold() {
@@ -584,6 +620,30 @@ fn draw_fold(s: &mut Screen, y: usize, gutter: usize, fold: Fold, selected: bool
     }
 }
 
+/// Says the place the reader was asked to show, as `Line 184:17`, at the same edge as a change notice.
+fn draw_spot_notice(s: &mut Screen, y: usize, spot: Spot) -> Range<usize> {
+    const PREFIX: &str = "Line ";
+    let digits = |n: u32| n.ilog10() as usize + 1;
+    let line = digits(spot.line);
+    let full = PREFIX.len() + line + spot.column.map_or(0, |column| 1 + digits(column));
+    let margin = usize::from(s.w >= full + 2);
+    let room = s.w - margin * 2;
+    let width = full.min(room);
+    let x = if y == 0 { s.w - margin - width } else { margin };
+    let st = Style::PLAIN;
+    if full > room {
+        s.put_fit(x, y, width, "Line…", st);
+        return x..x + width;
+    }
+    let end = x + s.put(x, y, width, PREFIX, st) + line;
+    s.put_number(end, y, spot.line.into(), st);
+    if let Some(column) = spot.column {
+        s.put(end, y, 1, ":", st);
+        s.put_number(x + full, y, column.into(), st);
+    }
+    x..x + width
+}
+
 /// Uses the right edge of the heading or the left edge of the hint.
 fn draw_change_notice(s: &mut Screen, y: usize, notice: JumpNotice) -> Range<usize> {
     const PREFIX: &str = "Change ";
@@ -597,6 +657,7 @@ fn draw_change_notice(s: &mut Screen, y: usize, notice: JumpNotice) -> Range<usi
         }
         JumpNotice::NoChanges => ("No changes".len(), None, ("", "No changes")),
         JumpNotice::Said { lead, text } => (lead.len() + text.len(), None, (lead, text)),
+        JumpNotice::Spot(spot) => return draw_spot_notice(s, y, spot),
     };
     let margin = usize::from(s.w >= full + 2);
     let room = s.w - margin * 2;

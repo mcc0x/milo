@@ -902,6 +902,30 @@ fn a_user_pause_while_rex_is_unreachable_survives_recovery_and_login() {
     assert_eq!(home.destination.texts(), ["Rex: <code>synthetic</code> finished"]);
 }
 
+/// Rex repeats nothing to a subscriber that joins late, so what a terminal
+/// reports while Milo still waits out a retry is never forwarded.
+#[test]
+fn a_listener_started_by_a_returning_rex_ends_the_wait_between_retries() {
+    let Some(home) = Home::new() else { return };
+    home.save_telegram();
+    home.run(&["alerts", "on"]);
+    home.wait_for_health("Listening");
+    home.rex_fault("rex-down", true);
+    home.wait_for_health("Waiting for Rex");
+    // Retries one, two, four and eight seconds apart have failed by now, and
+    // the next is sixteen seconds after the last.
+    thread::sleep(Duration::from_secs(17));
+
+    home.rex_fault("rex-down", false);
+    let returned = Instant::now();
+    home.login();
+    home.wait_for_health("Listening");
+    let waited = returned.elapsed();
+    assert!(waited < Duration::from_secs(9), "listening again only {waited:?} after Rex started its listener");
+    home.blocked("a", "SYNTHETIC approve?");
+    assert!(home.received(1));
+}
+
 #[test]
 fn lifecycle_notices_are_per_provider_and_only_report_meaningful_transitions() {
     let Some(home) = Home::new() else { return };
@@ -1060,6 +1084,8 @@ fn pausing_one_provider_leaves_the_others_in_flight_and_queued_alerts_intact() {
     home.blocked("a", "SYNTHETIC first alert");
     let telegram = telegram_reply.connection();
     let discord = discord_reply.connection();
+    // Both requests are in flight together: neither destination waited for the other's to end.
+    telegram.assert_pending();
     home.status("b", "done", "", "SYNTHETIC queued alert");
     settle();
 
