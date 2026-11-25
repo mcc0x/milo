@@ -12,6 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use super::Destination;
+use crate::fs_ops;
 use crate::json::Value;
 use crate::setup::lock;
 
@@ -99,7 +100,7 @@ pub(super) fn launch<R: Borrow<Request>>(request: R, lease: Option<(&Path, &CStr
     if let Some((dir, name)) = lease {
         lock::hold_in_child(&mut command, dir, name)?;
     }
-    Ok(Launched { curl: command.spawn()?, request })
+    Ok(Launched { curl: fs_ops::spawn(&mut command)?, request })
 }
 
 pub(super) struct Launched<R> {
@@ -123,7 +124,7 @@ pub(super) fn query(address: &str, body: &str, limit: u64) -> Option<String> {
 }
 
 pub(super) fn response(request: &Request, limit: u64) -> Option<(String, u16)> {
-    let curl = command(request).spawn().ok()?;
+    let curl = fs_ops::spawn(&mut command(request)).ok()?;
     read_response(curl, request, limit).ok()
 }
 

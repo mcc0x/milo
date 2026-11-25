@@ -1060,6 +1060,8 @@ fn pausing_one_provider_leaves_the_others_in_flight_and_queued_alerts_intact() {
     home.blocked("a", "SYNTHETIC first alert");
     let telegram = telegram_reply.connection();
     let discord = discord_reply.connection();
+    // Both requests are in flight together: neither destination waited for the other's to end.
+    telegram.assert_pending();
     home.status("b", "done", "", "SYNTHETIC queued alert");
     settle();
 

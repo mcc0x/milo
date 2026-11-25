@@ -105,8 +105,8 @@ def sample(binary, home, count=41):
 for arg do
     case "$arg" in
     milo_operation=context) cat >/dev/null; reply='window:test\\nok - 120 40'; break ;;
-    whoami) reply='{"rex_version":"1","api_revision":18,"host_id":"00000000-0000-0000-0000-000000000001"}'; break ;;
-    version) reply='{"rex_version":"1","api_revision":18}'; break ;;
+    whoami) reply='{"rex_version":"1","api_revision":19,"host_id":"00000000-0000-0000-0000-000000000001"}'; break ;;
+    version) reply='{"rex_version":"1","api_revision":19}'; break ;;
     client) reply='{"clients":[]}'; break ;;
     esac
 done

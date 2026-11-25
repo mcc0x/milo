@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use super::{Alerts, AlertsEdit, Destination, Settings, send};
-use crate::{preferences, setup::lock};
+use crate::{fs_ops, preferences, setup::lock};
 
 /// A per-opt-in, opaque comparison tag for the exact recipient credential.
 /// This is deliberately not a secret-store format, so legacy pairings work
@@ -283,14 +283,15 @@ fn queue(edit: &AlertsEdit<'_>, settings: &Settings, destination: Destination, n
         return;
     }
     let spawned = std::env::current_exe().and_then(|milo| {
-        Command::new(milo)
+        let mut notice = Command::new(milo);
+        notice
             .args(["alerts", "send-notice", destination.name(), &id])
             .current_dir("/")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
+            .process_group(0);
+        fs_ops::spawn(&mut notice)
     });
     if let Ok(mut child) = spawned {
         // A long-lived caller (for example, Settings) must also reap helpers.

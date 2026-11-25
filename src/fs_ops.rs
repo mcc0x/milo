@@ -1,4 +1,5 @@
-//! Opens untrusted files without following their final link and stages atomic replacements.
+//! Opens untrusted files without following their final link, stages atomic replacements,
+//! and starts programs without lending one the pipes of another.
 
 use std::ffi::CStr;
 use std::fs::{self, File, OpenOptions};
@@ -6,6 +7,8 @@ use std::io;
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
+use std::sync::{Mutex, PoisonError};
 
 /// Do not wait on a pipe, follow a link, or pass the file to a child process.
 pub const READ_FLAGS: libc::c_int = libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC;
@@ -29,6 +32,19 @@ pub(crate) fn open_at(dir: &File, name: &CStr, flags: libc::c_int, mode: libc::c
         // SAFETY: A successful open returns a new, owned descriptor.
         Ok(unsafe { File::from_raw_fd(fd) })
     }
+}
+
+/// Starts a program while no other thread of this process is starting one.
+///
+/// macOS cannot make a pipe that is closed to other programs from the start: the
+/// standard library makes the pipe, then marks it. A program another thread starts in
+/// between inherits the pipe and holds it open for as long as it runs, so whoever reads
+/// the pipe waits for that program too. One destination's request could then hold up the
+/// other destination's, or a reader of a program that has long since ended.
+pub(crate) fn spawn(command: &mut Command) -> io::Result<Child> {
+    static STARTING: Mutex<()> = Mutex::new(());
+    let _one_at_a_time = STARTING.lock().unwrap_or_else(PoisonError::into_inner);
+    command.spawn()
 }
 
 /// Darwin can't apply a practical address-space limit before exec. Sample a decoder's
