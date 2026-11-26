@@ -557,3 +557,29 @@ pub(crate) mod tests {
         }
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::fs;
+
+    use super::*;
+    use crate::fixture::Fixture;
+
+    #[test]
+    fn rustfmt_exe_from_path_formats_the_draft_and_a_cmd_wrapper_is_never_run() {
+        let f = Fixture::folder();
+        let path = std::env::var_os("PATH").unwrap();
+        let Support::Ready(tool, program) = support("lib.rs", Some(&path)) else {
+            panic!("rustfmt.exe is not in a folder PATH names in full")
+        };
+        assert_eq!(tool.name, "rustfmt");
+        assert!(program.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("exe")), "{program:?}");
+        let draft = Draft { text: "fn  main( ) { let  x=1 ; }\n", name: "lib.rs", dir: &f.root, root: &f.root };
+        assert_eq!(run(tool, &program, &draft).unwrap(), "fn main() {\n    let x = 1;\n}\n");
+
+        let wrappers = f.root.join("wrappers");
+        fs::create_dir(&wrappers).unwrap();
+        fs::write(wrappers.join("prettier.cmd"), "@echo off\r\nexit /b 1\r\n").unwrap();
+        assert!(matches!(support("app.js", Some(wrappers.as_os_str())), Support::Missing("prettier, biome or deno")));
+    }
+}
