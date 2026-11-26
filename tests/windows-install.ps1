@@ -149,3 +149,4 @@ try {
 }
 if ($failures -gt 0) { Write-Output "$failures check(s) failed."; exit 1 }
 Write-Output 'Every installer check passed.'
+exit 0
