@@ -96,14 +96,18 @@ def meter(backend):
     class Meter(BaseHTTPRequestHandler):
         def do_POST(self):
             length = int(self.headers.get('Content-Length', '0'))
-            assert self.path == '/v1/counts' and 0 < length <= 128
+            if self.path != '/v1/counts' or not 0 < length <= 128:
+                attempts.append((400, None))
+                self.send_response_only(400)
+                self.end_headers()
+                return
             body = self.rfile.read(length)
             try:
                 status, _ = http(backend, 'POST', self.path, body=body,
                                  headers={'Content-Type': self.headers['Content-Type']})
             except ConnectionRefusedError:
                 status = 503
-            attempts.append((status, json.loads(body)))
+            attempts.append((status, body))
             self.send_response_only(status)
             self.end_headers()
 
@@ -220,6 +224,10 @@ done
                 assert f'<dt>{label}</dt><dd>{value}</dd>'.encode() in body, f'Unexpected {label} total'
             assert f'{installs} since counting began'.encode() in body
 
+        now = datetime.now(timezone.utc)
+        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        if (midnight - now).total_seconds() < 180:
+            time.sleep((midnight - now).total_seconds() + 1)
         today = datetime.now(timezone.utc).date()
         epoch_day = f'{(today - date(1970, 1, 1)).days}\n'.encode()
         main, off = WORK / 'main-user', WORK / 'off-user'
@@ -231,7 +239,9 @@ done
             before = len(attempts)
             with pane(profile, git):
                 until(lambda: len(attempts) > before, 'No request reached the loopback meter')
-            assert attempts[before:] == [(status, {'day': today.isoformat(), 'new_install': new, 'monthly_active': monthly})]
+            [(result, body)] = attempts[before:]
+            assert result == status
+            assert json.loads(body) == {'day': today.isoformat(), 'new_install': new, 'monthly_active': monthly}
             assert state(profile).read_bytes() == epoch_day
 
         with receiver(*credentials):

@@ -24,11 +24,12 @@ pub(super) fn start(url: &str, date: &str, new_install: bool, monthly_active: bo
 }
 
 fn send(mut command: Command, url: &str, body: &str) -> Option<Child> {
+    command.arg("-q");
+    #[cfg(windows)]
+    command.arg("--no-ssl-auto-client-cert");
     crate::fs_ops::spawn(
         command
             .args([
-                "-q",
-                "--no-ssl-auto-client-cert",
                 "--proto",
                 protocol(url)?,
                 "--noproxy",
