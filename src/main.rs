@@ -90,7 +90,9 @@ Usage: milo
 
 Outside Rex, bare milo opens Home: Outline and Git history for the current
   folder, plus Usage and Terminal settings. Move with ↑/↓, open with Enter,
-  and use q to go back. Open browser settings launches your browser.
+  and use q to go back. Open browser settings launches your browser
+  and prints its link; if a sandboxed browser reports File not found,
+  paste that link into it.
 milo PATH opens the outline at PATH.
 milo COMMAND --help, or milo --help COMMAND, explains one command briefly.
 On first launch, milo setup shows a short welcome guide. In Rex, bare milo
