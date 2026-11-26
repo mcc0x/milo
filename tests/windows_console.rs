@@ -42,6 +42,8 @@ struct ProcessInformation {
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x0002_0016;
 const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
 const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
+const STARTF_USESTDHANDLES: u32 = 0x0000_0100;
+const INVALID_HANDLE_VALUE: Handle = usize::MAX as Handle;
 const WAIT_OBJECT_0: u32 = 0;
 
 #[link(name = "kernel32")]
@@ -160,13 +162,16 @@ impl Console {
             desktop: std::ptr::null_mut(),
             title: std::ptr::null_mut(),
             numbers: [0; 8],
-            flags: 0,
+            // Without explicit handles the child takes this test's own redirected output instead
+            // of the pseudoconsole's, so Milo would not see a terminal. Invalid handles make it
+            // use the console it is attached to.
+            flags: STARTF_USESTDHANDLES,
             show_window: 0,
             reserved2_size: 0,
             reserved2: std::ptr::null_mut(),
-            std_input: std::ptr::null_mut(),
-            std_output: std::ptr::null_mut(),
-            std_error: std::ptr::null_mut(),
+            std_input: INVALID_HANDLE_VALUE,
+            std_output: INVALID_HANDLE_VALUE,
+            std_error: INVALID_HANDLE_VALUE,
             attributes: list.as_mut_ptr().cast(),
         };
         let mut command = wide(OsStr::new(command));
