@@ -43,7 +43,9 @@ fn write(f: &Fixture, path: &str, data: &str, now: i64) {
 }
 
 fn open(f: &Fixture, now: i64) -> Usage {
-    let tools = UsageTools::default();
+    let mut tools = UsageTools::default();
+    tools[UsageTool::Codex] = Show::Always;
+    tools[UsageTool::Claude] = Show::Always;
     let mut usage =
         Usage::from_dirs(Some(f.root.join("codex")), Some(f.root.join("claude")), Some(f.root.join("state")), now)
             .showing(tools);
