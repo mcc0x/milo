@@ -300,7 +300,8 @@ fn print_console_modes() {
         assert_ne!(unsafe { GetConsoleMode(file.as_raw_handle(), &raw mut mode) }, 0);
         mode
     };
-    println!("console-modes={:#x}/{:#x}.", mode("CONIN$"), mode("CONOUT$"));
+    let when = std::env::var("MILO_CONSOLE_PROBE").unwrap();
+    println!("console-modes {when}={:#x}/{:#x}.", mode("CONIN$"), mode("CONOUT$"));
 }
 
 #[test]
@@ -312,10 +313,12 @@ fn edits_save_and_refuse_an_external_change_then_restore_the_console() {
     let milo = env!("CARGO_BIN_EXE_milo");
     let probe = std::env::current_exe().unwrap();
     let probe = format!("\"{}\" print_console_modes --exact --ignored --nocapture --quiet", probe.display());
-    let command = format!("cmd.exe /d /s /c \"{probe} & \"{milo}\" view notes.txt --edit & {probe}\"");
+    let command = format!(
+        "cmd.exe /d /s /c \"set MILO_CONSOLE_PROBE=before& {probe} & \"{milo}\" view notes.txt --edit & set MILO_CONSOLE_PROBE=after& {probe}\""
+    );
     let mut console = Console::start(&command, &scratch.0.join("project"), &scratch.environment());
 
-    let at = console.see("console-modes=", 0);
+    let at = console.see("console-modes before=", 0);
     let at = console.see("second line ✓", at);
     console.see("^S save", at);
 
@@ -346,14 +349,17 @@ fn edits_save_and_refuse_an_external_change_then_restore_the_console() {
     console.see("Unsaved edits", mark);
     console.keys(b"d");
     console.keys(b"q");
-    let ended = console.see("console-modes=", mark);
+    let ended = console.see("console-modes after=", mark);
     console.see(".", ended);
     assert_eq!(console.exit_code(Duration::from_secs(30)), Some(0), "the console drew:\n{}", console.text());
     assert_eq!(fs::read_to_string(&file).unwrap(), external);
 
+    // The pseudoconsole repaints lines it already drew, so each report is found by its label.
     let text = console.text();
-    let modes: Vec<&str> =
-        text.match_indices("console-modes=").map(|(at, _)| text[at..].split('.').next().unwrap()).collect();
-    assert_eq!(modes.len(), 2, "{text}");
-    assert_eq!(modes[0], modes[1], "Milo left the console in different modes");
+    let modes = |when: &str| {
+        let label = format!("console-modes {when}=");
+        let at = text.find(&label).unwrap() + label.len();
+        text[at..].split('.').next().unwrap().to_owned()
+    };
+    assert_eq!(modes("before"), modes("after"), "Milo left the console in different modes");
 }
