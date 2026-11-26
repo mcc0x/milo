@@ -86,14 +86,14 @@ async function chooseUsageTools(page, home) {
 
 async function unsupportedIntegrations(page) {
   await section(page, 'Integrations').click();
-  for (const name of ['Alert forwarding', 'Discord presence']) {
+  for (const name of ['Rex automation', 'Alert forwarding', 'Discord presence']) {
     assert(await button(page, name).isDisabled(), `${name} is not offered on Windows`);
   }
-  for (const key of ['alerts', 'presence']) {
+  for (const key of ['automation', 'alerts', 'presence']) {
     assert.equal(await page.locator(`#integration-${key}-summary`).innerText(), 'Not supported on Windows yet');
   }
   await section(page, 'Layout').click();
-  console.log('Alerts and presence: shown as not supported on Windows yet');
+  console.log('Rex automation, alerts and presence: shown as not supported on Windows yet');
 }
 
 async function main() {

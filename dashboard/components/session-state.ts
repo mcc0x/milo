@@ -130,7 +130,7 @@ export interface SessionState {
   alerts: AlertsState | null;
   presence: PresenceState | null;
   /** Why alerts or presence cannot be offered on this platform, when that is the reason. */
-  unsupported?: {alerts: string; presence: string};
+  unsupported?: {alerts: string; presence: string; automation: string};
 }
 
 export const groupLabels: Record<GroupKey, string> = {

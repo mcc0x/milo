@@ -372,7 +372,7 @@ impl Editor {
             None => out.push_str("null"),
         }
         if cfg!(windows) {
-            write!(out, ",\"unsupported\":{{\"alerts\":{0},\"presence\":{0}}}", Quoted(NOT_ON_WINDOWS))
+            write!(out, ",\"unsupported\":{{\"alerts\":{0},\"presence\":{0},\"automation\":{0}}}", Quoted(NOT_ON_WINDOWS))
                 .expect("writing to a string");
         }
         // Whether an import is kept that the page can offer to take back.
@@ -2316,8 +2316,8 @@ mod windows_tests {
         let page = Value::parse(state.as_bytes()).unwrap_or_else(|| panic!("{state}"));
         let [alerts, presence, unsupported, host] = page.fields(["alerts", "presence", "unsupported", "host"]);
         assert!(alerts.unwrap().null() && presence.unwrap().null(), "{state}");
-        let [alerts, presence] = unsupported.unwrap().fields(["alerts", "presence"]);
-        for reason in [alerts, presence] {
+        let [alerts, presence, automation] = unsupported.unwrap().fields(["alerts", "presence", "automation"]);
+        for reason in [alerts, presence, automation] {
             assert_eq!(reason.unwrap().string(64).as_deref(), Some("Not supported on Windows yet"), "{state}");
         }
         let [rex, reason] = host.unwrap().fields(["rex", "rex_unsupported"]);

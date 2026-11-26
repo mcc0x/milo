@@ -14,25 +14,32 @@ function Fail([string]$Message) {
 
 $expected = '@SHA256@'
 $asset = 'milo-x86_64-pc-windows-msvc.exe'
-if ((Split-Path -Leaf $PSCommandPath) -ieq 'uninstall-milo.ps1') { $Uninstall = $true }
-
-if ($env:MILO_BIN_DIR) {
+# The kept uninstaller removes the copy beside it, wherever MILO_BIN_DIR points now.
+if ((Split-Path -Leaf $PSCommandPath) -ieq 'uninstall-milo.ps1') {
+    $Uninstall = $true
+    $dir = Split-Path -Parent $PSCommandPath
+} elseif ($env:MILO_BIN_DIR) {
+    if ($env:MILO_BIN_DIR -notmatch '^([A-Za-z]:\\|\\\\)') { Fail 'Set MILO_BIN_DIR to a full path, such as D:\Tools\Milo.' }
     $dir = [IO.Path]::GetFullPath($env:MILO_BIN_DIR)
 } else {
     $local = [Environment]::GetFolderPath('LocalApplicationData')
     if (-not $local) { Fail 'Could not find your local application data folder. Set MILO_BIN_DIR first.' }
     $dir = Join-Path $local 'Programs\Milo'
 }
+if ($dir -eq [IO.Path]::GetPathRoot($dir)) { Fail "Choose a folder for Milo, not $dir." }
 $dir = $dir.TrimEnd('\')
 $binary = Join-Path $dir 'milo.exe'
 $receipt = Join-Path $dir '.milo-install-receipt'
 $uninstaller = Join-Path $dir 'uninstall-milo.ps1'
 
 function Get-PlainItem([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path)) { return $null }
-    $item = Get-Item -LiteralPath $Path -Force
-    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { Fail "Not changing ${Path}: it is a link." }
-    $item
+    try {
+        $attributes = [IO.File]::GetAttributes($Path)
+    } catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
+        return $null
+    }
+    if ($attributes -band [IO.FileAttributes]::ReparsePoint) { Fail "Not changing ${Path}: it is a link." }
+    Get-Item -LiteralPath $Path -Force
 }
 
 function Get-Digest([string]$Path) {
@@ -63,14 +70,18 @@ function Set-UserPath([string]$Value, $Kind) {
     try {
         if ($Value) { $key.SetValue('Path', $Value, $Kind) } else { $key.DeleteValue('Path', $false) }
     } finally { $key.Close() }
-    if (-not ('Milo.Native' -as [type])) {
-        Add-Type -Namespace Milo -Name Native -MemberDefinition @'
+    try {
+        if (-not ('Milo.Native' -as [type])) {
+            Add-Type -Namespace Milo -Name Native -MemberDefinition @'
 [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
 public static extern IntPtr SendMessageTimeout(IntPtr window, uint message, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);
 '@
+        }
+        $result = [UIntPtr]::Zero
+        [void][Milo.Native]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+    } catch {
+        Write-Warning 'Your PATH changed, but open windows were not told. Sign out and back in if milo is not found.'
     }
-    $result = [UIntPtr]::Zero
-    [void][Milo.Native]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
 }
 
 function Get-Entries([string]$Value) {
@@ -85,28 +96,32 @@ function Test-OnPath([string]$Value) {
     $false
 }
 
+# Clears copies that stepped aside during an upgrade, and returns how many are still running.
 function Remove-Old {
-    if (-not (Test-Path -LiteralPath $dir)) { return }
+    $left = 0
     Get-ChildItem -LiteralPath $dir -Force -Filter '.milo-old-*.exe' -File | ForEach-Object {
-        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+        try { Remove-Item -LiteralPath $_.FullName -Force } catch { $left++ }
     }
+    $left
 }
 
 $folder = Get-PlainItem $dir
 if ($folder -and -not $folder.PSIsContainer) { Fail "Not changing ${dir}: it is not a folder." }
-if (-not $folder -and $Uninstall) {
-    Write-Output "Nothing installed in $dir."
-    exit 0
-}
 
 $installed = $null
 if ($folder) {
     $file = Get-PlainItem $binary
     if ($file -and $file.PSIsContainer) { Fail "Not changing ${binary}: it is not a regular file." }
+    [void](Get-PlainItem $uninstaller)
     $installed = Read-Receipt
     if ($file -and (-not $installed -or $installed.Binary -ne $binary -or $installed.Digest -ne (Get-Digest $binary))) {
         Fail "Not changing ${binary}: no matching installer receipt."
     }
+}
+
+if ($Uninstall -and -not $installed) {
+    Write-Output "Nothing installed in $dir."
+    exit 0
 }
 
 if ($Uninstall) {
@@ -123,7 +138,9 @@ if ($Uninstall) {
         $kept = @($parts | Where-Object { $_ -ine $installed.PathEntry })
         if ($kept.Count -ne $parts.Count) { Set-UserPath ($kept -join ';') $path.Kind }
     }
-    Remove-Old
+    if ((Remove-Old) -gt 0) {
+        Fail "An older Milo in $dir is still running. Close every Milo window, then run this again to finish."
+    }
     Remove-Item -LiteralPath $receipt -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $uninstaller -Force -ErrorAction SilentlyContinue
     Write-Output "Removed Milo from $dir. Settings were left in place."
@@ -138,26 +155,38 @@ if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { Fail "Place $asset b
 
 if (-not $folder) { [void](New-Item -ItemType Directory -Path $dir -Force) }
 $stage = Join-Path $dir ('.milo-' + [Guid]::NewGuid().ToString('N'))
-[void](New-Item -ItemType Directory -Path $stage)
+$failure = $null
+$aside = $null
+$placed = $false
 try {
+    [void](New-Item -ItemType Directory -Path $stage)
     $staged = Join-Path $stage 'milo.exe'
     Copy-Item -LiteralPath $source -Destination $staged
-    if ((Get-Digest $staged) -ne $expected) { Fail "SHA-256 mismatch for $asset. Nothing installed." }
+    if ((Get-Digest $staged) -ne $expected) { throw "SHA-256 mismatch for $asset. Nothing installed." }
     Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $stage 'uninstall-milo.ps1')
     $path = Get-UserPath
     $entry = if ($installed -and $installed.PathEntry) { $installed.PathEntry } elseif (Test-OnPath $path.Value) { '' } else { $dir }
     [IO.File]::WriteAllText((Join-Path $stage '.milo-install-receipt'), "$expected`n$binary`n$entry")
     # A running milo.exe can be renamed but not replaced, so the old copy steps aside first.
     if (Test-Path -LiteralPath $binary) {
-        Move-Item -LiteralPath $binary -Destination (Join-Path $dir ('.milo-old-' + [Guid]::NewGuid().ToString('N') + '.exe'))
+        $aside = Join-Path $dir ('.milo-old-' + [Guid]::NewGuid().ToString('N') + '.exe')
+        Move-Item -LiteralPath $binary -Destination $aside
     }
     Move-Item -LiteralPath $staged -Destination $binary
+    $placed = $true
     Move-Item -LiteralPath (Join-Path $stage 'uninstall-milo.ps1') -Destination $uninstaller -Force
     Move-Item -LiteralPath (Join-Path $stage '.milo-install-receipt') -Destination $receipt -Force
+} catch {
+    $failure = $_.Exception.Message
+    # Put back the milo.exe the receipt still describes, so a later run is not refused.
+    if ($placed) { Remove-Item -LiteralPath $binary -Force -ErrorAction SilentlyContinue }
+    if ($aside) { Move-Item -LiteralPath $aside -Destination $binary -ErrorAction SilentlyContinue }
 } finally {
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    if ($failure -and -not $folder) { try { [IO.Directory]::Delete($dir) } catch { } }
 }
-Remove-Old
+if ($failure) { Fail $failure }
+[void](Remove-Old)
 Write-Output "Installed Milo at $binary."
 if ($entry -and -not (Test-OnPath $path.Value)) {
     Set-UserPath $(if ($path.Value) { "$($path.Value);$entry" } else { $entry }) $path.Kind

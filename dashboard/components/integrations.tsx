@@ -55,7 +55,7 @@ export default function Integrations() {
   const returnTo = useRef<Detail | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const { presence, alerts, capabilities } = state;
-  const available = { automation: true, presence: presence !== null, alerts: alerts !== null };
+  const available = { automation: !state.unsupported?.automation, presence: presence !== null, alerts: alerts !== null };
 
   useLayoutEffect(() => {
     if (detail) {
@@ -80,7 +80,7 @@ export default function Integrations() {
   const forwarding = activeAlerts.length > 0;
   const listedAlerts = forwarding ? activeAlerts : alertDestinations.filter(([key]) => alerts?.[key].saved);
   const summaries = {
-    automation: rules ? `${rules} ${rules === 1 ? 'rule' : 'rules'} on` : 'Off',
+    automation: state.unsupported?.automation ?? (rules ? `${rules} ${rules === 1 ? 'rule' : 'rules'} on` : 'Off'),
     presence: presence ? (presence.enabled ? 'On' : 'Off') : state.unsupported?.presence ?? unavailable,
     alerts: alerts?.health ?? state.unsupported?.alerts ?? unavailable,
   };

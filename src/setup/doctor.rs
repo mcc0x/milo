@@ -124,7 +124,8 @@ impl Checks {
 }
 
 fn store() -> Result<Store, String> {
-    Store::real().ok_or_else(|| "Could not locate your settings folders. Check HOME and XDG_CONFIG_HOME.".into())
+    let check = if cfg!(windows) { "APPDATA and LOCALAPPDATA" } else { "HOME and XDG_CONFIG_HOME" };
+    Store::real().ok_or_else(|| format!("Could not locate your settings folders. Check {check}."))
 }
 
 pub(crate) fn report() -> Result<String, String> {
