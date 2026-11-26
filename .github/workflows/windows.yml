@@ -1,0 +1,43 @@
+name: Windows
+
+# Native Windows only: the MSVC target built and tested on a Windows host. This is not WSL,
+# a cross-compile from Linux, or a Windows Rex client attached to another host.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native Windows x86-64 tests
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      # Keep the checked-out bytes as committed: fixtures and the dashboard bundle are hashed.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.91.0 --profile minimal
+      - name: Record the host
+        run: |
+          (Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, OSArchitecture | Format-List | Out-String).Trim()
+          rustc +1.91.0 -vV
+          git --version
+      - run: cargo +1.91.0 check --locked --all-targets
+      - name: Run the tests in a private temporary folder
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: cargo +1.91.0 test --locked
+      - name: Edit, save and refuse an external change in a pseudoconsole
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: cargo +1.91.0 test --locked --test windows_console -- --nocapture
