@@ -97,7 +97,8 @@ fn committed_transactions_are_read_through_checkpoints_restarts_and_an_open_tran
     let wal = sidecar(&path, "-wal");
     let insert = |rows: u32| {
         writer.exec(&format!(
-            "INSERT INTO t(n, b) SELECT value, randomblob(3000) FROM generate_series(1, {rows});
+            "INSERT INTO t(n, b) WITH RECURSIVE s(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM s WHERE value < {rows})
+             SELECT value, randomblob(3000) FROM s;
              UPDATE t SET n = n + 1 WHERE rowid = 1;"
         ));
     };
@@ -129,7 +130,8 @@ fn a_torn_frame_ends_the_log_there() {
     let f = Fixture::folder();
     let (path, writer) = busy(&f);
     for _ in 0..4 {
-        writer.exec("INSERT INTO t(n, b) SELECT value, randomblob(100) FROM generate_series(1, 10);");
+        writer.exec("INSERT INTO t(n, b) WITH RECURSIVE s(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM s WHERE value < 10)
+             SELECT value, randomblob(100) FROM s;");
     }
     let (db, wal) = (fs::read(&path).unwrap(), fs::read(sidecar(&path, "-wal")).unwrap());
     let whole = fold(db.clone(), &wal).unwrap();
