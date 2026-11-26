@@ -273,6 +273,7 @@ mod tests {
         List { entries, active: 0 }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_list_comes_back_as_it_was_saved_and_is_private() {
         use std::os::unix::fs::PermissionsExt as _;

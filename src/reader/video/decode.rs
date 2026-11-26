@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io::{self, BufReader, Read as _, Seek as _};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
@@ -63,8 +64,9 @@ impl Task {
             .stdin(Stdio::from(input.try_clone().map_err(|_| START)?))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .process_group(0)
             .args(["-hide_banner", "-v", "error", "-max_alloc", "67108864"]);
+        #[cfg(unix)]
+        command.process_group(0);
         if !probe {
             command.args(["-nostdin", "-filter_threads", "1"]);
         }
@@ -108,12 +110,16 @@ impl Task {
                 command.args(["-threads", "1", "-c:v", "ppm", "-pix_fmt", "rgb24", "-f", "image2pipe", "pipe:1"]);
             }
         }
-        let cpu = self.cpu_seconds();
-        // SAFETY: The hook only invokes async-signal-safe setrlimit calls in the child before exec.
-        unsafe { command.pre_exec(move || limit_child(cpu)) };
+        #[cfg(unix)]
+        {
+            let cpu = self.cpu_seconds();
+            // SAFETY: The hook only invokes async-signal-safe setrlimit calls in the child before exec.
+            unsafe { command.pre_exec(move || limit_child(cpu)) };
+        }
         Ok(command)
     }
 
+    #[cfg(unix)]
     fn cpu_seconds(self) -> libc::rlim_t {
         const STARTUP: libc::rlim_t = 5;
         match self {
@@ -166,6 +172,7 @@ fn playback_ended_early(left: Duration, count: u32) -> bool {
     left > frame_time(count + 2)
 }
 
+#[cfg(unix)]
 fn limit_child(cpu: libc::rlim_t) -> io::Result<()> {
     let cpu = libc::rlimit { rlim_cur: cpu, rlim_max: cpu };
     // SAFETY: setrlimit reads this initialized limit and applies it to the calling child only.
@@ -268,6 +275,18 @@ impl Job {
 
     /// Even after a natural exit, a helper with stdout closed may still share
     /// the snapshot's input offset with the next job.
+    #[cfg(windows)]
+    fn reap(&mut self, cancel: bool) -> io::Result<Option<ExitStatus>> {
+        let Some(child) = &mut self.child else { return Ok(None) };
+        if !cancel && child.try_wait()?.is_none() {
+            return Ok(None);
+        }
+        let mut child = self.child.take().expect("the decoder child has not been reaped");
+        let _ = child.kill();
+        child.wait().map(Some)
+    }
+
+    #[cfg(unix)]
     fn reap(&mut self, cancel: bool) -> io::Result<Option<ExitStatus>> {
         let Some(child) = &self.child else { return Ok(None) };
         let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
@@ -434,12 +453,16 @@ fn read_frame(reader: &mut impl io::Read, frame: &mut VideoFrame) -> io::Result<
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::sync::mpsc;
 
     use super::*;
+    #[cfg(unix)]
     use crate::fixture::Fixture;
+    #[cfg(unix)]
     use crate::format::tests::stand_in;
 
+    #[cfg(unix)]
     #[test]
     fn dropping_a_video_job_does_not_wait_for_a_decoder_helper() {
         let f = Fixture::folder();
@@ -481,6 +504,7 @@ wait"#,
         assert!(closed_before_release.is_ok(), "closing MP4 preview waited for the decoder helper's output pipe");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_finished_probe_cannot_consume_the_next_decoders_snapshot() {
         fn finish(job: &mut Job) -> Result<Output, &'static str> {
@@ -561,6 +585,7 @@ printf 'P6\n1 1\n255\n\001\002\003'"#,
         assert_eq!(visible.unwrap().rgb, [1, 2, 3]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn cpu_limits_distinguish_stills_and_probes_from_long_playback() {
         let playback = |left, playing| Task::Frames { from: Duration::ZERO, left, playing }.cpu_seconds();

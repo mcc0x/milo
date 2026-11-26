@@ -1251,6 +1251,7 @@ mod tests {
         assert!(rows[7].contains("60   line 60") && rows[8].starts_with(" Line 900"), "{rows:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn working_tabs_keep_directory_aliases_distinct_and_follow_retargets_when_shown() {
         use std::os::unix::fs::symlink;
@@ -1274,6 +1275,7 @@ mod tests {
         assert!(drawn(&mut tabs, 80, 6)[2].ends_with("retargeted body"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn working_tab_identity_is_not_the_lossy_label() {
         use std::ffi::OsStr;

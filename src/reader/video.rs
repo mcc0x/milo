@@ -1,14 +1,21 @@
 //! Muted, on-demand MP4 playback from an anonymous snapshot of an already-open file.
 
 use std::borrow::Cow;
+#[cfg(unix)]
 use std::ffi::OsStr;
-use std::fs::{self, File};
+#[cfg(unix)]
+use std::fs;
+use std::fs::File;
+#[cfg(unix)]
 use std::io::{self, Read as _, Seek as _, Write as _};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt as _;
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use crate::fs_ops::Temp;
 
 mod decode;
@@ -56,7 +63,11 @@ pub(super) struct Video {
 
 impl Video {
     pub(super) fn from_snapshot(snapshot: Snapshot) -> Result<Self, &'static str> {
-        let tools = Tools::installed().ok_or("MP4 preview requires system FFmpeg and FFprobe (8.0 or later).")?;
+        #[cfg(windows)]
+        let missing = UNSUPPORTED;
+        #[cfg(unix)]
+        let missing = "MP4 preview requires system FFmpeg and FFprobe (8.0 or later).";
+        let tools = Tools::installed().ok_or(missing)?;
         Ok(Self {
             source: Some(snapshot.0),
             tools,
@@ -240,6 +251,20 @@ fn check_preparation(cancel: &AtomicBool, deadline: Instant) -> Result<(), &'sta
 }
 
 pub(super) fn snapshot(source: &mut File, cancel: &AtomicBool) -> Result<Snapshot, &'static str> {
+    #[cfg(windows)]
+    {
+        let _ = (source, cancel);
+        return Err(UNSUPPORTED);
+    }
+    #[cfg(unix)]
+    snapshot_unix(source, cancel)
+}
+
+#[cfg(windows)]
+const UNSUPPORTED: &str = "Video playback is not supported on Windows yet.";
+
+#[cfg(unix)]
+fn snapshot_unix(source: &mut File, cancel: &AtomicBool) -> Result<Snapshot, &'static str> {
     const READ: &str = "Could not read the MP4 file.";
     const COPY: &str = "Could not create a private MP4 preview snapshot.";
     const LARGE: &str = "MP4 preview is limited to 128 MiB.";
@@ -324,6 +349,7 @@ fn is_mp4(bytes: &[u8]) -> bool {
     brand(&bytes[8..12]) || bytes[16..size].as_chunks::<4>().0.iter().any(|bytes| brand(bytes.as_slice()))
 }
 
+#[cfg(unix)]
 fn anonymous_file() -> io::Result<File> {
     let mut template = if cfg!(target_os = "macos") {
         b"/private/tmp/milo-video.XXXXXX\0".to_vec()
@@ -345,13 +371,19 @@ fn anonymous_file() -> io::Result<File> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::super::{Body, Reader};
     use super::*;
+    #[cfg(unix)]
     use crate::fixture::Fixture;
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt as _;
+    #[cfg(unix)]
     use std::process::Command;
+    #[cfg(unix)]
     use std::thread;
 
+    #[cfg(unix)]
     #[test]
     fn copies_the_open_file_without_reopening_its_path() {
         let fixture = Fixture::folder();
@@ -371,6 +403,7 @@ mod tests {
         assert_eq!(bytes.as_slice(), original.as_slice());
     }
 
+    #[cfg(unix)]
     #[test]
     fn rejects_a_file_larger_than_the_snapshot_limit() {
         let fixture = Fixture::folder();
@@ -379,6 +412,7 @@ mod tests {
         assert_eq!(snapshot(&mut file, &AtomicBool::new(false)).err(), Some("MP4 preview is limited to 128 MiB."));
     }
 
+    #[cfg(unix)]
     #[test]
     fn aborts_a_canceled_or_expired_snapshot() {
         let fixture = Fixture::folder();
@@ -403,6 +437,7 @@ mod tests {
         assert!(!is_mp4(b"\0\0\0\x10moovisom\0\0\0\0"));
     }
 
+    #[cfg(unix)]
     #[test]
     #[ignore = "needs system FFmpeg and FFprobe (8.0 or later)"]
     fn non_grid_eof_bookmark_restores_the_last_sample_across_tabs() {

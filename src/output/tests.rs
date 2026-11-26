@@ -1,6 +1,7 @@
 //! Checks which mentions in terminal output are offered, in what order and with what beside them.
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::symlink;
 
 use super::*;
@@ -82,6 +83,7 @@ fn the_ways_tools_print_a_place_are_read() {
     assert_eq!(titles(&report), ["src/main.rs:5:1"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn what_is_not_a_file_of_the_worktree_is_never_offered() {
     let (f, tree) = project();
