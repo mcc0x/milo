@@ -468,12 +468,13 @@ fn published(shm: &File) -> Option<End> {
 }
 
 #[repr(C)]
+#[derive(Default)]
 struct Overlapped {
     internal: usize,
     internal_high: usize,
     offset: u32,
     offset_high: u32,
-    event: *mut c_void,
+    event: usize,
 }
 
 #[repr(C)]
@@ -500,8 +501,7 @@ struct Held<'a> {
 
 impl Drop for Held<'_> {
     fn drop(&mut self) {
-        let mut overlapped =
-            Overlapped { internal: 0, internal_high: 0, offset: self.offset, offset_high: 0, event: ptr::null_mut() };
+        let mut overlapped = Overlapped { offset: self.offset, ..Overlapped::default() };
         // SAFETY: The range was locked through this open handle; the OVERLAPPED only names it.
         unsafe { UnlockFileEx(self.file.as_raw_handle(), 0, self.len, 0, &raw mut overlapped) };
     }
@@ -509,7 +509,7 @@ impl Drop for Held<'_> {
 
 /// Takes a shared lock on the range without waiting, as SQLite takes its shared locks on Windows.
 fn hold(file: &File, offset: u32, len: u32) -> Option<Held<'_>> {
-    let mut overlapped = Overlapped { internal: 0, internal_high: 0, offset, offset_high: 0, event: ptr::null_mut() };
+    let mut overlapped = Overlapped { offset, ..Overlapped::default() };
     // SAFETY: The handle is open, the OVERLAPPED only names the range, and the call never waits.
     let locked =
         unsafe { LockFileEx(file.as_raw_handle(), LOCKFILE_FAIL_IMMEDIATELY, 0, len, 0, &raw mut overlapped) } != 0;
