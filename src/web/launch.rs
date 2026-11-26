@@ -6,7 +6,7 @@ use std::io::{self, Write as _};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -29,15 +29,8 @@ impl Launch {
         #[cfg(not(target_os = "macos"))]
         let program = "xdg-open";
 
-        // Do not put a bearer under an environment-selected TMPDIR. In the system
-        // temp directory, only the owner or root should be able to remove our file.
-        let root = Path::new("/tmp");
-        let metadata = fs::metadata(root)?;
-        let mode = metadata.mode();
-        if !metadata.is_dir() || metadata.uid() != 0 || (mode & 0o022 != 0 && mode & 0o1000 == 0) {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsafe system temporary directory"));
-        }
-        Self::spawn(root, Command::new(program), url)
+        let root = handoff_root()?;
+        Self::spawn(&root, Command::new(program), url)
     }
 
     pub(super) fn spawn(root: &Path, mut command: Command, url: &str) -> io::Result<Self> {
@@ -92,6 +85,35 @@ impl Launch {
         self.handoff = None;
         eprintln!("milo web: could not open the browser ({error}); open the URL above");
     }
+}
+
+/// Where the browser can read the one-use page. Do not put a bearer under an
+/// environment-selected TMPDIR: only a directory its owner alone can change is safe.
+fn handoff_root() -> io::Result<PathBuf> {
+    // A confined browser, such as Ubuntu's Snap Firefox, has its own /tmp and cannot read
+    // hidden folders, but it can read the user's home folder. The file lives there for
+    // at most a couple of minutes, mode 0600, and goes as soon as the browser connects.
+    #[cfg(not(target_os = "macos"))]
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from).filter(|home| home.is_absolute()) {
+        // SAFETY: `geteuid` takes no arguments and only reads this process's user ID.
+        let user = unsafe { libc::geteuid() };
+        if owner_only(&home, user) {
+            return Ok(home);
+        }
+    }
+    // In the system temp directory, only the owner or root should be able to remove our file.
+    let root = PathBuf::from("/tmp");
+    let metadata = fs::metadata(&root)?;
+    let mode = metadata.mode();
+    if !metadata.is_dir() || metadata.uid() != 0 || (mode & 0o022 != 0 && mode & 0o1000 == 0) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsafe system temporary directory"));
+    }
+    Ok(root)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn owner_only(directory: &Path, user: u32) -> bool {
+    fs::metadata(directory).is_ok_and(|metadata| metadata.is_dir() && metadata.uid() == user && metadata.mode() & 0o022 == 0)
 }
 
 fn file_url(path: &Path) -> String {
@@ -164,6 +186,28 @@ mod tests {
         assert!(path.exists());
         launch.connected();
         assert!(!path.exists(), "authentication removes the file at once");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn only_a_folder_nobody_else_can_change_may_hold_the_handoff() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let folder = Fixture::folder();
+        let user = folder.root.metadata().unwrap().uid();
+        let home = folder.root.join("home");
+        fs::create_dir(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(owner_only(&home, user));
+        assert!(!owner_only(&home, user + 1), "another owner's folder");
+        assert!(!owner_only(&folder.root.join("missing"), user));
+        assert!(!owner_only(&home.join("../home/none"), user));
+        for open in [0o770, 0o707, 0o777] {
+            fs::set_permissions(&home, fs::Permissions::from_mode(open)).unwrap();
+            assert!(!owner_only(&home, user), "mode {open:o} lets others replace the file");
+        }
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(owner_only(&home, user), "a usual home folder is fine");
     }
 
     #[test]
