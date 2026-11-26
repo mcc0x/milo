@@ -559,7 +559,11 @@ fn open_at(parent: Option<&File>, name: &[u16], access: u32, share: u32, options
     };
     let mut handle = ptr::null_mut();
     let mut status_block = IoStatusBlock { status: 0, information: 0 };
-    let options = options | FILE_OPEN_REPARSE_POINT | FILE_OPEN_NO_RECALL;
+    // The I/O manager refuses a folder open with FILE_OPEN_NO_RECALL as an invalid parameter:
+    // it is not among the options allowed beside FILE_DIRECTORY_FILE. A folder's contents are
+    // not recalled by opening it, so only other opens need it.
+    let no_recall = if options & FILE_DIRECTORY_FILE == 0 { FILE_OPEN_NO_RECALL } else { 0 };
+    let options = options | FILE_OPEN_REPARSE_POINT | no_recall;
     // SAFETY: The name and attributes outlive the call, the parent handle is open while borrowed,
     // and the handle and status block are writable. FILE_OPEN never creates or overwrites a file.
     let status = unsafe {
@@ -886,6 +890,16 @@ mod tests {
         let verbatim = Root::open(&fixture.root).unwrap();
         let plain = Root::open(&plain_form(&fixture.root)).unwrap();
         assert!(verbatim.same_directory(&plain) && verbatim.try_clone().unwrap().identity() == plain.identity());
+    }
+
+    #[test]
+    fn the_temporary_folder_opens_as_written_and_as_canonicalized() {
+        let temp = std::env::temp_dir();
+        let canonical = temp.canonicalize().unwrap();
+        let written = Root::open(&temp).unwrap();
+        let verbatim = Root::open(&canonical).unwrap();
+        let plain = Root::open(&plain_form(&canonical)).unwrap();
+        assert!(written.same_directory(&verbatim) && verbatim.same_directory(&plain));
     }
 
     #[test]
