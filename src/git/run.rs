@@ -181,11 +181,26 @@ fn exact_pathspec(path: &str) -> String {
     const MAGIC: &str = ":(glob)";
     let mut spec = String::with_capacity(MAGIC.len() + path.len() + 1);
     spec.push_str(MAGIC);
+    #[cfg(unix)]
     for (i, ch) in path.char_indices() {
         if matches!(ch, '*' | '?' | '[' | '\\') || i + ch.len_utf8() == path.len() {
             spec.push('\\');
         }
         spec.push(ch);
+    }
+    // Git for Windows reads a backslash in a pathspec as a folder separator, so a
+    // bracket escapes each character instead. A bracket holds one byte, so the last
+    // ASCII character stands in for the final one.
+    #[cfg(windows)]
+    {
+        let Some(last) = path.rfind(|ch: char| ch.is_ascii()) else { return format!(":(literal){path}") };
+        for (i, ch) in path.char_indices() {
+            if matches!(ch, '*' | '?' | '[') || i == last {
+                spec.extend(['[', ch, ']']);
+            } else {
+                spec.push(ch);
+            }
+        }
     }
     spec
 }
