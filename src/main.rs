@@ -810,6 +810,10 @@ fn main() {
     if first.as_deref() == Some(OsStr::new(presence::HELPER_COMMAND)) {
         exit(presence::helper(&args.collect::<Vec<_>>()));
     }
+    #[cfg(windows)]
+    if first.as_deref() == Some(OsStr::new(picture::DECODER_COMMAND)) {
+        exit(picture::decoder(&args.collect::<Vec<_>>()));
+    }
     let second = args.next();
     let rest: Vec<_> = args.collect();
     let command = command(first.as_deref(), second.as_deref(), &rest).unwrap_or_else(|why| fail(&why));

@@ -9,14 +9,12 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use super::{
-    DecodeControl, LONGEST_SIDE, PNG_LIMIT, Prepared, Raster, Refusal, check_png_image_data, le32, png_size,
-    source_size, write_png_pixels,
+    DecodeControl, LONGEST_SIDE, PNG_LIMIT, Prepared, RASTER_SIDE, Raster, Refusal, check_png_image_data, le32,
+    over_gray, png_size, source_size, write_png_pixels,
 };
 use crate::fs_ops;
 
 const IO_CHUNK: usize = 64 << 10;
-/// The terminal can't use every pixel in the Kitty PNG as a colored cell.
-const RASTER_SIDE: u32 = 512;
 const BMP_LIMIT: u64 = 4 * RASTER_SIDE as u64 * RASTER_SIDE as u64 + 4096;
 
 enum Output {
@@ -270,15 +268,8 @@ fn bitmap(bytes: &[u8]) -> Option<Raster> {
         let y = if signed_height < 0 { row } else { height - 1 - row };
         for pixel in pixels[y * stride..y * stride + row_pixels].chunks_exact(pixel_size) {
             let [blue, green, red, ..] = pixel else { unreachable!("validated pixel size") };
-            let mut color = [*red, *green, *blue];
-            if alpha && pixel[3] != 255 {
-                // RGB24 has no alpha. Neutral gray is legible against terminals
-                // with either a light or a dark background.
-                let opacity = u16::from(pixel[3]);
-                color =
-                    color.map(|c| u8::try_from((u16::from(c) * opacity + 128 * (255 - opacity) + 127) / 255).unwrap());
-            }
-            rgb.extend_from_slice(&color);
+            let color = [*red, *green, *blue];
+            rgb.extend_from_slice(&if alpha && pixel[3] != 255 { over_gray(color, pixel[3]) } else { color });
         }
     }
     Some(Raster { rgb, width, height })

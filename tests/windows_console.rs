@@ -532,25 +532,56 @@ fn markdown_renders_in_the_reader_follows_a_save_elsewhere_and_shows_its_source(
 }
 
 #[test]
-fn pictures_and_video_say_what_windows_cannot_show_yet() {
+fn pictures_are_drawn_as_cells_and_what_cannot_be_shown_says_so() {
     let scratch = Scratch::new("media");
     let project = scratch.0.join("project");
     fs::write(project.join("mark.png"), include_bytes!("../src/usage/marks/codex.png")).unwrap();
     fs::write(project.join("dusk.jpg"), include_bytes!("rex_lab/river-dusk.jpg")).unwrap();
     fs::write(project.join("river.mp4"), include_bytes!("rex_lab/river-motion.mp4")).unwrap();
-    for (file, note) in [
-        ("mark.png", "cell preview is not supported on Windows yet."),
-        ("dusk.jpg", "only PNGs up to 1600 pixels"),
+    // Whole chunks whose compressed data cannot be inflated, and a header past the size limit.
+    let mut damaged = include_bytes!("../src/usage/marks/codex.png").to_vec();
+    let data = damaged.windows(4).position(|kind| kind == b"IDAT").unwrap() + 4;
+    damaged[data..data + 2].copy_from_slice(&[0xff, 0xff]);
+    fs::write(project.join("damaged.png"), damaged).unwrap();
+    let mut huge = include_bytes!("../src/usage/marks/codex.png").to_vec();
+    huge[16..20].copy_from_slice(&20_000_u32.to_be_bytes());
+    fs::write(project.join("huge.png"), huge).unwrap();
+    fs::write(
+        project.join("still.webp"),
+        b"RIFF\x22\0\0\0WEBPVP8 \x16\0\0\0\x30\x01\0\x9d\x01\x2a\x01\0\x01\0\x0e\xc0\xfe\x25\xa4\0\x03\x70\0\0\0\0",
+    )
+    .unwrap();
+    for (file, shown) in [
+        ("mark.png", "\u{2580}"),
+        ("dusk.jpg", "\u{2580}"),
+        ("damaged.png", "could not be decoded."),
+        ("huge.png", "preview size limit."),
+        ("still.webp", "not supported on Windows yet."),
         ("river.mp4", "playback is not supported on Windows yet."),
     ] {
         // The console redraws only the cells that changed since "Preparing preview…", so only the
         // end of each note is sure to arrive in one piece.
         let (mut console, at) = open_pane(&scratch, &format!("view {file}"));
-        console.see(note, at);
+        console.see(shown, at);
         let mark = console.text().len();
         console.keys(b"q");
         finish(&console, mark);
     }
+}
+
+#[test]
+fn the_picture_decoder_refuses_to_run_outside_its_job() {
+    let mut decoder = Command::new(env!("CARGO_BIN_EXE_milo"))
+        .args(["picture-decoder", "png", "192", "192"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    decoder.stdin.take().unwrap().write_all(include_bytes!("../src/usage/marks/codex.png")).unwrap();
+    let output = decoder.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
 }
 
 #[test]

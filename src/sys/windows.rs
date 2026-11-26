@@ -282,12 +282,15 @@ struct ExtendedLimits {
 
 const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+/// One process, a commit limit, and no error dialog or debugger wait after a crash.
+const JOB_OBJECT_LIMIT_CONFINED: u32 = 0x0008 | 0x0100 | 0x0400;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> *mut c_void;
     fn SetInformationJobObject(job: *mut c_void, class: i32, info: *const c_void, size: u32) -> i32;
     fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
+    fn QueryInformationJobObject(job: *mut c_void, class: i32, info: *mut c_void, size: u32, used: *mut u32) -> i32;
     fn TerminateJobObject(job: *mut c_void, code: u32) -> i32;
     fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
     fn GetExitCodeProcess(process: *mut c_void, code: *mut u32) -> i32;
@@ -317,6 +320,43 @@ pub(crate) struct Job(OwnedHandle);
 
 impl Job {
     pub(crate) fn contain(child: &std::process::Child) -> io::Result<Self> {
+        Self::with_limits(
+            child,
+            ExtendedLimits { flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, ..ExtendedLimits::default() },
+        )
+    }
+
+    /// Contains a helper that may commit at most `memory` bytes and cannot start a program of its
+    /// own. The helper calls `confined` to check that it runs so contained before it does any work.
+    pub(crate) fn confine(child: &std::process::Child, memory: usize) -> io::Result<Self> {
+        let flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_CONFINED;
+        Self::with_limits(
+            child,
+            ExtendedLimits { flags, active_processes: 1, process_memory: memory, ..ExtendedLimits::default() },
+        )
+    }
+
+    /// Whether this process's own job holds it to one process and at most `memory` committed bytes.
+    pub(crate) fn confined(memory: usize) -> bool {
+        let mut limits = ExtendedLimits::default();
+        let size = u32::try_from(size_of::<ExtendedLimits>()).expect("job limits fit in a u32");
+        // SAFETY: A null job names this process's innermost job; the record is writable and `size` long.
+        let found = unsafe {
+            QueryInformationJobObject(
+                std::ptr::null_mut(),
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                (&raw mut limits).cast(),
+                size,
+                std::ptr::null_mut(),
+            )
+        };
+        found != 0
+            && limits.flags & JOB_OBJECT_LIMIT_CONFINED == JOB_OBJECT_LIMIT_CONFINED
+            && limits.active_processes == 1
+            && (1..=memory).contains(&limits.process_memory)
+    }
+
+    fn with_limits(child: &std::process::Child, limits: ExtendedLimits) -> io::Result<Self> {
         // SAFETY: Null asks for default security and no name; the result is checked before use.
         let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if raw.is_null() {
@@ -324,7 +364,6 @@ impl Job {
         }
         // SAFETY: A new job handle is owned by this call and closed with the value.
         let job = Self(unsafe { OwnedHandle::from_raw_handle(raw) });
-        let limits = ExtendedLimits { flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, ..ExtendedLimits::default() };
         let size = u32::try_from(size_of::<ExtendedLimits>()).expect("job limits fit in a u32");
         // SAFETY: The limits record lives for the call and `size` is its exact length.
         let set = unsafe {

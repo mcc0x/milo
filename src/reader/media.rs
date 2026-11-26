@@ -12,7 +12,7 @@ pub(super) fn picture(s: &mut Screen, rows: usize, picture: &Picture) -> Option<
     if room == 0 || rows == 0 {
         return None;
     }
-    if s.pictures() == Some(true) {
+    if s.pictures() == Some(true) && picture.kitty() {
         let size = picture.fit(s.cell_size(), room, rows);
         let origin = (1 + (room - size.0) / 2, 1 + (rows - size.1) / 2);
         s.show_picture(picture, origin.0, origin.1, size.0, size.1);
@@ -24,10 +24,7 @@ pub(super) fn picture(s: &mut Screen, rows: usize, picture: &Picture) -> Option<
     None
 }
 
-#[cfg(not(windows))]
 const NO_PICTURES: &str = "Kitty graphics and a cell preview are unavailable here.";
-#[cfg(windows)]
-const NO_PICTURES: &str = "Pictures need Kitty graphics here; a cell preview is not supported on Windows yet.";
 
 pub(super) fn movie<'a>(s: &mut Screen, rows: usize, video: &'a Video) -> Option<&'a str> {
     if let Some(why) = video.error() {

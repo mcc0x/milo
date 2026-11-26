@@ -1372,7 +1372,7 @@ fn a_picture_is_shown_in_the_middle_at_its_own_size_where_the_terminal_can() {
     plain.answered();
     reader.draw(&mut plain);
     assert!(plain.picture_at().is_none());
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", windows)) {
         assert_eq!(plain.text()[4], format!("{}{}", " ".repeat(4), "▀".repeat(32)));
         assert_eq!(plain.text()[5], plain.text()[4]);
     } else {
