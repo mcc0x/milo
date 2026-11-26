@@ -1,0 +1,61 @@
+name: Installed Windows anonymous counts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/counts-windows.yml
+      - .github/ci/stage-windows.ps1
+      - windows/**
+      - tests/windows-counts/**
+      - tests/windows_console.rs
+      - hosted/counts/**
+      - src/telemetry*
+      - src/telemetry/**
+      - src/main.rs
+      - src/pane*
+      - src/pane/**
+      - src/term*
+      - src/term/**
+      - src/setup*
+      - src/setup/**
+      - src/preferences*
+      - src/preferences/**
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    outputs:
+      native: ${{ steps.source.outputs.native }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: source
+        run: |
+          if test -f windows/install.ps1.in; then
+            echo 'native=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'This revision has no native Windows installer; qualification was skipped.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  installed:
+    name: Installed Windows client to private counts dashboard
+    needs: source
+    if: needs.source.outputs.native == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.5
+      - run: rustup toolchain install 1.91.0 --profile minimal
+      - run: ./tests/windows-counts/qualify.ps1
