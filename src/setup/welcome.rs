@@ -363,7 +363,13 @@ impl Welcome {
         for (i, item) in rows[start..start + count].iter().enumerate() {
             let row = first + i * stride;
             let selected = start + i == self.selected;
-            let style = if !selected { Style::PLAIN } else if indent == 0 { HEADING.reverse() } else { HEADING };
+            let style = if !selected {
+                Style::PLAIN
+            } else if indent == 0 {
+                HEADING.reverse()
+            } else {
+                HEADING
+            };
             if selected && indent > 0 {
                 s.put(x, row, indent, "›", Style::fg(CYAN).bold());
             }
@@ -491,7 +497,10 @@ impl Pane for Welcome {
             Key::Enter | Key::Char(' ') => {
                 let step = self.step;
                 let after = self.act(rows[self.selected].3);
-                if step == Step::Intro && self.step == Step::Choose && let Some((x, y)) = click {
+                if step == Step::Intro
+                    && self.step == Step::Choose
+                    && let Some((x, y)) = click
+                {
                     self.confirm_click.opened(x, y);
                 }
                 after

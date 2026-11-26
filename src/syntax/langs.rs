@@ -613,11 +613,7 @@ mod tests {
     fn toml_keys_allow_quoted_parts_with_brackets_and_dots() {
         assert_eq!(
             one(&TOML, r#"server . "has.dot" . 'quoted' = "value" # note"#),
-            [
-                (r#"server . "has.dot" . 'quoted'"#, Class::Key),
-                (r#""value""#, Class::Str),
-                ("# note", Class::Comment),
-            ]
+            [(r#"server . "has.dot" . 'quoted'"#, Class::Key), (r#""value""#, Class::Str), ("# note", Class::Comment),]
         );
         assert_eq!(
             one(&TOML, r#" [["has\" ]]" . 'also]']] # note"#),
@@ -628,10 +624,7 @@ mod tests {
     #[test]
     fn swift_raw_escapes_do_not_end_single_or_multiline_strings() {
         let single = r##"#"escaped \#"# text"#"##;
-        assert_eq!(
-            one(&SWIFT, &format!("{single} + 1")),
-            [(single, Class::Str), ("1", Class::Number)]
-        );
+        assert_eq!(one(&SWIFT, &format!("{single} + 1")), [(single, Class::Str), ("1", Class::Number)]);
 
         let mut state = State::Code;
         pieces(&SWIFT, "#\"\"\"", &mut state);

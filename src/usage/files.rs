@@ -1,11 +1,12 @@
 //! Walks the session trees without following links and reads within a refresh budget.
 
+use crate::sys::{AsRawFd, RawFd};
 use std::ffi::{CStr, CString, OsStr};
 use std::fs::File;
 use std::io::{self, Read};
 use std::mem::MaybeUninit;
 use std::ops::ControlFlow;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::fd::{AsFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt as _};
 use std::path::{Path, PathBuf};
@@ -163,7 +164,7 @@ pub(super) fn read_cached<T>(
 /// Bounds pipe capture even if its writer stops producing output without closing it.
 pub(super) fn read_pipe(input: impl AsFd, max: usize, deadline: Instant) -> Option<Vec<u8>> {
     let fd = input.as_fd();
-    let mut poll = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    let mut poll = crate::sys::pollfd { fd: fd.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 };
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 8192];
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {

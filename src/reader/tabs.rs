@@ -6,9 +6,9 @@
 //! above it with the second. A tab closes only once its file is no longer
 //! being edited, which is where unsaved edits are asked about.
 
+use crate::sys::RawFd;
 use std::cell::{Cell, OnceCell};
 use std::ops::Range;
-use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 

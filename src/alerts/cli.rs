@@ -1,9 +1,9 @@
 //! `milo alerts`: see, choose, test and turn off the mirroring of Rex alerts.
 
+use crate::sys::AsRawFd as _;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::io::{self, BufRead as _, IsTerminal as _, Read as _, Write as _};
-use std::os::fd::AsRawFd as _;
 
 use super::{Alerts, Content, Destination, Kind, Summary, describe, forward, lifecycle, message, parse_kinds};
 

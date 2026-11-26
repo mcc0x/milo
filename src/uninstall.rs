@@ -358,7 +358,9 @@ esac
         let (f, prefix) = brew_fixture();
         let path = prefix.join("Cellar/milo/1/bin/milo");
         let running = id(&path);
-        assert!(matches!(standalone(&path, running, &f.root, None), Err(e) if e.contains("configured Homebrew Cellar")));
+        assert!(
+            matches!(standalone(&path, running, &f.root, None), Err(e) if e.contains("configured Homebrew Cellar"))
+        );
         let install = Installation::find(&path, running, Some(&f.root), None, &prefix.join("bin")).unwrap();
         assert!(matches!(install, Installation::Homebrew(_)));
         install.remove(&path, running).unwrap();
@@ -371,7 +373,9 @@ esac
         let (f, prefix) = brew_fixture();
         let path = prefix.join("Cellar/milo/1/bin/milo");
         let running = id(&path);
-        let classify = || Installation::find(&path, running, Some(&f.root), path.parent().map(Path::as_os_str), &prefix.join("bin"));
+        let classify = || {
+            Installation::find(&path, running, Some(&f.root), path.parent().map(Path::as_os_str), &prefix.join("bin"))
+        };
         let install = classify().unwrap();
         fs::remove_file(prefix.join("opt/milo")).unwrap();
         symlink("../Cellar/milo/2", prefix.join("opt/milo")).unwrap();

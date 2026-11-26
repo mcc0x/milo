@@ -1666,11 +1666,14 @@ fn repeat_clicks_do_not_cross_between_home_and_settings() {
         let (col, setup_quit) = {
             let setup = probe.output();
             // Plain spaces can separate two cursor writes, so match words.
-            let col = ["Project", "Follow", "Track", "edits", "Outline", "New", "commits", "Tab", "titles", "On", "Off"]
-                .into_iter()
-                .flat_map(|word| painted(&setup, word))
-                .find_map(|target| overlap(&settings, &target))
-                .unwrap_or_else(|| panic!("no actionable Settings overlap with {settings:?} at {cols}×{rows}: {setup:?}"));
+            let col =
+                ["Project", "Follow", "Track", "edits", "Outline", "New", "commits", "Tab", "titles", "On", "Off"]
+                    .into_iter()
+                    .flat_map(|word| painted(&setup, word))
+                    .find_map(|target| overlap(&settings, &target))
+                    .unwrap_or_else(|| {
+                        panic!("no actionable Settings overlap with {settings:?} at {cols}×{rows}: {setup:?}")
+                    });
             (col, painted(&setup, "q quit").next().unwrap())
         };
         let row = settings.0;
@@ -2401,12 +2404,8 @@ fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_i
     // a later line, a second apart. Both looks only read a file here, so the
     // line with both must come within a few.
     let settled = |line: &String| line.contains("deepseek") && !line.contains("Asking the provider");
-    let line = lines
-        .by_ref()
-        .take(10)
-        .map(Result::unwrap)
-        .find(settled)
-        .expect("a line with both accounts' saved answers");
+    let line =
+        lines.by_ref().take(10).map(Result::unwrap).find(settled).expect("a line with both accounts' saved answers");
     assert!(
         line.contains(
             r#"{"id":"deepseek","name":"DeepSeek","windows":[],"detail":"¥110.00 balance · ¥10.00 granted"}"#

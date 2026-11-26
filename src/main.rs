@@ -33,6 +33,7 @@ mod rex;
 mod screen;
 mod setup;
 mod syntax;
+mod sys;
 mod task;
 mod term;
 mod titles;

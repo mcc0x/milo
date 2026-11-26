@@ -4,12 +4,12 @@
 //! credits each keep their own unit, and none of them is turned into a
 //! percentage or compared with another.
 
+use crate::sys::RawFd;
 use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::{Read as _, Write as _};
-use std::os::fd::RawFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -1035,7 +1035,7 @@ impl Accounts {
     pub(super) fn settle_at(&mut self, now: i64, clock: Instant, manual: bool) {
         self.start(now, clock, manual);
         while let Some(fd) = self.fd() {
-            let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            let mut poll = crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 };
             // SAFETY: `poll` points to one writable pollfd whose descriptor the job keeps open.
             unsafe { libc::poll(&raw mut poll, 1, 30_000) };
             self.collect(clock);

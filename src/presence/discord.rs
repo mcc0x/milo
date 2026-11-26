@@ -10,9 +10,9 @@
 //! person chose to show the session or project name, and holds only what
 //! `label` made of those names. Nothing else is ever put in a frame.
 
+use crate::sys::{AsRawFd as _, RawFd};
 use std::ffi::OsString;
 use std::io::{self, Read as _, Write as _};
-use std::os::fd::{AsRawFd as _, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

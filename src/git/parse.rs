@@ -108,11 +108,8 @@ pub(super) fn parse_status(raw: Vec<u8>) -> Status {
             st.upstream = Some(String::from_utf8_lossy(v).into_owned());
         } else if let Some(v) = bytes.strip_prefix(b"# branch.ab +") {
             measured = true;
-            st.ahead = v
-                .split(|&b| b == b' ')
-                .next()
-                .and_then(|n| std::str::from_utf8(n).ok()?.parse().ok())
-                .unwrap_or(0);
+            st.ahead =
+                v.split(|&b| b == b' ').next().and_then(|n| std::str::from_utf8(n).ok()?.parse().ok()).unwrap_or(0);
         }
     }
     if !measured {
@@ -179,22 +176,16 @@ pub(super) fn parse_files(raw: &[u8]) -> DiffFiles {
         }
         let mut f = tok.splitn(3, |&b| b == b'\t');
         let (Some(add), Some(del), Some(path)) = (f.next(), f.next(), f.next()) else { continue };
-        let (old, path) = if path.is_empty() {
-            (tokens.next(), tokens.next().unwrap_or_default())
-        } else {
-            (None, path)
-        };
+        let (old, path) =
+            if path.is_empty() { (tokens.next(), tokens.next().unwrap_or_default()) } else { (None, path) };
         let Some(path) = utf8_path(path) else { continue };
         // Both lists come in the same order, so the match is normally `next`.
         // The old path also matters for a rename whose source cannot be opened.
         let matches = |file: &PendingFile| {
             file.path == path && (file.kind != Kind::Renamed || file.from.as_deref().map(str::as_bytes) == old)
         };
-        let at = if diff.files.get(next).is_some_and(matches) {
-            Some(next)
-        } else {
-            diff.files.iter().position(matches)
-        };
+        let at =
+            if diff.files.get(next).is_some_and(matches) { Some(next) } else { diff.files.iter().position(matches) };
         if let Some(i) = at {
             next = i + 1;
             // Binary files report "-" and keep their counts at zero.

@@ -299,10 +299,13 @@ fn text_with_a_picture_extension_still_shows_its_edits() {
     use std::sync::mpsc;
     static SLOTS: AtomicUsize = AtomicUsize::new(0);
     let (entered, at_read) = mpsc::channel();
-    media_load::intercept_next_read(&SLOTS, Box::new(move |file, bytes, offset| {
-        entered.send(()).unwrap();
-        file.read_at(bytes, offset)
-    }));
+    media_load::intercept_next_read(
+        &SLOTS,
+        Box::new(move |file, bytes, offset| {
+            entered.send(()).unwrap();
+            file.read_at(bytes, offset)
+        }),
+    );
     f.git(&["add", "--", "notes.png"]);
     working.filesystem_changed();
     assert!(working.check());
@@ -564,16 +567,8 @@ fn changes_only_keeps_context_and_jump_position_in_working_and_committed_diffs()
         assert_eq!(reader.key(Key::Char('c')), After::Stay);
         let compact = drawn(&mut reader, 60, 24);
         for label in [
-            "… 7 unchanged lines",
-            "… 23 unchanged lines",
-            "… 16 unchanged lines",
-            "line 8",
-            "line 14",
-            "line 38",
-            "line 44",
-            "+ edited 11",
-            "+ edited 41",
-            "c full file",
+            "… 7 unchanged lines", "… 23 unchanged lines", "… 16 unchanged lines", "line 8", "line 14", "line 38",
+            "line 44", "+ edited 11", "+ edited 41", "c full file",
         ] {
             assert!(compact.iter().any(|row| row.contains(label)), "{label}: {compact:?}");
         }
@@ -1063,10 +1058,8 @@ fn jumping_wraps_even_when_two_changes_share_the_last_page_top() {
     kinds[96] = LineKind::Del;
     let source = Source::Committed { project: PathBuf::new(), hash: "123abcd".into(), time: 0 };
     let mut reader = Reader::new("page.txt".into(), source, Preferences::default().icons, None);
-    reader.body = Body::Text(Text::new(
-        (1..).zip(kinds).map(|(number, kind)| Line::new(kind, number, "")).collect(),
-        None,
-    ));
+    reader.body =
+        Body::Text(Text::new((1..).zip(kinds).map(|(number, kind)| Line::new(kind, number, "")).collect(), None));
     drawn(&mut reader, 40, 20);
     assert_eq!(reader.top, 6);
     for (key, top, notice) in [
@@ -1412,13 +1405,16 @@ fn canceled_source_reads_keep_their_slots_until_they_return() {
         fs::write(&file, Picture::sample_png(width, 16)).unwrap();
         let (entered, at_read) = mpsc::channel();
         let (release, ready) = mpsc::channel();
-        media_load::intercept_next_read(&SLOTS, Box::new(move |file, bytes, offset| {
-            entered.send(()).unwrap();
-            // Simulate an in-progress read that cannot observe cancellation
-            // until I/O returns. Time out only to keep a broken test from hanging.
-            ready.recv_timeout(Duration::from_secs(5)).unwrap();
-            file.read_at(bytes, offset)
-        }));
+        media_load::intercept_next_read(
+            &SLOTS,
+            Box::new(move |file, bytes, offset| {
+                entered.send(()).unwrap();
+                // Simulate an in-progress read that cannot observe cancellation
+                // until I/O returns. Time out only to keep a broken test from hanging.
+                ready.recv_timeout(Duration::from_secs(5)).unwrap();
+                file.read_at(bytes, offset)
+            }),
+        );
         (Reader::open(&file).unwrap(), at_read, release)
     };
 
@@ -1924,7 +1920,8 @@ fn text_with_mp4_suffix_keeps_its_working_diff() {
 #[test]
 fn editing_rendered_markdown_keeps_the_inactive_source_viewport() {
     let f = Fixture::new();
-    let notes: String = (0..48).map(|i| format!("## Marker {i:02} with enough text to require horizontal panning\n")).collect();
+    let notes: String =
+        (0..48).map(|i| format!("## Marker {i:02} with enough text to require horizontal panning\n")).collect();
     f.write("notes.md", &notes);
     let mut reader = Reader::open(&f.root.join("notes.md")).unwrap();
     reader.key(Key::Char('m'));
@@ -1968,10 +1965,13 @@ fn returning_to_suffix_text_keeps_the_draft_top_after_the_diff_loads() {
     let pause_reload = || {
         static SLOTS: AtomicUsize = AtomicUsize::new(0);
         let (resume, blocked) = mpsc::channel::<()>();
-        media_load::intercept_next_read(&SLOTS, Box::new(move |file, bytes, offset| {
-            let _ = blocked.recv();
-            file.read_at(bytes, offset)
-        }));
+        media_load::intercept_next_read(
+            &SLOTS,
+            Box::new(move |file, bytes, offset| {
+                let _ = blocked.recv();
+                file.read_at(bytes, offset)
+            }),
+        );
         resume
     };
     let pending = |reader: &mut Reader, resume: mpsc::Sender<()>| {

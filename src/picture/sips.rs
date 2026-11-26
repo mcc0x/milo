@@ -1,8 +1,8 @@
 //! Runs the system raster decoder against private, size-limited copies.
 
+use crate::sys::AsRawFd as _;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Read as _, Write as _};
-use std::os::fd::AsRawFd as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

@@ -1,7 +1,7 @@
 //! Retargets a maintained pane to the worktree of its explicitly chosen shell.
 
+use crate::sys::RawFd;
 use std::ffi::OsStr;
-use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

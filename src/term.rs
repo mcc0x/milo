@@ -1,9 +1,10 @@
 //! Sets terminal modes and waits for keyboard input, signals or file notifications.
 
+use crate::sys::{AsRawFd, RawFd};
 use std::ffi::{CStr, OsStr};
 use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind, IsTerminal, PipeReader, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, IntoRawFd, RawFd};
+use std::os::fd::{AsFd, IntoRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -141,21 +142,7 @@ impl Capabilities {
     const TEST: Self = Self { colors: Colors::Rgb, graphics: true };
 }
 
-/// Wakes a waiting loop with a byte. A full non-blocking pipe already holds a wakeup.
-pub fn wake(fd: RawFd) {
-    if fd >= 0 {
-        // SAFETY: The byte lives for the call, and write is async-signal-safe.
-        unsafe { libc::write(fd, [1u8].as_ptr().cast(), 1) };
-    }
-}
-
-/// Waits up to `timeout_ms` for descriptors to be ready. Returns the number
-/// ready, zero on timeout, or a negative result on failure or interruption.
-pub fn wait_ready(fds: &mut [libc::pollfd], timeout_ms: i32) -> i32 {
-    let Ok(len) = libc::nfds_t::try_from(fds.len()) else { return -1 };
-    // SAFETY: The slice is writable and holds exactly `len` descriptors.
-    unsafe { libc::poll(fds.as_mut_ptr(), len, timeout_ms) }
-}
+pub(crate) use crate::sys::{poll as wait_ready, wake};
 
 pub fn milliseconds(wait: Duration) -> i32 {
     i32::try_from(wait.as_millis() + 1).unwrap_or(i32::MAX)
@@ -407,16 +394,13 @@ impl Session {
                 Ok(n) => data = &data[n..],
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    let keyboard = if read_input && self.keys.len() < KEY_BACKLOG {
-                        self.keyboard.as_raw_fd()
-                    } else {
-                        -1
-                    };
+                    let keyboard =
+                        if read_input && self.keys.len() < KEY_BACKLOG { self.keyboard.as_raw_fd() } else { -1 };
                     let mut fds = [
-                        libc::pollfd { fd: self.output.as_raw_fd(), events: libc::POLLOUT, revents: 0 },
-                        libc::pollfd { fd: self.signal.as_raw_fd(), events: libc::POLLIN, revents: 0 },
-                        libc::pollfd { fd: done.unwrap_or(-1), events: libc::POLLIN, revents: 0 },
-                        libc::pollfd { fd: keyboard, events: libc::POLLIN, revents: 0 },
+                        crate::sys::pollfd { fd: self.output.as_raw_fd(), events: crate::sys::POLLOUT, revents: 0 },
+                        crate::sys::pollfd { fd: self.signal.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 },
+                        crate::sys::pollfd { fd: done.unwrap_or(-1), events: crate::sys::POLLIN, revents: 0 },
+                        crate::sys::pollfd { fd: keyboard, events: crate::sys::POLLIN, revents: 0 },
                     ];
                     if wait_ready(&mut fds, -1) < 0 {
                         let e = io::Error::last_os_error();
@@ -432,7 +416,7 @@ impl Session {
                         // while the terminal is still blocked.
                         self.pending_interrupt = true;
                     } else if fds[3].revents != 0 {
-                        if fds[3].revents & libc::POLLIN == 0 {
+                        if fds[3].revents & crate::sys::POLLIN == 0 {
                             self.cancelled_input = true;
                             continue;
                         }
@@ -616,12 +600,12 @@ fn wait_for(
     buffered: bool,
 ) -> Wait {
     let mut fds = [
-        libc::pollfd { fd: keyboard, events: libc::POLLIN, revents: 0 },
+        crate::sys::pollfd { fd: keyboard, events: crate::sys::POLLIN, revents: 0 },
         // poll() ignores a negative descriptor.
-        libc::pollfd { fd: extra[0].unwrap_or(-1), events: libc::POLLIN, revents: 0 },
-        libc::pollfd { fd: extra[1].unwrap_or(-1), events: libc::POLLIN, revents: 0 },
-        libc::pollfd { fd: extra[2].unwrap_or(-1), events: libc::POLLIN, revents: 0 },
-        libc::pollfd { fd: signal.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+        crate::sys::pollfd { fd: extra[0].unwrap_or(-1), events: crate::sys::POLLIN, revents: 0 },
+        crate::sys::pollfd { fd: extra[1].unwrap_or(-1), events: crate::sys::POLLIN, revents: 0 },
+        crate::sys::pollfd { fd: extra[2].unwrap_or(-1), events: crate::sys::POLLIN, revents: 0 },
+        crate::sys::pollfd { fd: signal.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 },
     ];
     let ready = wait_ready(&mut fds, if buffered { 0 } else { timeout_ms });
     if ready < 0 {
@@ -631,7 +615,7 @@ fn wait_for(
         Wait::Interrupted
     } else if opening && fds[1].revents != 0 {
         Wait::Woken
-    } else if buffered || fds[0].revents & libc::POLLIN != 0 {
+    } else if buffered || fds[0].revents & crate::sys::POLLIN != 0 {
         Wait::Input
     } else if fds[0].revents != 0 {
         Wait::Closed
@@ -834,7 +818,7 @@ mod tests {
         std::thread::scope(|scope| {
             let writing = scope.spawn(|| terminal.write(&frame));
             let until = Instant::now() + Duration::from_secs(5);
-            let mut fds = [libc::pollfd { fd: signal_fd, events: libc::POLLIN, revents: 0 }];
+            let mut fds = [crate::sys::pollfd { fd: signal_fd, events: crate::sys::POLLIN, revents: 0 }];
             // Don't free the output pipe until the writer has consumed the wakeup.
             let drained = loop {
                 if wait_ready(&mut fds, 0) == 0 {
@@ -920,7 +904,7 @@ mod tests {
         let mut output = [0; ENTER.len() + ASK_BACKGROUND.len() + ASK_GRAPHICS.len() + ASK_END.len() + LEAVE.len()];
         let mut at = 0;
         while at < output.len() {
-            let mut ready = [libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+            let mut ready = [crate::sys::pollfd { fd: master.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 }];
             assert!(wait_ready(&mut ready, 1000) > 0, "missing terminal output after {at} bytes");
             let n = master.read(&mut output[at..]).unwrap();
             assert_ne!(n, 0);
@@ -962,7 +946,7 @@ mod tests {
 
         // The shell's terminal modes would echo a late answer after the leave sequence.
         let mut output = Vec::new();
-        let mut ready = [libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        let mut ready = [crate::sys::pollfd { fd: master.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 }];
         while wait_ready(&mut ready, 200) > 0 {
             let mut chunk = [0; 256];
             let n = master.read(&mut chunk).unwrap();

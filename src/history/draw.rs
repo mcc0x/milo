@@ -276,7 +276,8 @@ impl History {
                     let end = if s.w <= DETAIL_COLS {
                         right
                     } else if self.open_index() == Some(index) {
-                        let end = open_files.map_or(right, |diff| file_count(s, y, diff.files.len() + diff.unrepresented));
+                        let end =
+                            open_files.map_or(right, |diff| file_count(s, y, diff.files.len() + diff.unrepresented));
                         // Leave room for a useful subject before spending columns on the object ID.
                         let id = &self.entries[index].commit.hash[..7];
                         if end >= 3 + 20 + 1 + id.len() + 2 {

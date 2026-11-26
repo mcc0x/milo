@@ -1,10 +1,11 @@
 //! Resolves reader paths from a held project directory, never through an unguarded open.
 
+use crate::sys::AsRawFd as _;
 use std::ffi::{CStr, CString, OsString};
 use std::fs::{self, File};
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd as _, FromRawFd as _};
+use std::os::fd::FromRawFd as _;
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path, PathBuf};

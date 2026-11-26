@@ -211,7 +211,13 @@ impl Discord {
 
     // The CLI waits for the helper's status; the helper gives Discord only two
     // seconds to answer. Serve the handshake while the CLI is still running.
-    fn handshake_during(&self, app: &str, opcode: u32, reply: &str, command: impl FnOnce() -> String) -> (String, Client) {
+    fn handshake_during(
+        &self,
+        app: &str,
+        opcode: u32,
+        reply: &str,
+        command: impl FnOnce() -> String,
+    ) -> (String, Client) {
         std::thread::scope(|scope| {
             let peer = scope.spawn(|| self.handshake(Duration::from_secs(30), app, opcode, reply));
             (command(), peer.join().unwrap())
@@ -382,7 +388,8 @@ fn an_application_discord_does_not_know_is_not_asked_about_again() {
     let home = Home::new();
     let discord = home.discord();
     home.rex_says("active");
-    let _peer = discord.handshake_during(APPLICATION, 2, r#"{"code":4000,"message":"Invalid Client ID"}"#, || home.enable());
+    let _peer =
+        discord.handshake_during(APPLICATION, 2, r#"{"code":4000,"message":"Invalid Client ID"}"#, || home.enable());
     assert!(home.status_says("Discord does not know this application ID"));
     home.rex_says("idle");
     home.rex_says("active");
@@ -446,7 +453,8 @@ fn chosen_names_follow_what_is_in_front_and_go_when_they_are_no_longer_chosen() 
     assert!(said.contains("as in “Project: milo · Session: release-notes”") && said.contains("--yes"), "{said}");
     assert!(!home.root.join(".config/milo/discord.conf").exists());
 
-    let (enabled, mut client) = discord.welcome_during(|| home.say(&["presence", "enable", "--details", "both", "--yes"]));
+    let (enabled, mut client) =
+        discord.welcome_during(|| home.say(&["presence", "enable", "--details", "both", "--yes"]));
     assert!(enabled.starts_with("Discord presence is on."));
     assert_eq!(home.rex_asked(), r#"{"session":true,"directory":true}"#);
     let helper = client.shows(1, Some("Project: client-site · Session: release notes"));

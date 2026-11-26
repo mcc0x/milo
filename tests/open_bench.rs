@@ -245,8 +245,11 @@ fn opening_a_project() {
     let ((columns, rows), (wide, tall)) = (PANE, READER);
     let mut heading = bench.heading(&format!("milo open bench: {columns}x{rows} panes, {wide}x{tall} reader"));
     for Size { name, files, commits, unpushed, edited, new } in SIZES {
-        writeln!(heading, "# {name}: {files} files, {commits} commits, {unpushed} unpushed, {edited} edited, {new} new")
-            .unwrap();
+        writeln!(
+            heading,
+            "# {name}: {files} files, {commits} commits, {unpushed} unpushed, {edited} edited, {new} new"
+        )
+        .unwrap();
     }
     writeln!(heading, "# history-slowest-key-in-refresh: Down and Up for {REFRESH_WINDOW:?} after a file is rewritten")
         .unwrap();

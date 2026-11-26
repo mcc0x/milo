@@ -1,10 +1,10 @@
 //! Inspect the current installation without starting Rex. Repair and removal
 //! are explicit operations using the same ownership checks as setup.
 
+use crate::sys::{AsRawFd, RawFd};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::{self, PipeReader};
-use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
@@ -782,8 +782,11 @@ fn check_listener(result: Saved) -> Result<(), String> {
 
 #[cfg(test)]
 pub(crate) fn wait_ready(fd: Option<RawFd>) {
-    let mut poll =
-        [libc::pollfd { fd: fd.expect("diagnostics should have a wake pipe"), events: libc::POLLIN, revents: 0 }];
+    let mut poll = [crate::sys::pollfd {
+        fd: fd.expect("diagnostics should have a wake pipe"),
+        events: crate::sys::POLLIN,
+        revents: 0,
+    }];
     assert_eq!(crate::term::wait_ready(&mut poll, 5_000), 1, "diagnostics did not complete");
 }
 

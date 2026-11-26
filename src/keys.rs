@@ -1,9 +1,9 @@
 //! Decodes keys, mouse events, focus and other terminal replies from input.
 
+use crate::sys::AsRawFd;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
-use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use crate::term::{milliseconds, wait_ready};
@@ -262,7 +262,7 @@ impl Input {
 }
 
 fn wait_for_sequence(keyboard: &File, until: Instant) -> bool {
-    let mut fds = [libc::pollfd { fd: keyboard.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+    let mut fds = [crate::sys::pollfd { fd: keyboard.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 }];
     loop {
         let wait = until.saturating_duration_since(Instant::now());
         if wait.is_zero() {
@@ -395,9 +395,10 @@ fn decode<'a>(mut bytes: &'a [u8], paste: &mut Paste, keys: &mut Vec<Key>) -> &'
                         continue;
                     }
                     let Some(&[button, x, y]) = report.first_chunk::<3>() else { return bytes };
-                    let key = x.checked_sub(33).zip(y.checked_sub(33)).and_then(|(x, y)| {
-                        mouse_key(usize::from(button - 32), usize::from(x), usize::from(y))
-                    });
+                    let key = x
+                        .checked_sub(33)
+                        .zip(y.checked_sub(33))
+                        .and_then(|(x, y)| mouse_key(usize::from(button - 32), usize::from(x), usize::from(y)));
                     (key, &report[3..])
                 }
                 [_, body @ ..] => {

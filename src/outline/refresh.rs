@@ -1,8 +1,8 @@
 //! Refreshes the outline away from the pane loop, so that keys are answered
 //! while Git reads a large project.
 
+use crate::sys::RawFd;
 use std::io;
-use std::os::fd::RawFd;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use crate::git::run::RefreshTask;
@@ -104,7 +104,7 @@ mod tests {
     /// Waits for the running refresh to have its answer, then takes it in.
     fn finish(o: &mut Outline) -> Option<bool> {
         let fd = o.unfinished_check().expect("a refresh is running");
-        let mut fds = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }];
+        let mut fds = [crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 }];
         assert_eq!(term::wait_ready(&mut fds, 60_000), 1);
         o.finish_check()
     }
@@ -133,7 +133,7 @@ mod tests {
             o.check();
             let away = Instant::now();
             let fd = o.unfinished_check().unwrap();
-            let mut fds = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }];
+            let mut fds = [crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 }];
             assert_eq!(term::wait_ready(&mut fds, 60_000), 1);
             let ready = Instant::now();
             assert_eq!(o.finish_check(), Some(true));

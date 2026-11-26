@@ -1,10 +1,10 @@
 //! Supervises one Rex alert forwarder. The worker owns its event stream and
 //! delivery queues; its parent only reads local intent and manages its lifetime.
 
+use crate::sys::AsRawFd as _;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::io::{self, BufRead as _, BufReader, Read as _};
-use std::os::fd::AsRawFd as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
@@ -663,7 +663,7 @@ struct Stream<'a> {
 
 impl io::Read for Stream<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut poll = [libc::pollfd { fd: self.output.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        let mut poll = [crate::sys::pollfd { fd: self.output.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 }];
         while !self.cancellation.load(Ordering::Relaxed) {
             match crate::term::wait_ready(&mut poll, crate::term::milliseconds(TICK)) {
                 0 => {}

@@ -7,9 +7,9 @@ mod refresh;
 mod search;
 mod untracked;
 
+use crate::sys::RawFd;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::os::fd::RawFd;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;

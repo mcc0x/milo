@@ -1,8 +1,8 @@
 //! Runs bounded, read-only SQLite queries against databases other tools keep.
 
+use crate::sys::{AsRawFd, RawFd};
 use std::ffi::OsStr;
 use std::io::{self, PipeReader, Read};
-use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

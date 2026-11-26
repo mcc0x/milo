@@ -1042,7 +1042,8 @@ fn reading(history: &History) -> Option<i32> {
 
 /// Lets the read that is running finish. The next frame takes its result.
 fn arrive(history: &History) {
-    let mut ready = [libc::pollfd { fd: reading(history).expect("a read"), events: libc::POLLIN, revents: 0 }];
+    let mut ready =
+        [crate::sys::pollfd { fd: reading(history).expect("a read"), events: crate::sys::POLLIN, revents: 0 }];
     assert_eq!(crate::term::wait_ready(&mut ready, 30_000), 1, "Git did not list the commit's files");
     history.listing_releases.as_ref().unwrap().fetch_add(1, Ordering::Relaxed);
 }

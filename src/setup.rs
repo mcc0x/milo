@@ -19,11 +19,11 @@ pub(crate) use draw::wrap;
 pub use profiles::{layout_profile, return_from_peek};
 pub use welcome::{Welcome, needs_welcome, skip_welcome};
 
+use crate::sys::RawFd;
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io;
 use std::ops::Range;
-use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 
 use crate::alerts::{self, Alerts};

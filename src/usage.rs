@@ -13,11 +13,11 @@ mod sqlite;
 mod status;
 pub(crate) mod time;
 
+use crate::sys::RawFd;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::ops::ControlFlow;
-use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -1053,11 +1053,8 @@ impl Usage {
 
     fn for_home(home: Option<&Path>, now: i64, tools: UsageTools) -> Self {
         let codex = (tools[UsageTool::Codex] != Show::Hide).then(|| codex_sessions(home)).flatten();
-        let (claude, config, state) = if tools[UsageTool::Claude] == Show::Hide {
-            (None, None, None)
-        } else {
-            claude_sources()
-        };
+        let (claude, config, state) =
+            if tools[UsageTool::Claude] == Show::Hide { (None, None, None) } else { claude_sources() };
         let mut usage = Self::from_dirs(codex, claude, state, now);
         usage.claude_config = config;
         usage.showing(tools)

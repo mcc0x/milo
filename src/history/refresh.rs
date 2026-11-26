@@ -1,8 +1,8 @@
 //! Refreshes the history away from the pane loop, so that keys are answered
 //! while Git reads the status of a large project.
 
+use crate::sys::RawFd;
 use std::io;
-use std::os::fd::RawFd;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use crate::git::run::RefreshTask;
@@ -100,7 +100,7 @@ mod tests {
     /// Waits for the running refresh to have its answer, then takes it in.
     fn finish(history: &mut History) -> Option<bool> {
         let fd = history.unfinished_check().expect("a refresh is running");
-        let mut fds = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }];
+        let mut fds = [crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 }];
         assert_eq!(term::wait_ready(&mut fds, 60_000), 1);
         history.finish_check()
     }
@@ -213,7 +213,7 @@ mod tests {
         f.commit("second commit");
         assert!(history.check());
         let fd = history.unfinished_check().unwrap();
-        let mut fds = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }];
+        let mut fds = [crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 }];
         assert_eq!(term::wait_ready(&mut fds, 60_000), 1);
         f.write(".git/index.lock", "");
 

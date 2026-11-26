@@ -1,9 +1,9 @@
 //! Runs terminal panes with shared input, help, redraws and file watching.
 
+use crate::sys::{AsRawFd, RawFd};
 use std::collections::VecDeque;
 use std::io;
 use std::ops::Range;
-use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -727,7 +727,9 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                     }
                     // Skip stale controls and the repeated click that opened another pane.
                     if let Key::Click(x, y) = key
-                        && (overlay_changed || !pane_row_available(screen, &help, &pace, y) || handoff_click.is_repeat(x, y))
+                        && (overlay_changed
+                            || !pane_row_available(screen, &help, &pace, y)
+                            || handoff_click.is_repeat(x, y))
                     {
                         continue;
                     }
@@ -869,7 +871,7 @@ mod tests {
         let mut output = Vec::new();
         while !String::from_utf8_lossy(&output).contains(text) {
             let left = until.saturating_duration_since(Instant::now());
-            let mut fds = [libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+            let mut fds = [crate::sys::pollfd { fd: master.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 }];
             if left.is_zero() {
                 break;
             }

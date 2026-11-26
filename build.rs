@@ -48,11 +48,15 @@ fn main() {
     // Cargo source archives carry the production bundle. No Node, network or generated
     // framework intermediates are needed here. CI checks the source and asset digests.
     println!("cargo:rerun-if-changed={BUNDLE}");
-    let manifest = fs::read_to_string(format!("{BUNDLE}/manifest"))
-        .unwrap_or_else(|error| panic!("could not read the dashboard bundle: {error}; run bun run build in dashboard/"));
+    let manifest = fs::read_to_string(format!("{BUNDLE}/manifest")).unwrap_or_else(|error| {
+        panic!("could not read the dashboard bundle: {error}; run bun run build in dashboard/")
+    });
     let mut lines = manifest.lines();
     assert_eq!(lines.next(), Some(FORMAT), "unsupported dashboard bundle manifest version");
-    assert!(lines.next().and_then(|line| line.strip_prefix("source ")).is_some_and(digest), "missing dashboard source digest");
+    assert!(
+        lines.next().and_then(|line| line.strip_prefix("source ")).is_some_and(digest),
+        "missing dashboard source digest"
+    );
 
     let mut scripts = String::new();
     let mut assets = BTreeMap::new();

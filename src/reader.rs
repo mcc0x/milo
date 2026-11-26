@@ -8,12 +8,12 @@ mod draw;
 mod edit;
 #[cfg(test)]
 mod edit_tests;
-mod inbox;
 mod handed;
+mod inbox;
 mod markdown;
-mod pick;
 mod media;
 mod media_load;
+mod pick;
 mod reopen;
 mod rescue;
 mod sets;
@@ -45,10 +45,10 @@ use changes::{Folds, Review};
 use disk::{ReadOnly, SaveError};
 use draw::{Hint, Hints};
 use edit::{Editor, Place, Step};
-pub use rescue::take_notes as take_rescue_notes;
-pub use tabs::{TabSets, Tabs};
 pub use handed::{Handed, handed_lines};
 pub use pick::{Picked, PickedLine, Viewed};
+pub use rescue::take_notes as take_rescue_notes;
+pub use tabs::{TabSets, Tabs};
 
 /// Lines of context kept above a change when jumping to it.
 const LEAD: usize = 3;
@@ -763,12 +763,7 @@ impl Pane for Reader {
         }
         rows.extend(self.action_help());
         rows.extend(self.native_help());
-        rows.extend([
-            key("g G  ", "top/bottom"),
-            key("q Esc", "close"),
-            HelpRow::new(),
-            heading("Editing"),
-        ]);
+        rows.extend([key("g G  ", "top/bottom"), key("q Esc", "close"), HelpRow::new(), heading("Editing")]);
         match self.read_only {
             None => {
                 let name = self.path.rsplit('/').next().unwrap_or_default();

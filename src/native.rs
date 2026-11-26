@@ -3,11 +3,11 @@
 mod local;
 pub(crate) mod trusted;
 
+use crate::sys::AsRawFd as _;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path};

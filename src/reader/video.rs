@@ -345,8 +345,8 @@ fn anonymous_file() -> io::Result<File> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{Body, Reader};
+    use super::*;
     use crate::fixture::Fixture;
     use std::os::unix::fs::MetadataExt as _;
     use std::process::Command;

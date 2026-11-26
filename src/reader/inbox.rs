@@ -7,10 +7,10 @@
 //! reader holds open refuses the request, and that is how a reader that has
 //! gone is told from one that is there.
 
+use crate::sys::{AsRawFd as _, RawFd};
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
-use std::os::fd::{AsRawFd as _, RawFd};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};

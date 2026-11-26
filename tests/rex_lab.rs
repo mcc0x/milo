@@ -704,10 +704,9 @@ impl Scene {
         let reported = || lab.rex(&["block", "call", "-s", session, "-b", shell, "pwd"]);
         let pwd = reported();
         assert!(!pwd.contains("\"pwd\""), "{pwd}");
-        for (dir, own, other) in [
-            (second, "only-in-second.txt", "only-in-first.txt"),
-            (first, "only-in-first.txt", "only-in-second.txt"),
-        ] {
+        for (dir, own, other) in
+            [(second, "only-in-second.txt", "only-in-first.txt"), (first, "only-in-first.txt", "only-in-second.txt")]
+        {
             let cwd = format!("cd -- '{}'", dir.display());
             lab.rex(&["send", "-s", session, "-b", shell, &cwd]);
             lab.rex(&["send-key", "-s", session, "-b", shell, "enter"]);

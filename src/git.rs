@@ -481,7 +481,8 @@ impl Repo {
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let index_lock = git_dir.as_ref().map(|dir| dir.join("index.lock"));
         let shallow_file = common_dir.as_ref().map(|dir| dir.join("shallow"));
-        let filter = git_dir.as_deref().zip(common_dir.as_deref()).and_then(|(git, common)| GitFilter::new(git, common));
+        let filter =
+            git_dir.as_deref().zip(common_dir.as_deref()).and_then(|(git, common)| GitFilter::new(git, common));
         let mut repo = Self {
             root,
             name,

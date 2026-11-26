@@ -556,7 +556,9 @@ impl Reader {
             } else if "patch".len() <= room {
                 right -= s.put_right(right, 0, "patch", FAINT);
             }
-        } else if let Body::Video(video) = &self.body && video.error().is_none() {
+        } else if let Body::Video(video) = &self.body
+            && video.error().is_none()
+        {
             let mut buffer = [0; 64];
             let status = super::media::status(video, &mut buffer);
             let room = right.saturating_sub(NAME_ROOM);

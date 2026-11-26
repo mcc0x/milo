@@ -1,10 +1,11 @@
 //! Runs read-only git commands without letting a repository run its own programs,
 //! and the one command that adds a worktree for a task.
 
+use crate::sys::{AsRawFd, RawFd};
 use std::cell::Cell;
 use std::ffi::OsStr;
 use std::io::{self, Read as _};
-use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::BorrowedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
@@ -409,7 +410,7 @@ fn capture(
 ) -> Result<(ExitStatus, Vec<u8>), OutputError> {
     let started = Instant::now();
     let cancel = cancel.map_or_else(|| REFRESH_CANCEL.get(), |fd| fd.as_raw_fd());
-    let mut stop = libc::pollfd { fd: cancel, events: libc::POLLIN, revents: 0 };
+    let mut stop = crate::sys::pollfd { fd: cancel, events: crate::sys::POLLIN, revents: 0 };
     if cancel >= 0 {
         if term::wait_ready(std::slice::from_mut(&mut stop), 0) > 0 {
             return Err(OutputError::Failed);
@@ -436,10 +437,15 @@ fn capture(
     result
 }
 
-fn collect(mut pipe: ChildStdout, limit: u64, started: Instant, stop: libc::pollfd) -> Result<Vec<u8>, OutputError> {
+fn collect(
+    mut pipe: ChildStdout,
+    limit: u64,
+    started: Instant,
+    stop: crate::sys::pollfd,
+) -> Result<Vec<u8>, OutputError> {
     let mut out = Vec::new();
     let mut chunk = [0u8; 1 << 16];
-    let mut fds = [libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 }, stop];
+    let mut fds = [crate::sys::pollfd { fd: pipe.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 }, stop];
     while running(started) {
         if term::wait_ready(&mut fds, 200) <= 0 {
             continue;
@@ -458,7 +464,7 @@ fn collect(mut pipe: ChildStdout, limit: u64, started: Instant, stop: libc::poll
     Err(OutputError::Failed)
 }
 
-fn wait(child: &mut Child, started: Instant, mut stop: libc::pollfd) -> Result<ExitStatus, OutputError> {
+fn wait(child: &mut Child, started: Instant, mut stop: crate::sys::pollfd) -> Result<ExitStatus, OutputError> {
     // Closing stdout is not proof that the child has exited.
     let stop = std::slice::from_mut(&mut stop);
     if stop[0].fd >= 0 && term::wait_ready(stop, 0) > 0 {

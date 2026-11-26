@@ -12,9 +12,9 @@ pub(crate) use preview::{available as preview_available, launch as preview, prev
 pub(crate) use server::native_app;
 pub(crate) use server::{CommandVersion, RemoteEditor, Server, Viewers, command_version, server, viewers};
 
+use crate::sys::{AsRawFd, RawFd};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal as _, Read as _, Write as _};
-use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::os::unix::process::CommandExt;
@@ -153,7 +153,7 @@ fn output_within(command: &mut Command, input: Option<&str>, wait: Duration) -> 
     });
     let result = (|| {
         let mut stdout = child.stdout.take()?;
-        let mut poll = [libc::pollfd { fd: stdout.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        let mut poll = [crate::sys::pollfd { fd: stdout.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 }];
         let mut output = Vec::new();
         let mut chunk = [0; 8192];
         loop {

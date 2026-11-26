@@ -1,9 +1,9 @@
 //! Launches an explicit Markdown preview in a tiled terminal on the local Rex host.
 
+use crate::sys::AsRawFd as _;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{DirBuilder, File};
 use std::io::{Read as _, Seek as _, Write as _};
-use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};

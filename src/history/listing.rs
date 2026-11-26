@@ -1,9 +1,10 @@
 //! Reads the files of one commit off the pane's loop, so that a commit that
 //! touched thousands of files does not hold the keys back while Git counts.
 
+use crate::sys::{AsRawFd, RawFd};
 use std::io;
 use std::net::Shutdown;
-use std::os::fd::{AsFd, AsRawFd, RawFd};
+use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
@@ -43,7 +44,7 @@ impl Listing {
     /// The result, waiting up to `patience` for it. None while Git is still reading.
     pub(super) fn finished(&self, patience: Duration) -> Option<Listed> {
         if !patience.is_zero() {
-            let mut ready = [libc::pollfd { fd: self.fd(), events: libc::POLLIN, revents: 0 }];
+            let mut ready = [crate::sys::pollfd { fd: self.fd(), events: crate::sys::POLLIN, revents: 0 }];
             term::wait_ready(&mut ready, term::milliseconds(patience));
         }
         match self.result.try_recv() {

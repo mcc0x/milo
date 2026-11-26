@@ -5,8 +5,8 @@
 //! it to read the choice again, and `seen BLOCK` marks that pane's row seen.
 //! However it ends, the Rex script it started ends with it.
 
+use crate::sys::AsRawFd as _;
 use std::io::{self, Write as _};
-use std::os::fd::AsRawFd as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -106,11 +106,11 @@ pub(super) fn run(file: &Path) -> io::Result<()> {
         }
         let heard = watch.source.as_ref().map_or(-1, rex::AttentionWatch::fd);
         let mut fds = [
-            libc::pollfd { fd: input.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+            crate::sys::pollfd { fd: input.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 },
             // Darwin requires POLLHUP in the mask to report a closed pipe reader.
-            libc::pollfd { fd: output.as_raw_fd(), events: libc::POLLHUP, revents: 0 },
-            libc::pollfd { fd: stop.as_raw_fd(), events: libc::POLLIN, revents: 0 },
-            libc::pollfd { fd: heard, events: libc::POLLIN, revents: 0 },
+            crate::sys::pollfd { fd: output.as_raw_fd(), events: crate::sys::POLLHUP, revents: 0 },
+            crate::sys::pollfd { fd: stop.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 },
+            crate::sys::pollfd { fd: heard, events: crate::sys::POLLIN, revents: 0 },
         ];
         // A script that is attached says when anything changes, so nothing is asked on a timer.
         let left = watch.retry.saturating_duration_since(Instant::now());

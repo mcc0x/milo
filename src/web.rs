@@ -5,12 +5,13 @@ mod http;
 mod launch;
 mod remote;
 
+use crate::sys::AsRawFd;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, PipeReader, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
-use std::os::fd::{AsRawFd, IntoRawFd};
+use std::os::fd::IntoRawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -146,7 +147,8 @@ fn open_beside<T: Send + 'static>(
         drop(done);
         opened
     })?;
-    let mut fds = [wake, &ready].map(|pipe| libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+    let mut fds =
+        [wake, &ready].map(|pipe| crate::sys::pollfd { fd: pipe.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 });
     loop {
         let check = launcher.as_mut().and_then(|launch| launch.poll(Instant::now()));
         if check.is_none() {
@@ -299,7 +301,7 @@ fn serve_clients(
     mut launcher: Option<Launch>,
 ) -> io::Result<()> {
     let mut clients: Vec<Client> = Vec::with_capacity(MAX_CLIENTS);
-    let mut fds = [libc::pollfd { fd: -1, events: libc::POLLIN, revents: 0 }; MAX_CLIENTS + 3];
+    let mut fds = [crate::sys::pollfd { fd: -1, events: crate::sys::POLLIN, revents: 0 }; MAX_CLIENTS + 3];
     fds[1].fd = wake.as_raw_fd();
     fds[2].fd = worker.ready.as_raw_fd();
     let mut active: Option<Client> = None;
@@ -328,7 +330,7 @@ fn serve_clients(
         fds[0].fd = if closing || sockets == MAX_CLIENTS { -1 } else { listener.as_raw_fd() };
         for (fd, client) in fds[3..].iter_mut().zip(&clients) {
             deadline = deadline.min(client.deadline);
-            *fd = libc::pollfd { fd: client.socket.as_raw_fd(), events: client.interest(), revents: 0 };
+            *fd = crate::sys::pollfd { fd: client.socket.as_raw_fd(), events: client.interest(), revents: 0 };
         }
         let timeout = crate::term::milliseconds(deadline.saturating_duration_since(Instant::now()));
         let ready = crate::term::wait_ready(&mut fds[..polled_clients + 3], timeout);
@@ -451,8 +453,8 @@ impl Client {
 
     fn interest(&self) -> libc::c_short {
         match self.exchange {
-            Exchange::Reading(_) => libc::POLLIN,
-            Exchange::Writing(_) => libc::POLLOUT,
+            Exchange::Reading(_) => crate::sys::POLLIN,
+            Exchange::Writing(_) => crate::sys::POLLOUT,
         }
     }
 
@@ -590,9 +592,9 @@ fn respond_telegram_chats(body: &[u8], editor: &Editor) -> Response {
     match http::telegram_token(body).ok_or(InvalidToken).and_then(|token| editor.telegram_chats(&token)) {
         Ok(chats) => Response::json_owned(chats),
         Err(InvalidToken) => Response::bad_request("Enter a valid Telegram bot token from BotFather."),
-        Err(Unavailable) => {
-            Response::bad_gateway("Could not look up Telegram chats. Check the bot token or enter the chat ID manually.")
-        }
+        Err(Unavailable) => Response::bad_gateway(
+            "Could not look up Telegram chats. Check the bot token or enter the chat ID manually.",
+        ),
     }
 }
 
@@ -692,7 +694,9 @@ fn hosted_error(error: crate::alerts::relay::ConnectError) -> Response {
         ConnectError::Invalid => Response::bad_request("Invalid hosted connection request."),
         ConnectError::Proof => Response::bad_request("The finish code did not match. Check the code and try again."),
         ConnectError::Expired => Response::error("404 Not Found", "This connection expired or was already claimed."),
-        ConnectError::Busy => Response::error("429 Too Many Requests", "Too many connection requests. Try again shortly."),
+        ConnectError::Busy => {
+            Response::error("429 Too Many Requests", "Too many connection requests. Try again shortly.")
+        }
         // The relay answers 503 for a provider it has switched off, and equally for a passing
         // limit: Telegram still catching up, or too many pairings waiting.
         ConnectError::Disabled => Response::error(
@@ -1046,8 +1050,11 @@ mod tests {
                 let stale = format!(r#"{{"version":{version}}}"#);
                 let a = request(address, "POST", "/api/close", &stale);
                 let b = request(address, "POST", "/api/close", &stale);
-                let mut fds =
-                    [&a, &b].map(|socket| libc::pollfd { fd: socket.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+                let mut fds = [&a, &b].map(|socket| crate::sys::pollfd {
+                    fd: socket.as_raw_fd(),
+                    events: crate::sys::POLLIN,
+                    revents: 0,
+                });
                 let ready = crate::term::wait_ready(&mut fds, crate::term::milliseconds(TEST_WAIT));
                 assert_eq!(ready, 1, "only an overflow request may finish while Doctor is gated");
                 let (busy, pending) = if fds[0].revents != 0 { (a, b) } else { (b, a) };

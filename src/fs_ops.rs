@@ -1,10 +1,11 @@
 //! Opens untrusted files without following their final link, stages atomic replacements,
 //! and starts programs without lending one the pipes of another.
 
+use crate::sys::AsRawFd as _;
 use std::ffi::CStr;
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::os::fd::{AsRawFd as _, FromRawFd as _};
+use std::os::fd::FromRawFd as _;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};

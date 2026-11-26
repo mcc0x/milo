@@ -113,9 +113,10 @@ fn enclosing_worktree<'a>(dir: &'a Path, resolved: &Path) -> Option<Option<(&'a 
         if !resolved.starts_with(&root) {
             return None;
         }
-        if project.as_ref().is_none_or(|(alias, target)| {
-            alias.strip_prefix(name).is_ok_and(|tail| root.join(tail) != *target)
-        }) {
+        if project
+            .as_ref()
+            .is_none_or(|(alias, target)| alias.strip_prefix(name).is_ok_and(|tail| root.join(tail) != *target))
+        {
             project = Some((name, root));
         }
     }
@@ -130,9 +131,8 @@ impl Attributes {
         if !repo.git || relative.to_str().is_none() {
             return Self(Vec::new());
         }
-        let info = repo
-            .common_dir()
-            .map_or_else(|| repo.root.join(".git/info/attributes"), |dir| dir.join("info/attributes"));
+        let info =
+            repo.common_dir().map_or_else(|| repo.root.join(".git/info/attributes"), |dir| dir.join("info/attributes"));
         let rules = relative.ancestors().skip(1).map(|dir| repo.root.join(dir).join(".gitattributes"));
         Self(rules.chain(std::iter::once(info)).map(|path| (path, None)).collect())
     }
@@ -310,7 +310,10 @@ impl MediaCheck {
                     } else if !repo.read_if_changed() && !force {
                         return None;
                     }
-                    if stop.load(Ordering::Relaxed) || repo.busy() || WorkingStamp::at(&repo, &root, &relative).1 != stamp {
+                    if stop.load(Ordering::Relaxed)
+                        || repo.busy()
+                        || WorkingStamp::at(&repo, &root, &relative).1 != stamp
+                    {
                         return None;
                     }
                     let patch = repo.ok().then(|| file_diff(&mut repo, path)).flatten();
@@ -621,7 +624,11 @@ fn working_body(
         .unwrap_or_else(|kind| body_from_working_content(&working_content(entry, LIMIT), kind, lang))
 }
 
-fn body_from_patch(patch: FileDiff, picture_suffix: bool, lang: Option<&'static syntax::Lang>) -> Result<Body, LineKind> {
+fn body_from_patch(
+    patch: FileDiff,
+    picture_suffix: bool,
+    lang: Option<&'static syntax::Lang>,
+) -> Result<Body, LineKind> {
     if !picture_suffix && patch.binary {
         return Ok(Body::Note(NOT_TEXT));
     }

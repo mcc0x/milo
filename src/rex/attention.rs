@@ -4,9 +4,9 @@
 //! Both speak only to the Rex server on this computer, never start one, and
 //! never turn on a Rex setting. Block and session IDs are used whole.
 
+use crate::sys::{AsRawFd as _, RawFd};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read as _};
-use std::os::fd::{AsRawFd as _, RawFd};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};

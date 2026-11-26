@@ -267,7 +267,10 @@ impl Picture {
 }
 
 fn source_size((width, height): (u32, u32)) -> bool {
-    width != 0 && height != 0 && width.max(height) <= SOURCE_SIDE && u64::from(width) * u64::from(height) <= SOURCE_PIXELS
+    width != 0
+        && height != 0
+        && width.max(height) <= SOURCE_SIDE
+        && u64::from(width) * u64::from(height) <= SOURCE_PIXELS
 }
 
 /// Identify raster containers by their magic; the string is a fixed sips
@@ -528,7 +531,8 @@ mod tests {
         }
         jpeg.extend_from_slice(b"\xff\xda\0\x08\x01\x01\0\0\x3f\0\x3f\xff\xd9");
         let gif = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;";
-        let webp = b"RIFF\x22\0\0\0WEBPVP8 \x16\0\0\0\x30\x01\0\x9d\x01\x2a\x01\0\x01\0\x0e\xc0\xfe\x25\xa4\0\x03\x70\0\0\0\0";
+        let webp =
+            b"RIFF\x22\0\0\0WEBPVP8 \x16\0\0\0\x30\x01\0\x9d\x01\x2a\x01\0\x01\0\x0e\xc0\xfe\x25\xa4\0\x03\x70\0\0\0\0";
         let png = Picture::sample_png(2, 3);
         for (data, name, size, shade) in [
             (png, "pixel.png", (2, 3), 0),

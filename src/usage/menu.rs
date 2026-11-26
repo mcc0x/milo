@@ -1,8 +1,9 @@
 //! Streams the same local readings as the pane without opening a terminal.
 
+use crate::sys::{AsRawFd, RawFd};
 use std::fmt::Write as _;
 use std::io::{self, Write};
-use std::os::fd::{AsFd, AsRawFd, RawFd};
+use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -65,7 +66,7 @@ pub fn menu_stream() -> io::Result<()> {
         // The pane repaints when its SQLite jobs finish. Here a complete refresh
         // is one line, so collect both bounded reads before publishing it.
         while let Some(fd) = usage.database_fd() {
-            ready(&mut [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }], None)?;
+            ready(&mut [crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 }], None)?;
             usage.check_external();
         }
         // Publish reset and freshness changes on the same boundary as the pane,
@@ -102,7 +103,8 @@ impl Usage {
         }
         if changed(UsageTool::Claude) {
             self.claude = Default::default();
-            let (projects, config, state) = if hidden(UsageTool::Claude) { (None, None, None) } else { claude_sources() };
+            let (projects, config, state) =
+                if hidden(UsageTool::Claude) { (None, None, None) } else { claude_sources() };
             self.claude_dir = projects;
             self.claude_config = config;
             self.limits_file = state.map(|dir| dir.join(SAVED_LIMITS));
@@ -144,10 +146,9 @@ impl Usage {
             write!(output, r#"{separator}{{"id":"{id}","name":"{}","windows":["#, tool.label()).unwrap();
             separator = ",";
             let (state, activity) = match tool {
-                UsageTool::Codex => (
-                    limit_windows(output, codex, now, || self.limit_hint(tool, codex.is_some(), now).text()),
-                    None,
-                ),
+                UsageTool::Codex => {
+                    (limit_windows(output, codex, now, || self.limit_hint(tool, codex.is_some(), now).text()), None)
+                }
                 UsageTool::Claude => (
                     limit_windows(output, claude, now, || self.limit_hint(tool, claude.is_some(), now).text()),
                     draw::activity_text(self.claude.activity(today, now)),
@@ -263,9 +264,9 @@ pub(super) fn snapshots(
 /// A newline refreshes usage; NUL only rereads the display choice. Coalesce queued requests.
 fn next_refresh(input: RawFd, output: RawFd, deadline: Instant) -> io::Result<Option<Refresh>> {
     let mut fds = [
-        libc::pollfd { fd: input, events: libc::POLLIN, revents: 0 },
+        crate::sys::pollfd { fd: input, events: crate::sys::POLLIN, revents: 0 },
         // Darwin requires POLLHUP in the mask to report a closed pipe reader.
-        libc::pollfd { fd: output, events: libc::POLLHUP, revents: 0 },
+        crate::sys::pollfd { fd: output, events: crate::sys::POLLHUP, revents: 0 },
     ];
     let mut buffer = [0u8; 256];
     loop {
@@ -302,7 +303,7 @@ fn next_refresh(input: RawFd, output: RawFd, deadline: Instant) -> io::Result<Op
     }
 }
 
-fn ready(fds: &mut [libc::pollfd], deadline: Option<Instant>) -> io::Result<i32> {
+fn ready(fds: &mut [crate::sys::pollfd], deadline: Option<Instant>) -> io::Result<i32> {
     loop {
         let timeout = deadline.map_or(-1, |at| term::milliseconds(at.saturating_duration_since(Instant::now())));
         let result = term::wait_ready(fds, timeout);

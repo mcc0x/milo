@@ -483,7 +483,7 @@ mod omp_limits {
 
     /// The pane's external fd must wake without a filesystem event or another scheduled check.
     pub(super) fn wait_omp(usage: &mut Usage) -> External {
-        let mut ready = libc::pollfd { fd: usage.external_fd().unwrap(), events: libc::POLLIN, revents: 0 };
+        let mut ready = crate::sys::pollfd { fd: usage.external_fd().unwrap(), events: crate::sys::POLLIN, revents: 0 };
         let timeout = i32::try_from(TEST_WAIT.as_millis()).unwrap();
         loop {
             // SAFETY: The single pollfd is live, and usage still owns its descriptor.

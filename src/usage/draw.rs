@@ -104,7 +104,8 @@ impl When {
     fn draw(self, screen: &mut Screen, area: Area, row: usize, historical: bool, age: Option<i64>) {
         if let Some(age) = age {
             let exact = format!("{} ago", when::duration(age, Detail::Exact));
-            let age = if exact.len() <= area.w { exact } else { format!("{} ago", when::duration(age, Detail::Rounded)) };
+            let age =
+                if exact.len() <= area.w { exact } else { format!("{} ago", when::duration(age, Detail::Rounded)) };
             if age.len() <= area.w {
                 if let Self::Running(seconds) = self
                     && age.len() + 10 <= area.w
@@ -480,7 +481,8 @@ impl Usage {
             UsageTool::Claude if self.claude.unreadable_limits => Hint::UNREADABLE_LIMITS,
             UsageTool::Claude if self.claude.next_reading(now).is_some() => Hint::FUTURE_REPORT,
             UsageTool::Claude
-                if self.claude.status.is_none() && self.claude.saved_version.is_some_and(|version| version.len() > 0) =>
+                if self.claude.status.is_none()
+                    && self.claude.saved_version.is_some_and(|version| version.len() > 0) =>
             {
                 Hint::UNUSABLE_LIMITS
             }
@@ -497,7 +499,11 @@ impl super::OpenCode {
             opencode::Report::Unreadable => Hint::UNREAD,
             opencode::Report::Unsupported => Hint::UNCHECKED,
             opencode::Report::Today(activity) if activity.since != today => {
-                if self.poll.fd().is_some() { Hint::CHECKING_ACTIVITY } else { Hint::ACTIVITY_OUTDATED }
+                if self.poll.fd().is_some() {
+                    Hint::CHECKING_ACTIVITY
+                } else {
+                    Hint::ACTIVITY_OUTDATED
+                }
             }
             opencode::Report::Today(_) => Hint::NO_TOKENS,
             opencode::Report::Missing if self.poll.checking() => Hint::CHECKING_ACTIVITY,
