@@ -799,7 +799,7 @@ pub(crate) fn wait_ready(fd: Option<RawFd>) {
     assert_eq!(crate::term::wait_ready(&mut poll, 5_000), 1, "diagnostics did not complete");
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::fixture::Fixture;

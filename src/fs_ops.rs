@@ -56,11 +56,40 @@ pub fn open_dir(path: &Path) -> io::Result<File> {
     #[cfg(windows)]
     {
         let flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
-        let dir = refuse_reparse_point(OpenOptions::new().read(true).custom_flags(flags).open(path)?)?;
+        let dir = match OpenOptions::new().read(true).custom_flags(flags).open(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound && through_a_file(path) => {
+                return Err(io::ErrorKind::NotADirectory.into());
+            }
+            opened => refuse_reparse_point(opened?)?,
+        };
         if !dir.metadata()?.is_dir() {
             return Err(io::ErrorKind::NotADirectory.into());
         }
         Ok(dir)
+    }
+}
+
+/// Windows reports a path that runs through a file as missing, where Unix says it isn't a directory.
+#[cfg(windows)]
+fn through_a_file(path: &Path) -> bool {
+    path.ancestors().skip(1).find_map(|ancestor| fs::symlink_metadata(ancestor).ok()).is_some_and(|info| !info.is_dir())
+}
+
+/// The file to lock to hold a whole directory. Unix locks the directory itself. Windows can't
+/// lock a directory handle, so it locks a fixed file inside the directory instead.
+pub fn dir_lock(dir: &Path) -> io::Result<File> {
+    #[cfg(unix)]
+    return open_dir(dir);
+    #[cfg(windows)]
+    {
+        open_dir(dir)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = refuse_reparse_point(options.open(dir.join(".milo.lock"))?)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        Ok(file)
     }
 }
 

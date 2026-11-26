@@ -347,7 +347,7 @@ pub(super) fn dispatch(alerts: &Alerts, destination: Destination, id: u64) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::fixture::Fixture;

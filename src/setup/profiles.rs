@@ -608,7 +608,7 @@ pub fn layout_profile(args: &[OsString]) -> i32 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::fixture::Fixture;

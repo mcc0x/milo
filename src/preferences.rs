@@ -558,7 +558,7 @@ pub(crate) fn valid_choice(key: &str, value: &str) -> bool {
 
 fn remove_layer(path: &Path, check: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
     let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    let lock = match fs_ops::open_dir(dir) {
+    let lock = match fs_ops::dir_lock(dir) {
         Ok(dir) => dir,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return check(),
         Err(e) => return Err(e),
@@ -641,7 +641,7 @@ pub(crate) fn locked<T>(path: &Path, save: impl FnOnce(&Path) -> io::Result<T>) 
 fn lock_directory(dir: &Path) -> io::Result<fs::File> {
     fs::create_dir_all(dir)?;
     // Lock the directory because the files themselves are atomically replaced.
-    let lock = fs_ops::open_dir(dir)?;
+    let lock = fs_ops::dir_lock(dir)?;
     lock.lock()?;
     Ok(lock)
 }

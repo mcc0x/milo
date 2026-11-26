@@ -363,7 +363,7 @@ fn fields<'a, const N: usize>(object: &'a str, names: [&str; N]) -> Option<[Opti
     valid.then_some(fields)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) mod tests {
     use std::io::{BufRead as _, BufReader, Read as _, Write as _};
     use std::net::TcpListener;

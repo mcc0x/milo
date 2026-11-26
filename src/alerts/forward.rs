@@ -1167,7 +1167,7 @@ fn health_distinguishes_an_empty_setup_from_a_pause_and_ignores_a_stale_listener
     assert_eq!(health(state, &settings, true).0, Health::Stopped);
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[test]
 fn a_refusal_recorded_while_listening_prevents_ordinary_delivery() {
     let fixture = crate::fixture::Fixture::folder();
@@ -1230,7 +1230,7 @@ fn a_full_queue_drops_only_that_destinations_copy() {
     assert_eq!(dropped.map(AtomicU32::into_inner), [1, 0]);
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[test]
 fn toggling_origin_off_and_back_on_discards_pending_labels_without_rotating_providers() {
     use super::Kind;
@@ -1318,7 +1318,7 @@ fn toggling_origin_off_and_back_on_discards_pending_labels_without_rotating_prov
     assert!(!wire[1].contains("old-label"));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[test]
 fn a_relay_outage_retries_only_telegram_and_only_up_to_the_limit() {
     use super::event::Kind;
@@ -1386,7 +1386,7 @@ fn a_relay_outage_retries_only_telegram_and_only_up_to_the_limit() {
     assert!(wire[3..].iter().all(|request| request == &wire[0]));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[test]
 fn a_relay_connection_failure_is_retried_and_counted_but_a_lost_reply_is_not() {
     use super::event::Kind;
@@ -1444,7 +1444,7 @@ fn a_relay_connection_failure_is_retried_and_counted_but_a_lost_reply_is_not() {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[test]
 fn a_page_from_in_front_of_the_relay_does_not_pause_mirroring() {
     use super::event::Kind;
