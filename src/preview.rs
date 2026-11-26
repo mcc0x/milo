@@ -30,7 +30,7 @@ pub(crate) const MISSING_TOOL: &str =
     "Install tkmp outside the checkout and current directory, then add its absolute directory to PATH";
 
 #[cfg(windows)]
-const WINDOWS_UNAVAILABLE: &str = "Markdown preview needs Rex, which is not available on Windows";
+const WINDOWS_UNAVAILABLE: &str = "Markdown preview is not supported on Windows yet; it needs a Rex pane";
 
 #[cfg(windows)]
 pub(crate) fn eligible(_root: &std::path::Path, _root_id: Option<(u64, u64)>, _relative: &std::path::Path) -> bool {

@@ -13,7 +13,7 @@ use preview::anchor_argument;
 #[cfg(unix)]
 pub(crate) use preview::{available as preview_available, launch as preview, preview_anchor};
 
-/// Markdown preview needs a Rex pane, and Rex does not run natively on Windows.
+/// Markdown preview needs a Rex pane, and Milo's Rex integration is not ported to Windows yet.
 #[cfg(windows)]
 pub(crate) fn preview_available(_root: &Path) -> bool {
     false
@@ -21,7 +21,7 @@ pub(crate) fn preview_available(_root: &Path) -> bool {
 
 #[cfg(windows)]
 pub(crate) fn preview(_root: &Path, _tool: &Path, _file: &Path) -> Result<(), &'static str> {
-    Err("Markdown preview needs Rex, which is not available on Windows")
+    Err("Markdown preview is not supported on Windows yet; it needs a Rex pane")
 }
 
 #[cfg(windows)]

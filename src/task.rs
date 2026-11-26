@@ -215,7 +215,8 @@ fn plan(root: &Path, place: &Place<'_>) -> Result<Plan, String> {
 pub(crate) fn command(request: &Request<'_>) -> Result<String, String> {
     if cfg!(windows) {
         return Err(
-            "milo task is not supported on Windows yet; it needs Rex, which does not run natively there".to_owned()
+            "milo task is not supported on Windows yet; it needs Milo's Rex integration, which is not ported there"
+                .to_owned(),
         );
     }
     match request.host {

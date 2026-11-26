@@ -143,7 +143,7 @@ pub(crate) fn run(start: Start<'_>) -> Result<(), String> {
     serve(listener, &wake.0, &access, editor, launcher).map_err(|error| format!("settings server: {error}"))
 }
 
-/// Which Rex apps could show the page. Rex does not run natively on Windows, so none is asked there.
+/// Which Rex apps could show the page. Milo's Rex integration is not ported to Windows yet, so none is asked there.
 fn viewers() -> Option<Viewers> {
     #[cfg(unix)]
     return rex::viewers();
