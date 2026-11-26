@@ -156,6 +156,7 @@ if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { Fail "Place $asset b
 if (-not $folder) { [void](New-Item -ItemType Directory -Path $dir -Force) }
 $stage = Join-Path $dir ('.milo-' + [Guid]::NewGuid().ToString('N'))
 $failure = $null
+$failed = $false
 $aside = $null
 $placed = $false
 try {
@@ -177,15 +178,16 @@ try {
     Move-Item -LiteralPath (Join-Path $stage 'uninstall-milo.ps1') -Destination $uninstaller -Force
     Move-Item -LiteralPath (Join-Path $stage '.milo-install-receipt') -Destination $receipt -Force
 } catch {
+    $failed = $true
     $failure = $_.Exception.Message
     # Put back the milo.exe the receipt still describes, so a later run is not refused.
     if ($placed) { Remove-Item -LiteralPath $binary -Force -ErrorAction SilentlyContinue }
     if ($aside) { Move-Item -LiteralPath $aside -Destination $binary -ErrorAction SilentlyContinue }
 } finally {
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
-    if ($failure -and -not $folder) { try { [IO.Directory]::Delete($dir) } catch { } }
+    if ($failed -and -not $folder) { try { [IO.Directory]::Delete($dir) } catch { } }
 }
-if ($failure) { Fail $failure }
+if ($failed) { Fail "Milo was not installed: $failure" }
 [void](Remove-Old)
 Write-Output "Installed Milo at $binary."
 if ($entry -and -not (Test-OnPath $path.Value)) {

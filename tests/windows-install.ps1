@@ -107,6 +107,12 @@ try {
     $result = Invoke-Installer (Join-Path $Upgrade 'install-windows.ps1')
     Check ($result.Code -eq 0 -and @(Old-Copies).Count -eq 0) 'the old version is cleared once it has stopped'
 
+    $held = [IO.File]::Open($receipt, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try { $result = Invoke-Installer (Join-Path $Release 'install-windows.ps1') } finally { $held.Dispose() }
+    Check ($result.Code -ne 0 -and $result.Output -match 'not installed') 'an install that cannot write its receipt fails'
+    Check ((Digest $binary) -eq $upgradeDigest -and @(Old-Copies).Count -eq 0) 'and puts the previous milo.exe back'
+    Check ((([IO.File]::ReadAllText($receipt)) -split "`n")[0] -eq $upgradeDigest) 'so the receipt still matches it'
+
     $installed = [IO.File]::ReadAllBytes($binary)
     [IO.File]::AppendAllText($binary, 'x')
     $result = Invoke-Installer (Join-Path $Release 'install-windows.ps1')
