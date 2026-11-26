@@ -153,12 +153,14 @@ impl Temp {
     }
 
     fn open(path: PathBuf, read: bool) -> io::Result<(Self, File)> {
-        let mut options = OpenOptions::new();
-        options.read(read).write(true).create_new(true);
-        // On Windows the file takes the access list of the user's own folder it is created in.
         #[cfg(unix)]
-        options.mode(0o600);
-        let file = options.open(&path)?;
+        let file = OpenOptions::new().read(read).write(true).create_new(true).mode(0o600).open(&path)?;
+        // Only this user and SYSTEM may open it, whoever else its folder lets in; it is always readable.
+        #[cfg(windows)]
+        let file = {
+            let _ = read;
+            crate::sys::private_file(&path, crate::sys::Existing::Refuse)?
+        };
         Ok((Self(path), file))
     }
 

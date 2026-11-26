@@ -19,7 +19,9 @@ pub(crate) use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub(crate) use windows::{AsFd, AsRawFd, BorrowedFd, Job, POLLIN, POLLOUT, RawFd, pollfd};
+pub(crate) use windows::{AsFd, AsRawFd, BorrowedFd, Existing, Job, POLLIN, POLLOUT, RawFd, pollfd, private_file};
+#[cfg(all(windows, test))]
+pub(crate) use windows::{file_security, private_security};
 
 /// Waits up to `timeout_ms` for any of `fds` to be ready, or forever when it is negative.
 /// Returns how many are ready, zero on timeout, or a negative result on failure or interruption.
