@@ -231,9 +231,6 @@ fn what_needs_a_network_or_a_menu_bar_stays_unsupported() {
         hidden[tool] = Show::Hide;
     }
     assert!(doctor(hidden, UsageAccounts::default()).is_empty());
-    let mut accounts = UsageAccounts::default();
-    accounts[crate::preferences::UsageAccount::DeepSeek] = Show::Always;
-    assert_eq!(doctor(hidden, accounts), ["Usage accounts: not supported on Windows yet"]);
     let error = menu_stream().unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     assert!(error.to_string().contains("not supported on Windows yet"));
@@ -446,4 +443,72 @@ fn the_status_line_gives_up_on_input_left_open_and_reads_input_that_ends() {
     let mut output = Vec::new();
     assert_eq!(status::run_fd(reader, &mut output, None, NOW, Duration::from_secs(5)), 0);
     assert_eq!(String::from_utf8(output).unwrap(), "5h 77% · week 39% left\n");
+}
+
+/// A provider account asked through the curl Windows ships, against a loopback stand-in for the
+/// provider. The key comes from the environment, or from a settings file only while it is private.
+#[test]
+fn a_provider_account_is_asked_through_windows_curl_with_a_key_from_the_environment_or_a_private_file() {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::net::TcpListener;
+
+    use super::accounts::{Accounts, Failure, Sources, Status};
+    use crate::preferences::UsageAccount;
+
+    const KEY: &str = "sk-milo-windows-test-key-1";
+    let f = Fixture::folder();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let mut heads = Vec::new();
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut head = String::new();
+            while reader.read_line(&mut head).is_ok_and(|read| read > 0) && !head.ends_with("\r\n\r\n") {}
+            let body = include_str!("tests/accounts/deepseek-balance.json");
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 200 Canned\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            heads.push(head);
+        }
+        heads
+    });
+    let settings = f.root.join("usage-accounts.conf");
+    let ask = |environment: &[(&'static str, &str)], cache: &str| {
+        let sources = Sources::test(environment, settings.clone(), f.root.join(cache), port);
+        let mut choices = UsageAccounts::default();
+        choices[UsageAccount::DeepSeek] = Show::Always;
+        let mut usage = Usage::from_dirs(None, None, Some(f.root.join("state")), NOW);
+        usage.accounts = Accounts::with(sources, choices);
+        usage.accounts.settle(NOW, false);
+        let status = usage.accounts.iter().next().unwrap().status(NOW);
+        (status, frame(&mut usage, 60, 1)[0].trim().to_owned())
+    };
+
+    let (_, row) = ask(&[("MILO_DEEPSEEK_API_KEY", KEY)], "first");
+    assert_eq!(row, "DeepSeek · ¥110.00 balance · ¥10.00 granted");
+
+    // A file written the ordinary way takes its folder's access list, so it is not read.
+    fs::write(&settings, format!("MILO_DEEPSEEK_API_KEY = {KEY}\n")).unwrap();
+    assert_eq!(ask(&[], "second").0, Status::Failed(Failure::OpenFile));
+    fs::remove_file(&settings).unwrap();
+    let mut private = crate::sys::private_file(&settings, crate::sys::Existing::Refuse).unwrap();
+    private.write_all(format!("MILO_DEEPSEEK_API_KEY = {KEY}\n").as_bytes()).unwrap();
+    drop(private);
+    let (_, row) = ask(&[], "third");
+    assert_eq!(row, "DeepSeek · ¥110.00 balance · ¥10.00 granted");
+
+    let heads = server.join().unwrap();
+    for head in &heads {
+        assert!(head.starts_with("GET /deepseek/user/balance HTTP/1.1\r\n"), "{head}");
+        assert!(head.contains(&format!("Authorization: Bearer {KEY}\r\n")), "{head}");
+    }
+    let saved =
+        fs::read_to_string(fs::read_dir(f.root.join("third")).unwrap().next().unwrap().unwrap().path()).unwrap();
+    assert!(!saved.contains(KEY), "a key was saved: {saved}");
 }

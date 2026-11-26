@@ -3,8 +3,8 @@
 //! The credential travels on curl's standard input, never in its arguments or
 //! environment, so other processes cannot read it from the process table.
 
-use std::ffi::OsStr;
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -13,8 +13,16 @@ use super::sqlite;
 /// A reply larger than this is not one of the small reports Milo asks for.
 const MAX_REPLY: usize = 256 * 1024;
 
-pub(super) fn executable() -> &'static OsStr {
-    OsStr::new("/usr/bin/curl")
+#[cfg(unix)]
+pub(super) fn executable() -> PathBuf {
+    PathBuf::from("/usr/bin/curl")
+}
+
+/// The curl that Windows itself ships, never one a project or \`PATH\` supplies.
+#[cfg(windows)]
+pub(super) fn executable() -> PathBuf {
+    let root = std::env::var_os("SystemRoot").map(PathBuf::from).filter(|root| root.is_absolute());
+    root.unwrap_or_else(|| PathBuf::from(r"C:\Windows")).join("System32").join("curl.exe")
 }
 
 /// One GET. `url` and `headers` are built by Milo; only `bearer` comes from the user.

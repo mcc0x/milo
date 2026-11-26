@@ -561,9 +561,12 @@ impl Sources {
         // SAFETY: geteuid has no preconditions and cannot fail.
         #[cfg(unix)]
         let private = metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0;
-        // Windows has no owner and mode to check here, so no file is trusted to hold a key.
+        // Only a file with exactly the security Milo gives its own private files is trusted.
         #[cfg(windows)]
-        let private = false;
+        let private = crate::sys::file_security(&file)
+            .ok()
+            .zip(crate::sys::private_security().ok())
+            .is_some_and(|(file, private)| file == private);
         if !metadata.is_file() || !private || metadata.len() > SETTINGS_LIMIT {
             return Err(Failure::OpenFile);
         }
@@ -977,7 +980,7 @@ impl Sources {
         let file = self.settings.as_deref().map(Path::display);
         let file = file.map_or_else(|| SETTINGS_FILE.to_owned(), |file| file.to_string());
         let mut lines = Vec::new();
-        let curl = Path::new(http::executable());
+        let curl = http::executable();
         if choices.any() && !curl.exists() {
             lines.push(format!("Usage accounts: {} is missing, so no provider can be asked", curl.display()));
         }
@@ -994,6 +997,9 @@ impl Sources {
                     lines.push(match failure {
                         Failure::NoKey | Failure::NoScope => {
                             format!("{title}: not asked; set {name} in the environment or in {file}")
+                        }
+                        Failure::OpenFile if cfg!(windows) => {
+                            format!("{title}: not asked; {file} is not private to you, so set {name} in the environment instead")
                         }
                         Failure::OpenFile => {
                             format!("{title}: not asked; {file} must be a plain file only you can read (chmod 600)")

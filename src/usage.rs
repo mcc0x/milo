@@ -1004,17 +1004,8 @@ impl Usage {
         let large = [usage.omp.path(), usage.opencode.poll.path()].into_iter().flatten().any(sqlite::too_large);
         #[cfg(unix)]
         let large = false;
-        if cfg!(windows) {
-            usage.preference_note = if prefs.usage_accounts.any() {
-                Some("Usage accounts are not supported on Windows yet.")
-            } else if large {
-                Some("OMP and OpenCode databases over 64 MiB are not read on Windows yet.")
-            } else {
-                note
-            };
-            return usage;
-        }
-        usage.preference_note = note;
+        usage.preference_note =
+            if large { Some("OMP and OpenCode databases over 64 MiB are not read on Windows yet.") } else { note };
         usage.accounts = accounts::Accounts::open(prefs.usage_accounts);
         usage
     }
@@ -1186,10 +1177,6 @@ pub fn doctor(tools: UsageTools, chosen: UsageAccounts) -> Vec<String> {
     let usage = Usage::for_home(home.as_deref(), now, tools);
     let mut lines =
         usage.doctor(omp::database(home.as_deref()), opencode::database(home.as_deref()), sqlite::QUERY_WAIT);
-    if cfg!(windows) {
-        lines.extend(chosen.any().then(|| "Usage accounts: not supported on Windows yet".to_owned()));
-        return lines;
-    }
     let accounts = accounts::doctor(chosen, now);
     // With an account to describe, there is something to say besides that no tool was found.
     if !accounts.is_empty() {
