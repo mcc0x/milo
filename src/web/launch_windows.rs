@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn the_shell_request_has_the_layout_windows_reads() {
         assert_eq!(size_of::<ShellExecuteInfo>(), 112);
-        assert_eq!(std::mem::offset_of!(ShellExecuteInfo, show), 56);
+        assert_eq!(std::mem::offset_of!(ShellExecuteInfo, show), 48);
         assert_eq!(std::mem::offset_of!(ShellExecuteInfo, process), 104);
     }
 

@@ -2303,7 +2303,7 @@ mod windows_tests {
         let f = Fixture::folder();
         let store = fixture_store(&f);
         let mut editor = outside(store.clone(), Some(&f.root));
-        action(&mut editor, r#""action":"set","field":"layout.side","value":"left""#).unwrap();
+        action(&mut editor, r#""action":"set","field":"layout.side","value":"right""#).unwrap();
         let profiles = store.config.join("layouts");
         std::fs::create_dir_all(&profiles).unwrap();
         let busy = lock::setup(&profiles).unwrap();

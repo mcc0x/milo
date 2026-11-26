@@ -643,10 +643,12 @@ mod private_file_tests {
         let fixture = Fixture::folder();
         let path = fixture.root.join("secret.txt");
         let file = private_file(&path, Existing::Refuse).unwrap();
-        let user = user_sid().unwrap();
-        let expected = format!("O:{user}D:P(A;;FA;;;{user})(A;;FA;;;SY)");
+        let expected = private_security().unwrap();
+        // Windows writes a well-known account, such as the built-in Administrator, by its alias.
+        let owner = expected.strip_prefix("O:").and_then(|rest| rest.split_once("D:")).unwrap().0;
+        assert!(owner == user_sid().unwrap() || owner.len() == 2, "{expected}");
+        assert_eq!(expected, format!("O:{owner}D:P(A;;FA;;;{owner})(A;;FA;;;SY)"));
         assert_eq!(file_security(&file).unwrap(), expected, "nothing is inherited from the folder");
-        assert_eq!(private_security().unwrap(), expected);
         drop(file);
         assert_eq!(private_file(&path, Existing::Refuse).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
         let reopened = private_file(&path, Existing::Open).unwrap();

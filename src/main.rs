@@ -427,9 +427,7 @@ fn command<'a>(
             Command::ShellOutline(block)
         });
     }
-    if !rest.is_empty()
-        && !name.is_some_and(|name| TAKES_WORDS.contains(&name))
-    {
+    if !rest.is_empty() && !name.is_some_and(|name| TAKES_WORDS.contains(&name)) {
         return Err(format!("too many arguments; see {}", guide(name)));
     }
     if rest.is_empty()
