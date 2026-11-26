@@ -10,7 +10,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::fs::File;
-use std::io::{self, Write as _};
+use std::io;
 use std::os::windows::fs::FileExt as _;
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
@@ -49,6 +49,7 @@ const FRAME_HEADER: usize = 24;
 unsafe extern "system" {
     fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const c_char) -> Option<unsafe extern "system" fn() -> isize>;
+    fn GetFileInformationByHandleEx(file: *mut c_void, class: c_int, info: *mut c_void, size: u32) -> i32;
     fn LockFileEx(
         file: *mut c_void,
         flags: u32,
@@ -87,6 +88,7 @@ struct Sqlite {
     column_type: Kind,
     column_int64: Integer,
     column_double: Float,
+    column_text: Blob,
     column_blob: Blob,
     column_bytes: Kind,
 }
@@ -126,6 +128,7 @@ fn load() -> Option<Sqlite> {
         column_type: symbol!("sqlite3_column_type" as Kind),
         column_int64: symbol!("sqlite3_column_int64" as Integer),
         column_double: symbol!("sqlite3_column_double" as Float),
+        column_text: symbol!("sqlite3_column_text" as Blob),
         column_blob: symbol!("sqlite3_column_blob" as Blob),
         column_bytes: symbol!("sqlite3_column_bytes" as Kind),
     })
@@ -153,7 +156,7 @@ impl Connection {
 
     /// Runs every statement in `sql`, writing the rows of each that returns any as one JSON array.
     fn run(&self, sql: &CStr, max: usize) -> Option<Vec<u8>> {
-        let mut out = Vec::new();
+        let mut out = Json { out: Vec::new(), max };
         let mut rest = sql.as_ptr();
         loop {
             let (mut stmt, mut tail) = (ptr::null_mut(), ptr::null());
@@ -163,9 +166,9 @@ impl Connection {
             }
             if stmt.is_null() {
                 // Only blanks or comments were left.
-                return Some(out);
+                return Some(out.out);
             }
-            Statement { sqlite: self.sqlite, stmt }.rows(&mut out, max)?;
+            Statement { sqlite: self.sqlite, stmt }.rows(&mut out)?;
             rest = tail;
         }
     }
@@ -184,8 +187,38 @@ struct Statement {
     stmt: *mut Stmt,
 }
 
+/// Output that never grows past its limit: every append is checked before it is made.
+struct Json {
+    out: Vec<u8>,
+    max: usize,
+}
+
+impl Json {
+    fn put(&mut self, bytes: &[u8]) -> Option<()> {
+        (self.out.len().checked_add(bytes.len())? <= self.max).then(|| self.out.extend_from_slice(bytes))
+    }
+
+    /// Bytes as a JSON string. Like the sqlite3 shell, bytes above ASCII pass through as they are.
+    fn string(&mut self, bytes: &[u8]) -> Option<()> {
+        // Escapes only lengthen a string, so one that cannot fit as it is is refused before copying.
+        if self.out.len().checked_add(bytes.len())?.checked_add(2)? > self.max {
+            return None;
+        }
+        self.put(b"\"")?;
+        for &b in bytes {
+            match b {
+                b'"' => self.put(b"\\\"")?,
+                b'\\' => self.put(b"\\\\")?,
+                0..0x20 => self.put(format!("\\u{b:04x}").as_bytes())?,
+                _ => self.put(&[b])?,
+            }
+        }
+        self.put(b"\"")
+    }
+}
+
 impl Statement {
-    fn rows(&self, out: &mut Vec<u8>, max: usize) -> Option<()> {
+    fn rows(&self, out: &mut Json) -> Option<()> {
         // SAFETY: The statement is live.
         let columns = unsafe { (self.sqlite.column_count)(self.stmt) };
         let mut first = true;
@@ -196,11 +229,11 @@ impl Statement {
                 DONE => break,
                 _ => return None,
             }
-            out.extend_from_slice(if first { b"[{" } else { b",\n{" });
+            out.put(if first { b"[{" } else { b",\n{" })?;
             first = false;
             for column in 0..columns {
                 if column > 0 {
-                    out.push(b',');
+                    out.put(b",")?;
                 }
                 // SAFETY: The column is in range, and the name stays valid until the next step.
                 let name = unsafe { (self.sqlite.column_name)(self.stmt, column) };
@@ -208,49 +241,47 @@ impl Statement {
                     return None;
                 }
                 // SAFETY: SQLite returned a NUL-terminated name.
-                string(out, unsafe { CStr::from_ptr(name) }.to_bytes());
-                out.push(b':');
-                self.value(out, column);
+                out.string(unsafe { CStr::from_ptr(name) }.to_bytes())?;
+                out.put(b":")?;
+                self.value(out, column)?;
             }
-            out.push(b'}');
-            if out.len() > max {
-                return None;
-            }
+            out.put(b"}")?;
         }
         if !first {
-            out.extend_from_slice(b"]\n");
+            out.put(b"]\n")?;
         }
         Some(())
     }
 
-    /// One column of the current row, as the sqlite3 shell writes it in JSON mode.
-    fn value(&self, out: &mut Vec<u8>, column: c_int) {
+    /// One column of the current row, as the sqlite3 shell writes it in JSON mode: text as UTF-8
+    /// whatever the database's encoding, and a blob's bytes as they are.
+    fn value(&self, out: &mut Json, column: c_int) -> Option<()> {
         // SAFETY: The statement has a current row, and the column is in range.
         match unsafe { (self.sqlite.column_type)(self.stmt, column) } {
             // SAFETY: As above.
-            INTEGER => write!(out, "{}", unsafe { (self.sqlite.column_int64)(self.stmt, column) }).unwrap_or(()),
+            INTEGER => out.put(unsafe { (self.sqlite.column_int64)(self.stmt, column) }.to_string().as_bytes()),
             FLOAT => {
                 // SAFETY: As above.
                 let value = unsafe { (self.sqlite.column_double)(self.stmt, column) };
-                if value.is_finite() {
-                    write!(out, "{value:?}").unwrap_or(());
-                } else {
-                    out.extend_from_slice(b"null");
-                }
+                if value.is_finite() { out.put(format!("{value:?}").as_bytes()) } else { out.put(b"null") }
             }
-            TEXT | BLOB => {
-                // SAFETY: As above. The pointer is read before the length, as SQLite asks.
-                let bytes = unsafe { (self.sqlite.column_blob)(self.stmt, column) };
-                // SAFETY: As above.
-                let len = usize::try_from(unsafe { (self.sqlite.column_bytes)(self.stmt, column) }).unwrap_or(0);
+            kind @ (TEXT | BLOB) => {
+                let bytes = if kind == TEXT {
+                    // SAFETY: As above. The text is converted to UTF-8 before its length is read, as SQLite asks.
+                    unsafe { (self.sqlite.column_text)(self.stmt, column) }.cast::<u8>()
+                } else {
+                    // SAFETY: As above.
+                    unsafe { (self.sqlite.column_blob)(self.stmt, column) }.cast::<u8>()
+                };
+                // SAFETY: As above, after the pointer was read.
+                let len = usize::try_from(unsafe { (self.sqlite.column_bytes)(self.stmt, column) }).ok()?;
                 if bytes.is_null() || len == 0 {
-                    string(out, b"");
-                } else {
-                    // SAFETY: SQLite keeps `len` bytes at `bytes` until the next step.
-                    string(out, unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), len) });
+                    return out.string(b"");
                 }
+                // SAFETY: SQLite keeps `len` bytes at `bytes` until the next step.
+                out.string(unsafe { std::slice::from_raw_parts(bytes, len) })
             }
-            _ => out.extend_from_slice(b"null"),
+            _ => out.put(b"null"),
         }
     }
 }
@@ -262,20 +293,6 @@ impl Drop for Statement {
     }
 }
 
-/// Bytes as a JSON string. Like the sqlite3 shell, bytes above ASCII pass through as they are.
-fn string(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.push(b'"');
-    for &b in bytes {
-        match b {
-            b'"' => out.extend_from_slice(b"\\\""),
-            b'\\' => out.extend_from_slice(b"\\\\"),
-            0..0x20 => write!(out, "\\u{b:04x}").unwrap_or(()),
-            _ => out.push(b),
-        }
-    }
-    out.push(b'"');
-}
-
 /// Interrupts a statement once the deadline it was handed has passed.
 unsafe extern "system" fn past(deadline: *mut c_void) -> c_int {
     // SAFETY: The handler is only ever registered with the query's deadline, which outlives the connection.
@@ -283,11 +300,17 @@ unsafe extern "system" fn past(deadline: *mut c_void) -> c_int {
     c_int::from(Instant::now() >= *deadline)
 }
 
-/// Up to `limit` bytes of a file from its start; None past the limit or on any error.
-fn read_all(file: &File, limit: u64) -> Option<Vec<u8>> {
+/// A whole file no longer than `limit`, read before the deadline; None otherwise or on any error.
+fn read_all(file: &File, limit: u64, deadline: Instant) -> Option<Vec<u8>> {
+    if file.metadata().ok()?.len() > limit {
+        return None;
+    }
     let mut bytes = Vec::new();
     let mut buffer = vec![0; 1 << 16];
     loop {
+        if Instant::now() >= deadline {
+            return None;
+        }
         match file.seek_read(&mut buffer, bytes.len() as u64) {
             Ok(0) => return Some(bytes),
             Ok(n) if (bytes.len() + n) as u64 <= limit => bytes.extend_from_slice(&buffer[..n]),
@@ -297,23 +320,28 @@ fn read_all(file: &File, limit: u64) -> Option<Vec<u8>> {
     }
 }
 
-fn header(file: &File) -> Option<Vec<u8>> {
-    let mut header = vec![0; WAL_HEADER];
+/// Up to `len` bytes from the start of a file.
+fn start(file: &File, len: usize) -> Option<Vec<u8>> {
+    let mut bytes = vec![0; len];
     let mut read = 0;
-    while read < WAL_HEADER {
-        match file.seek_read(&mut header[read..], read as u64) {
+    while read < len {
+        match file.seek_read(&mut bytes[read..], read as u64) {
             Ok(0) => break,
             Ok(n) => read += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => return None,
         }
     }
-    header.truncate(read);
-    Some(header)
+    bytes.truncate(read);
+    Some(bytes)
 }
 
 fn be32(bytes: &[u8], at: usize) -> u32 {
     u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+fn le32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 
 /// SQLite's running checksum over 8-byte steps, in the byte order the log's magic number names.
@@ -326,58 +354,117 @@ fn checksum(mut sum: (u32, u32), bytes: &[u8], big_endian: bool) -> (u32, u32) {
     sum
 }
 
-/// The database as of the last transaction committed in its log, with the log folded in and the
-/// header marked as having none, so SQLite reads the copy on its own. As SQLite does, a log is used
-/// only for a database in WAL mode with a matching page size, and a frame after the last commit, a
-/// torn frame and any frame after one are left out. Nothing grows past `limit`.
-pub(super) fn fold(mut db: Vec<u8>, wal: &[u8], limit: u64) -> Option<Vec<u8>> {
-    if db.len() < 100 || &db[..16] != b"SQLite format 3\0" || !matches!((db[18], db[19]), (1 | 2, 1 | 2)) {
-        return None;
-    }
-    let db_page = match u16::from_be_bytes([db[16], db[17]]) {
+/// The page size a database header names, if it is one SQLite accepts.
+fn page_size(db: &[u8]) -> Option<usize> {
+    let size = match u16::from_be_bytes([db[16], db[17]]) {
         1 => 65536,
         size => usize::from(size),
     };
-    let header_valid = db[18] == 2
-        && wal.len() >= WAL_HEADER
-        && be32(wal, 0) & !1 == 0x377f_0682
-        && be32(wal, 4) == 3_007_000
-        && usize::try_from(be32(wal, 8)).is_ok_and(|page| page == db_page && page.is_power_of_two() && page >= 512)
-        && checksum((0, 0), &wal[..24], be32(wal, 0) & 1 == 1) == (be32(wal, 24), be32(wal, 28));
-    if header_valid {
-        let (page, big_endian) = (db_page, be32(wal, 0) & 1 == 1);
-        let mut sum = (be32(wal, 24), be32(wal, 28));
-        let (mut frames, mut committed) = (Vec::new(), None);
-        for frame in wal[WAL_HEADER..].chunks_exact(FRAME_HEADER + page) {
-            if frame[8..16] != wal[16..24] {
-                break;
-            }
-            sum = checksum(checksum(sum, &frame[..8], big_endian), &frame[FRAME_HEADER..], big_endian);
-            if sum != (be32(frame, 16), be32(frame, 20)) {
-                break;
-            }
-            frames.push(frame);
-            if be32(frame, 4) != 0 {
-                committed = Some(frames.len());
-            }
-        }
-        if let Some(count) = committed {
-            let size = u64::from(be32(frames[count - 1], 4)).checked_mul(page as u64).filter(|&size| size <= limit)?;
-            db.resize(usize::try_from(size).ok()?, 0);
-            for frame in &frames[..count] {
-                let at = usize::try_from(be32(frame, 0)).ok()?.checked_sub(1)?.checked_mul(page)?;
-                if let Some(target) = db.get_mut(at..at.checked_add(page)?) {
-                    target.copy_from_slice(&frame[FRAME_HEADER..]);
-                }
-            }
-        }
-    }
-    if db.len() < 100 || &db[..16] != b"SQLite format 3\0" {
+    (size.is_power_of_two() && size >= 512).then_some(size)
+}
+
+/// A first page SQLite would open: its header, a page size it accepts and format versions 1 or 2.
+fn header_valid(db: &[u8]) -> bool {
+    db.len() >= 100
+        && &db[..16] == b"SQLite format 3\0"
+        && page_size(db).is_some()
+        && matches!((db[18], db[19]), (1 | 2, 1 | 2))
+}
+
+/// Where the log's committed content ends.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum End {
+    /// The frame count a live writer published in the WAL index, with the salts of its log.
+    Published { frames: u32, salts: [u8; 8] },
+    /// No WAL index exists and none appeared during the copy, so no connection has the database
+    /// open: every committed frame counts, as SQLite's own recovery counts them.
+    Recovered,
+}
+
+/// The database as of the end of its log's committed content, with the log folded in and the header
+/// marked as having none, so SQLite reads the copy on its own. As SQLite does, a log is used only for
+/// a database whose read version is 2; one with an unknown version or a different page size leaves
+/// the database unread, and one with a foreign magic number or header checksum counts as empty.
+/// Nothing grows past `limit`.
+pub(super) fn fold(mut db: Vec<u8>, wal: &[u8], end: End, limit: u64) -> Option<Vec<u8>> {
+    if !header_valid(&db) {
         return None;
     }
+    let page = page_size(&db)?;
+    let published = match end {
+        End::Published { frames, .. } => Some(usize::try_from(frames).ok()?),
+        End::Recovered => None,
+    };
+    let magic = if wal.len() >= WAL_HEADER { be32(wal, 0) } else { 0 };
+    let big_endian = magic & 1 == 1;
+    let log = db[19] == 2
+        && magic & !1 == 0x377f_0682
+        && usize::try_from(be32(wal, 8)).is_ok_and(|size| size.is_power_of_two() && (512..=65536).contains(&size))
+        && checksum((0, 0), &wal[..24], big_endian) == (be32(wal, 24), be32(wal, 28));
+    if !log {
+        return (published.unwrap_or(0) == 0).then(|| normalized(db));
+    }
+    if be32(wal, 4) != 3_007_000 || usize::try_from(be32(wal, 8)).ok()? != page {
+        return None;
+    }
+    if let End::Published { frames, salts } = end
+        && frames > 0
+        && salts[..] != wal[16..24]
+    {
+        return None;
+    }
+    let mut sum = (be32(wal, 24), be32(wal, 28));
+    let (mut frames, mut committed) = (Vec::new(), 0);
+    for frame in wal[WAL_HEADER..].chunks_exact(FRAME_HEADER + page) {
+        if published.is_some_and(|end| frames.len() == end) || frame[8..16] != wal[16..24] {
+            break;
+        }
+        sum = checksum(checksum(sum, &frame[..8], big_endian), &frame[FRAME_HEADER..], big_endian);
+        if sum != (be32(frame, 16), be32(frame, 20)) {
+            break;
+        }
+        frames.push(frame);
+        if be32(frame, 4) != 0 {
+            committed = frames.len();
+        }
+    }
+    // A published end is a commit whose frames are all in the copy; anything else is a torn copy.
+    if published.is_some_and(|end| end != committed) {
+        return None;
+    }
+    if committed > 0 {
+        let size = u64::from(be32(frames[committed - 1], 4)).checked_mul(page as u64).filter(|&size| size <= limit)?;
+        db.resize(usize::try_from(size).ok()?, 0);
+        for frame in &frames[..committed] {
+            let at = usize::try_from(be32(frame, 0)).ok()?.checked_sub(1)?.checked_mul(page)?;
+            if let Some(target) = db.get_mut(at..at.checked_add(page)?) {
+                target.copy_from_slice(&frame[FRAME_HEADER..]);
+            }
+        }
+    }
+    (header_valid(&db) && page_size(&db) == Some(page)).then(|| normalized(db))
+}
+
+/// Marks a copy as having no log, so SQLite reads it on its own.
+fn normalized(mut db: Vec<u8>) -> Vec<u8> {
     db[18] = 1;
     db[19] = 1;
-    Some(db)
+    db
+}
+
+/// The end a live writer published in the WAL index, read from the index's first 48 bytes as SQLite
+/// reads them: two identical copies, initialised, the known version, and a matching checksum.
+fn published(shm: &File) -> Option<End> {
+    let index = start(shm, 96)?;
+    if index.len() < 96 || index[..48] != index[48..] || index[12] != 1 || le32(&index, 0) != 3_007_000 {
+        return None;
+    }
+    if checksum((0, 0), &index[..40], false) != (le32(&index, 40), le32(&index, 44)) {
+        return None;
+    }
+    let mut salts = [0; 8];
+    salts.copy_from_slice(&index[32..40]);
+    Some(End::Published { frames: le32(&index, 16), salts })
 }
 
 #[repr(C)]
@@ -389,46 +476,65 @@ struct Overlapped {
     event: *mut c_void,
 }
 
-/// SQLite's lock bytes on Windows, past the end of any database Milo reads.
+#[repr(C)]
+struct FileIdInfo {
+    volume_serial: u64,
+    id: [u8; 16],
+}
+
+/// SQLite's lock bytes on Windows: the database's, past the end of any database Milo reads, and the
+/// WAL index's read-lock slot 0, which a checkpoint must hold exclusively to write into the database.
 const PENDING_BYTE: u32 = 0x4000_0000;
 const SHARED_FIRST: u32 = PENDING_BYTE + 2;
 const SHARED_SIZE: u32 = 510;
+const READ_LOCK_0: u32 = 120 + 3;
 const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x1;
-const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x2;
+const FILE_ID_INFO: c_int = 0x12;
 
-fn lock(file: &File, offset: u32, len: u32, flags: u32) -> bool {
+/// A shared lock on a byte range, released when dropped. Locks change no bytes.
+struct Held<'a> {
+    file: &'a File,
+    offset: u32,
+    len: u32,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        let mut overlapped =
+            Overlapped { internal: 0, internal_high: 0, offset: self.offset, offset_high: 0, event: ptr::null_mut() };
+        // SAFETY: The range was locked through this open handle; the OVERLAPPED only names it.
+        unsafe { UnlockFileEx(self.file.as_raw_handle(), 0, self.len, 0, &raw mut overlapped) };
+    }
+}
+
+/// Takes a shared lock on the range without waiting, as SQLite takes its shared locks on Windows.
+fn hold(file: &File, offset: u32, len: u32) -> Option<Held<'_>> {
     let mut overlapped = Overlapped { internal: 0, internal_high: 0, offset, offset_high: 0, event: ptr::null_mut() };
     // SAFETY: The handle is open, the OVERLAPPED only names the range, and the call never waits.
-    unsafe { LockFileEx(file.as_raw_handle(), flags | LOCKFILE_FAIL_IMMEDIATELY, 0, len, 0, &raw mut overlapped) != 0 }
+    let locked =
+        unsafe { LockFileEx(file.as_raw_handle(), LOCKFILE_FAIL_IMMEDIATELY, 0, len, 0, &raw mut overlapped) } != 0;
+    locked.then_some(Held { file, offset, len })
 }
 
-fn unlock(file: &File, offset: u32, len: u32) {
-    let mut overlapped = Overlapped { internal: 0, internal_high: 0, offset, offset_high: 0, event: ptr::null_mut() };
-    // SAFETY: As above; the range was locked through this handle.
-    unsafe { UnlockFileEx(file.as_raw_handle(), 0, len, 0, &raw mut overlapped) };
+/// SQLite's shared lock on a database, taken as SQLite takes it: through a brief shared pending lock,
+/// so a writer already waiting for its exclusive lock goes first. While it is held, no connection can
+/// take the exclusive lock it needs to write a rollback-journal database in place, or to check its log
+/// into the database and delete it on close; it leaves the log, and its WAL index, instead.
+fn read_lock(db: &File) -> Option<Held<'_>> {
+    let pending = hold(db, PENDING_BYTE, 1)?;
+    let shared = hold(db, SHARED_FIRST, SHARED_SIZE);
+    drop(pending);
+    shared
 }
 
-/// SQLite's own shared lock on the database, taken as SQLite takes it on Windows: through a brief
-/// pending lock, so a writer already waiting goes first. Locks change no bytes. While it is held,
-/// no connection can take the exclusive lock it needs to write a rollback-journal database in place,
-/// or to check its log into the database and delete it when it closes; it leaves the log instead.
-struct ReadLock<'a>(&'a File);
-
-impl<'a> ReadLock<'a> {
-    fn take(file: &'a File) -> Option<Self> {
-        if !lock(file, PENDING_BYTE, 1, LOCKFILE_EXCLUSIVE_LOCK) {
-            return None;
-        }
-        let shared = lock(file, SHARED_FIRST, SHARED_SIZE, 0);
-        unlock(file, PENDING_BYTE, 1);
-        shared.then_some(Self(file))
-    }
-}
-
-impl Drop for ReadLock<'_> {
-    fn drop(&mut self) {
-        unlock(self.0, SHARED_FIRST, SHARED_SIZE);
-    }
+/// The 128-bit identity of an open file.
+fn identity(file: &File) -> Option<(u64, [u8; 16])> {
+    let mut info = FileIdInfo { volume_serial: 0, id: [0; 16] };
+    let size = u32::try_from(size_of::<FileIdInfo>()).ok()?;
+    // SAFETY: The handle is open, and the output is a writable FILE_ID_INFO of the size given.
+    let found =
+        unsafe { GetFileInformationByHandleEx(file.as_raw_handle(), FILE_ID_INFO, (&raw mut info).cast(), size) };
+    (found != 0).then_some((info.volume_serial, info.id))
 }
 
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
@@ -437,81 +543,108 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// The file now at `path`, if any, opened without following a link.
-fn reopen(path: &Path) -> io::Result<Option<(u64, u64)>> {
+/// An open file at `path`, None if there is none, opened without following a link.
+fn open(path: &Path) -> Result<Option<File>, ()> {
     match fs_ops::open_read(path) {
-        Ok(file) => crate::sys::identity(&file).map(Some),
+        Ok(file) => Ok(Some(file)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+        Err(_) => Err(()),
     }
 }
 
-enum Attempt {
-    Copied(Vec<u8>),
+/// The identity of the file now at `path`, or None if there is none.
+fn now_at(path: &Path) -> Result<Option<(u64, [u8; 16])>, ()> {
+    match open(path)? {
+        Some(file) => identity(&file).map(Some).ok_or(()),
+        None => Ok(None),
+    }
+}
+
+/// What one copy found.
+pub(super) enum Attempt {
+    Copied {
+        db: Vec<u8>,
+        wal: Vec<u8>,
+        end: End,
+    },
     /// A writer was busy; a later attempt may find the files settled.
     Again,
     Unreadable,
 }
 
-/// One copy of the database and its log under SQLite's shared lock. The copy stands only if the
-/// files at both names are the ones read, the database kept its size, and the log kept the header
-/// it had before the database was read: SQLite rewrites that header before it reuses or empties
-/// the log, and a checkpoint during the copy only moves frames the log still holds.
-fn copy(path: &Path, limit: u64) -> Attempt {
-    let Ok(db) = fs_ops::open_read(path) else { return Attempt::Unreadable };
-    let Some(_lock) = ReadLock::take(&db) else { return Attempt::Again };
-    // A journal that starts with anything but zero belongs to a transaction only its writer can finish or undo.
-    match fs_ops::open_read(&sidecar(path, "-journal")) {
-        Ok(journal) if header(&journal).is_none_or(|start| start.first().is_some_and(|&b| b != 0)) => {
-            return Attempt::Again;
-        }
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Attempt::Unreadable,
-        _ => {}
+/// One copy of the database and its log, under SQLite's shared lock on the database and, when the
+/// database has a WAL index, its read-lock slot 0. Together they stop every write into the database
+/// file for the copy: a rollback writer needs the exclusive database lock and a checkpoint needs slot 0
+/// exclusively. The log can still grow, or be emptied or restarted once fully checkpointed, so the copy
+/// stands only if its header is unchanged, every file at its name is the one read, and no WAL index or
+/// log appeared. Only frames up to the end the writer published count.
+pub(super) fn copy(path: &Path, limit: u64, deadline: Instant) -> Attempt {
+    use Attempt::{Again, Unreadable};
+    let Ok(Some(db)) = open(path) else { return Unreadable };
+    if db.metadata().map_or(true, |m| m.len() > limit) {
+        return Unreadable;
     }
-    let log = sidecar(path, "-wal");
-    let (Ok(identity), Ok(size)) = (crate::sys::identity(&db), db.metadata().map(|m| m.len())) else {
-        return Attempt::Unreadable;
-    };
-    let wal = match fs_ops::open_read(&log) {
-        Ok(file) => Some(file),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(_) => return Attempt::Unreadable,
-    };
-    let before = match &wal {
-        Some(file) => match (header(file), crate::sys::identity(file)) {
-            (Some(header), Ok(identity)) => Some((header, identity)),
-            _ => return Attempt::Unreadable,
+    let Some(_db_lock) = read_lock(&db) else { return Again };
+    // A journal that starts with anything but zero belongs to a transaction only its writer can finish or undo.
+    match open(&sidecar(path, "-journal")) {
+        Ok(None) => {}
+        Ok(Some(journal)) if start(&journal, 1).is_some_and(|b| b.first().is_none_or(|&b| b == 0)) => {}
+        Ok(Some(_)) => return Again,
+        Err(()) => return Unreadable,
+    }
+    let (Ok(shm), Ok(wal)) = (open(&sidecar(path, "-shm")), open(&sidecar(path, "-wal"))) else { return Unreadable };
+    let _slot = match &shm {
+        Some(shm) => match hold(shm, READ_LOCK_0, 1) {
+            Some(held) => Some(held),
+            None => return Again,
         },
         None => None,
     };
-    let Some(bytes) = read_all(&db, limit) else { return Attempt::Unreadable };
-    let frames = match &wal {
-        Some(file) => match read_all(file, limit.saturating_sub(bytes.len() as u64)) {
-            Some(frames) => frames,
-            None => return Attempt::Unreadable,
+    let end = match &shm {
+        Some(shm) => match published(shm) {
+            Some(end) => end,
+            None => return Again,
+        },
+        None => End::Recovered,
+    };
+    let identities = |file: &Option<File>| match file {
+        Some(file) => identity(file).map(Some).ok_or(()),
+        None => Ok(None),
+    };
+    let (Some(db_id), Ok(shm_id), Ok(wal_id)) = (identity(&db), identities(&shm), identities(&wal)) else {
+        return Unreadable;
+    };
+    let Ok(size) = db.metadata().map(|m| m.len()) else { return Unreadable };
+    let before = match &wal {
+        Some(file) => match start(file, WAL_HEADER) {
+            Some(header) => header,
+            None => return Unreadable,
         },
         None => Vec::new(),
     };
-    let after = match &wal {
-        Some(file) => header(file).zip(crate::sys::identity(file).ok()),
-        None => None,
+    let Some(bytes) = read_all(&db, limit, deadline) else { return Unreadable };
+    let frames = match &wal {
+        Some(file) => match read_all(file, limit - bytes.len() as u64, deadline) {
+            Some(frames) => frames,
+            None => return Unreadable,
+        },
+        None => Vec::new(),
     };
-    let start = &frames[..WAL_HEADER.min(frames.len())];
-    let settled = before == after
-        && before.as_ref().is_none_or(|(header, _)| header[..] == *start)
-        && reopen(path).ok() == Some(Some(identity))
-        && reopen(&log).ok() == Some(before.as_ref().map(|&(_, identity)| identity))
-        && db.metadata().is_ok_and(|m| m.len() == size);
+    let after = wal.as_ref().map_or(Some(Vec::new()), |file| start(file, WAL_HEADER));
+    let settled = after.as_ref() == Some(&before)
+        && frames[..WAL_HEADER.min(frames.len())] == before[..]
+        && db.metadata().is_ok_and(|m| m.len() == size)
+        && now_at(path) == Ok(Some(db_id))
+        && now_at(&sidecar(path, "-shm")) == Ok(shm_id)
+        && now_at(&sidecar(path, "-wal")) == Ok(wal_id);
     if !settled {
-        return Attempt::Again;
+        return Again;
     }
-    match fold(bytes, &frames, limit) {
-        Some(image) => Attempt::Copied(image),
-        None => Attempt::Unreadable,
-    }
+    Attempt::Copied { db: bytes, wal: frames, end }
 }
 
 /// A coherent copy, or None once the deadline passes or a writer keeps every attempt from settling.
+/// The locks are released before the copy is folded.
 pub(super) fn snapshot(path: &Path, limit: u64, deadline: Instant) -> Option<Vec<u8>> {
     for attempt in 0..ATTEMPTS {
         if attempt > 0 {
@@ -520,8 +653,8 @@ pub(super) fn snapshot(path: &Path, limit: u64, deadline: Instant) -> Option<Vec
         if Instant::now() >= deadline {
             return None;
         }
-        match copy(path, limit) {
-            Attempt::Copied(image) => return Some(image),
+        match copy(path, limit, deadline) {
+            Attempt::Copied { db, wal, end } => return fold(db, &wal, end, limit),
             Attempt::Again => {}
             Attempt::Unreadable => return None,
         }

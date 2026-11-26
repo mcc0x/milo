@@ -266,13 +266,14 @@ pub(super) fn query(
     }
     // `-nofollow` also rejects links in ancestors, including /tmp on macOS.
     let path = crate::sys::canonicalize(path.parent()?).ok()?.join(path.file_name()?);
-    let deadline = Instant::now() + wait;
     #[cfg(windows)]
-    return windows::query(&path, sql, deadline, MAX_OUTPUT);
+    return windows::query(&path, sql, Instant::now() + wait, MAX_OUTPUT);
     #[cfg(unix)]
     if !readable(&path) {
         return None;
     }
+    #[cfg(unix)]
+    let deadline = Instant::now() + wait;
     #[cfg(unix)]
     let child = Command::new(executable)
         // The database operand always starts with "file:". Older SQLite CLIs reject "--".
