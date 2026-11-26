@@ -571,6 +571,9 @@ impl Editor {
         const DRAFT_OPEN: &str = "Save or discard your unsaved changes first, so an import does not replace them.";
         const STALE_DRAFT: &str = "The editor changed in another request. Reload it and try again.";
 
+        if cfg!(windows) {
+            return Refused("Moving settings between computers is not supported on Windows yet.".into());
+        }
         let Some(request) = Value::parse(body) else { return Refused(BAD_ACTION.into()) };
         let [action, groups, scope, bundle, here, basis, version] =
             request.fields(["action", "groups", "scope", "bundle", "here", "basis", "version"]);
@@ -2211,5 +2214,102 @@ mod tests {
         // Turning off never waits for a review.
         fs::write(&file, "presence = true\ndetails = both\n").unwrap();
         assert!(!presence(&action(&mut editor, r#""action":"presence","value":"off""#).unwrap()).0);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::layout::Side;
+    use super::*;
+    use crate::fixture::Fixture;
+
+    fn fixture_store(folder: &Fixture) -> Store {
+        Store {
+            init: folder.root.join("init.lua"),
+            config: folder.root.join("config"),
+            state: folder.root.join("state"),
+            claude: folder.root.join("claude.json"),
+            claude_state: None,
+        }
+    }
+
+    fn outside(store: Store, root: Option<&Path>) -> Editor {
+        Editor::new(Some(store), false, None, root.map(Path::to_path_buf), None, |_| {
+            panic!("outside Rex must never run an integration command")
+        })
+    }
+
+    impl Editor {
+        pub(crate) fn test_outside(folder: &Fixture) -> Self {
+            outside(fixture_store(folder), None)
+        }
+    }
+
+    fn action(editor: &mut Editor, fields: &str) -> Result<String, String> {
+        editor.action(format!("{{\"version\":{}, {fields}}}", editor.version).as_bytes())
+    }
+
+    #[test]
+    fn preferences_saved_in_the_browser_are_read_after_a_restart() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut first = outside(store.clone(), Some(&f.root));
+        action(&mut first, r#""action":"set","field":"appearance.icons","value":"off""#).unwrap();
+        action(&mut first, r#""action":"set","field":"workflow.project_mode","value":"pin""#).unwrap();
+        assert!(!store.config.exists(), "a draft writes nothing");
+        action(&mut first, r#""action":"save","group":"preferences","scope":"global""#).unwrap();
+        drop(first);
+
+        let second = outside(store.clone(), Some(&f.root));
+        assert!(!second.setup.prefs_dirty());
+        assert_eq!(second.setup.prefs.icons, IconMode::Off);
+        assert_eq!(second.setup.prefs.project_mode, ProjectMode::Pin);
+        let saved = std::fs::File::open(crate::preferences::layer_file(&store.config, None)).unwrap();
+        assert_eq!(crate::sys::file_security(&saved).unwrap(), crate::sys::private_security().unwrap());
+    }
+
+    #[test]
+    fn a_worktree_layout_saved_in_the_browser_is_read_after_a_restart() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut first = outside(store.clone(), Some(&f.root));
+        action(&mut first, r#""action":"set","field":"layout.side","value":"left""#).unwrap();
+        action(&mut first, r#""action":"set","field":"layout.width","value":0.41"#).unwrap();
+        let saved = action(&mut first, r#""action":"save","group":"layout","scope":"worktree""#).unwrap();
+        assert!(saved.contains("Rex integration unchanged."), "{saved}");
+        drop(first);
+
+        let second = outside(store.clone(), Some(&f.root));
+        assert!(!second.setup.dirty());
+        assert_eq!(second.setup.layout.geometry.side, Side::Left);
+        assert_eq!(second.setup.layout.width, "0.41");
+        assert!(!store.init.exists(), "a layout saved outside Rex leaves Rex's settings alone");
+    }
+
+    #[test]
+    fn settings_transfer_and_alerts_say_they_are_not_supported_on_windows() {
+        let f = Fixture::folder();
+        let mut editor = outside(fixture_store(&f), Some(&f.root));
+        let TransferReply::Refused(why) = editor.transfer(br#"{"action":"export"}"#) else {
+            panic!("a transfer was not refused")
+        };
+        assert_eq!(why, "Moving settings between computers is not supported on Windows yet.");
+        assert!(crate::alerts::Alerts::real().is_none());
+        assert!(editor.state().contains(r#""alerts":null"#));
+    }
+
+    #[test]
+    fn a_layout_save_refuses_while_another_save_holds_the_lock() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut editor = outside(store.clone(), Some(&f.root));
+        action(&mut editor, r#""action":"set","field":"layout.side","value":"left""#).unwrap();
+        let profiles = store.config.join("layouts");
+        std::fs::create_dir_all(&profiles).unwrap();
+        let busy = lock::setup(&profiles).unwrap();
+        let refused = action(&mut editor, r#""action":"save","group":"layout","scope":"worktree""#).unwrap_err();
+        assert!(refused.contains("Another setup is saving"), "{refused}");
+        drop(busy);
+        action(&mut editor, r#""action":"save","group":"layout","scope":"worktree""#).unwrap();
     }
 }
