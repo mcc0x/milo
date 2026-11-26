@@ -1,10 +1,10 @@
-//! Windows form of the read-only query. Windows has no sqlite3 program, and the SQLite that ships
-//! with it, System32\winsqlite3.dll, ignores `readonly_shm`: opened in place, it would write its
-//! shared-memory file and make missing sidecars. So the database is never opened in place. Under
-//! SQLite's own shared lock, its file and write-ahead log are read through handles that only read,
-//! the committed frames are applied to a private copy in memory, and that copy is queried. Nothing
-//! beside the database is opened for writing, made or changed. A copy that the files show was
-//! disturbed is taken again, and after a few tries the database is left unread.
+//! Windows form of the read-only query, for databases no connection is using through a write-ahead
+//! log. Windows has no sqlite3 program, and the SQLite that ships with it, System32\winsqlite3.dll,
+//! ignores `readonly_shm`: opened in place, it would write the WAL index and make missing sidecars.
+//! So the database is never opened in place. Under SQLite's own shared lock, its file is read through
+//! a handle that only reads, and a private copy in memory is queried. A database in use through a log
+//! is left unread: what its writer has published cannot be learned from outside without a mapping or
+//! a lock SQLite would notice. Nothing beside the database is opened for writing, made or changed.
 //!
 //! The answer is written as the sqlite3 shell's `-json` output, so the readers parse one format.
 
@@ -37,13 +37,11 @@ const DESERIALIZE_READONLY: c_uint = 4;
 const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
 /// Virtual machine steps between looks at the clock.
 const STEPS: c_int = 1000;
-/// The most a database and its log may hold together before it is left unread.
+/// The most a database may hold before it is left unread.
 pub(super) const MAX_SNAPSHOT: u64 = 64 << 20;
 /// A writer that is busy during every copy leaves the database unread.
 const ATTEMPTS: usize = 3;
 const RETRY: std::time::Duration = std::time::Duration::from_millis(10);
-const WAL_HEADER: usize = 32;
-const FRAME_HEADER: usize = 24;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -336,20 +334,6 @@ fn start(file: &File, len: usize) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn be32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-}
-
-/// SQLite's running checksum over 8-byte steps, in the byte order the log's magic number names.
-fn checksum(mut sum: (u32, u32), bytes: &[u8], big_endian: bool) -> (u32, u32) {
-    let word = |raw: [u8; 4]| if big_endian { u32::from_be_bytes(raw) } else { u32::from_le_bytes(raw) };
-    for &[a, b, c, d, e, f, g, h] in bytes.as_chunks::<8>().0 {
-        sum.0 = sum.0.wrapping_add(word([a, b, c, d])).wrapping_add(sum.1);
-        sum.1 = sum.1.wrapping_add(word([e, f, g, h])).wrapping_add(sum.0);
-    }
-    sum
-}
-
 /// The page size a database header names, if it is one SQLite accepts.
 fn page_size(db: &[u8]) -> Option<usize> {
     let size = match u16::from_be_bytes([db[16], db[17]]) {
@@ -365,69 +349,6 @@ fn header_valid(db: &[u8]) -> bool {
         && &db[..16] == b"SQLite format 3\0"
         && page_size(db).is_some()
         && matches!((db[18], db[19]), (1 | 2, 1 | 2))
-}
-
-/// The database as of the last commit in its log, with the log folded in and the header marked as
-/// having none, so SQLite reads the copy on its own. This is SQLite's own recovery: every frame that
-/// carries the log's salts and continues its checksum counts, up to the last that commits. A live
-/// writer publishes a commit only after writing it, so the copy can be ahead of a live reader by a
-/// commit whose publication is moments away; it never mixes two states. As SQLite does, a log is used
-/// only for a database whose read version is 2; one with an unknown version or a different page size
-/// leaves the database unread, and one with a foreign magic number or header checksum counts as
-/// empty. Nothing grows past `limit`, and work stops at the deadline.
-pub(super) fn fold(mut db: Vec<u8>, wal: &[u8], limit: u64, deadline: Instant) -> Option<Vec<u8>> {
-    if !header_valid(&db) {
-        return None;
-    }
-    let page = page_size(&db)?;
-    let magic = if wal.len() >= WAL_HEADER { be32(wal, 0) } else { 0 };
-    let big_endian = magic & 1 == 1;
-    let log = db[19] == 2
-        && magic & !1 == 0x377f_0682
-        && usize::try_from(be32(wal, 8)).is_ok_and(|size| size.is_power_of_two() && (512..=65536).contains(&size))
-        && checksum((0, 0), &wal[..24], big_endian) == (be32(wal, 24), be32(wal, 28));
-    if !log {
-        return Some(normalized(db));
-    }
-    if be32(wal, 4) != 3_007_000 || usize::try_from(be32(wal, 8)).ok()? != page {
-        return None;
-    }
-    let mut sum = (be32(wal, 24), be32(wal, 28));
-    let (mut frames, mut committed) = (Vec::new(), 0);
-    for frame in wal[WAL_HEADER..].chunks_exact(FRAME_HEADER + page) {
-        if frame[8..16] != wal[16..24] {
-            break;
-        }
-        if frames.len() % 64 == 0 && Instant::now() >= deadline {
-            return None;
-        }
-        sum = checksum(checksum(sum, &frame[..8], big_endian), &frame[FRAME_HEADER..], big_endian);
-        if sum != (be32(frame, 16), be32(frame, 20)) {
-            break;
-        }
-        frames.push(frame);
-        if be32(frame, 4) != 0 {
-            committed = frames.len();
-        }
-    }
-    if committed > 0 {
-        let size = u64::from(be32(frames[committed - 1], 4)).checked_mul(page as u64).filter(|&size| size <= limit)?;
-        db.resize(usize::try_from(size).ok()?, 0);
-        for frame in &frames[..committed] {
-            let at = usize::try_from(be32(frame, 0)).ok()?.checked_sub(1)?.checked_mul(page)?;
-            if let Some(target) = db.get_mut(at..at.checked_add(page)?) {
-                target.copy_from_slice(&frame[FRAME_HEADER..]);
-            }
-        }
-    }
-    (header_valid(&db) && page_size(&db) == Some(page)).then(|| normalized(db))
-}
-
-/// Marks a copy as having no log, so SQLite reads it on its own.
-fn normalized(mut db: Vec<u8>) -> Vec<u8> {
-    db[18] = 1;
-    db[19] = 1;
-    db
 }
 
 #[repr(C)]
@@ -446,12 +367,10 @@ struct FileIdInfo {
     id: [u8; 16],
 }
 
-/// SQLite's lock bytes on Windows: the database's, past the end of any database Milo reads, and the
-/// WAL index's read-lock slot 0, which a checkpoint must hold exclusively to write into the database.
+/// SQLite's lock bytes on a database on Windows, past the end of any database Milo reads.
 const PENDING_BYTE: u32 = 0x4000_0000;
 const SHARED_FIRST: u32 = PENDING_BYTE + 2;
 const SHARED_SIZE: u32 = 510;
-const READ_LOCK_0: u32 = 120 + 3;
 const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x1;
 const FILE_ID_INFO: c_int = 0x12;
 
@@ -482,7 +401,7 @@ fn hold(file: &File, offset: u32, len: u32) -> Option<Held<'_>> {
 /// SQLite's shared lock on a database, taken as SQLite takes it: through a brief shared pending lock,
 /// so a writer already waiting for its exclusive lock goes first. While it is held, no connection can
 /// take the exclusive lock it needs to write a rollback-journal database in place, or to check its log
-/// into the database and delete it on close; it leaves the log, and its WAL index, instead.
+/// into the database and delete the log and its index on close; it leaves them instead.
 fn read_lock(db: &File) -> Option<Held<'_>> {
     let pending = hold(db, PENDING_BYTE, 1)?;
     let shared = hold(db, SHARED_FIRST, SHARED_SIZE);
@@ -525,30 +444,36 @@ fn now_at(path: &Path) -> Result<Option<(u64, [u8; 16])>, ()> {
 
 /// What one copy found.
 pub(super) enum Attempt {
-    Copied {
-        db: Vec<u8>,
-        wal: Vec<u8>,
-    },
+    Copied(Vec<u8>),
     /// A writer was busy; a later attempt may find the files settled.
     Again,
+    /// The database is in use through a write-ahead log, or cannot be read.
     Unreadable,
 }
 
-/// One copy of the database and its log, under SQLite's shared lock on the database and, when the
-/// database has a WAL index, its read-lock slot 0. Together they stop every write into the database
-/// file for the copy: a rollback writer needs the exclusive database lock and a checkpoint needs slot 0
-/// exclusively. The log can still grow, or be emptied or restarted once fully checkpointed, so the copy
-/// stands only if its header is unchanged, every file at its name is the one read, and no WAL index or
-/// log appeared. The WAL index itself is never read: it is SQLite's shared memory, and neither its
-/// freshness nor whether a live process still owns it can be learned from outside without a mapping
-/// or a lock that SQLite would notice.
+/// One copy of a database no connection is using through a write-ahead log. Windows' SQLite cannot
+/// read such a database in place without writing to its WAL index, and what a live writer has
+/// published there cannot be learned from outside without a mapping or a lock SQLite would notice,
+/// so a database with a log or an index beside it is left unread. With neither, the database file
+/// holds every committed transaction. SQLite's shared lock, held for the copy, keeps rollback writers
+/// out of the file and keeps a connection that opens meanwhile from removing the log and index it
+/// makes; finding neither after the copy, and the same file at the same size, means none did. The
+/// sidecars are looked for before the lock too, so a database in use is never locked at all.
 pub(super) fn copy(path: &Path, limit: u64, deadline: Instant) -> Attempt {
     use Attempt::{Again, Unreadable};
     let Ok(Some(db)) = open(path) else { return Unreadable };
     if db.metadata().map_or(true, |m| m.len() > limit) {
         return Unreadable;
     }
-    let Some(_db_lock) = read_lock(&db) else { return Again };
+    let (log, index) = (sidecar(path, "-wal"), sidecar(path, "-shm"));
+    let quiet = || now_at(&log) == Ok(None) && now_at(&index) == Ok(None);
+    if !quiet() {
+        return Unreadable;
+    }
+    let Some(_lock) = read_lock(&db) else { return Again };
+    if !quiet() {
+        return Unreadable;
+    }
     // A journal that starts with anything but zero belongs to a transaction only its writer can finish or undo.
     match open(&sidecar(path, "-journal")) {
         Ok(None) => {}
@@ -556,52 +481,28 @@ pub(super) fn copy(path: &Path, limit: u64, deadline: Instant) -> Attempt {
         Ok(Some(_)) => return Again,
         Err(()) => return Unreadable,
     }
-    let (Ok(shm), Ok(wal)) = (open(&sidecar(path, "-shm")), open(&sidecar(path, "-wal"))) else { return Unreadable };
-    let _slot = match &shm {
-        Some(shm) => match hold(shm, READ_LOCK_0, 1) {
-            Some(held) => Some(held),
-            None => return Again,
-        },
-        None => None,
-    };
-    let identities = |file: &Option<File>| match file {
-        Some(file) => identity(file).map(Some).ok_or(()),
-        None => Ok(None),
-    };
-    let (Some(db_id), Ok(shm_id), Ok(wal_id)) = (identity(&db), identities(&shm), identities(&wal)) else {
-        return Unreadable;
-    };
-    let Ok(size) = db.metadata().map(|m| m.len()) else { return Unreadable };
-    let before = match &wal {
-        Some(file) => match start(file, WAL_HEADER) {
-            Some(header) => header,
-            None => return Unreadable,
-        },
-        None => Vec::new(),
-    };
+    let (Some(id), Ok(size)) = (identity(&db), db.metadata().map(|m| m.len())) else { return Unreadable };
     let Some(bytes) = read_all(&db, limit, deadline) else { return Unreadable };
-    let frames = match &wal {
-        Some(file) => match read_all(file, limit - bytes.len() as u64, deadline) {
-            Some(frames) => frames,
-            None => return Unreadable,
-        },
-        None => Vec::new(),
-    };
-    let after = wal.as_ref().map_or(Some(Vec::new()), |file| start(file, WAL_HEADER));
-    let settled = after.as_ref() == Some(&before)
-        && frames[..WAL_HEADER.min(frames.len())] == before[..]
-        && db.metadata().is_ok_and(|m| m.len() == size)
-        && now_at(path) == Ok(Some(db_id))
-        && now_at(&sidecar(path, "-shm")) == Ok(shm_id)
-        && now_at(&sidecar(path, "-wal")) == Ok(wal_id);
+    let settled = quiet() && now_at(path) == Ok(Some(id)) && db.metadata().is_ok_and(|m| m.len() == size);
     if !settled {
         return Again;
     }
-    Attempt::Copied { db: bytes, wal: frames }
+    Attempt::Copied(bytes)
 }
 
-/// A coherent copy, or None once the deadline passes or a writer keeps every attempt from settling.
-/// The locks are released before the copy is folded.
+/// A copy SQLite can open on its own: the header is checked and marked as having no log, which a
+/// database without one does not need.
+fn normalized(mut db: Vec<u8>) -> Option<Vec<u8>> {
+    if !header_valid(&db) {
+        return None;
+    }
+    db[18] = 1;
+    db[19] = 1;
+    Some(db)
+}
+
+/// A coherent copy, or None once the deadline passes, the database is in use through a log, or a
+/// writer keeps every attempt from settling.
 pub(super) fn snapshot(path: &Path, limit: u64, deadline: Instant) -> Option<Vec<u8>> {
     for attempt in 0..ATTEMPTS {
         if attempt > 0 {
@@ -611,7 +512,7 @@ pub(super) fn snapshot(path: &Path, limit: u64, deadline: Instant) -> Option<Vec
             return None;
         }
         match copy(path, limit, deadline) {
-            Attempt::Copied { db, wal } => return fold(db, &wal, limit, deadline),
+            Attempt::Copied(db) => return normalized(db),
             Attempt::Again => {}
             Attempt::Unreadable => return None,
         }
@@ -619,10 +520,9 @@ pub(super) fn snapshot(path: &Path, limit: u64, deadline: Instant) -> Option<Vec
     None
 }
 
-/// Whether a database and its log hold more than a query on Windows copies.
+/// Whether a database holds more than a query on Windows copies.
 pub(in crate::usage) fn too_large(path: &Path) -> bool {
-    let size = |path: &Path| std::fs::symlink_metadata(path).map_or(0, |metadata| metadata.len());
-    size(path).saturating_add(size(&sidecar(path, "-wal"))) > MAX_SNAPSHOT
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.len() > MAX_SNAPSHOT)
 }
 
 /// Bound memory, output and wall time; the database's own files are only ever read.

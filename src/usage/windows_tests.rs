@@ -235,7 +235,8 @@ fn what_needs_setup_the_status_line_or_a_network_stays_unsupported() {
     assert!(SystemTime::now() > UNIX_EPOCH);
 }
 
-/// OMP's and OpenCode's databases, made and kept open by Windows' own SQLite as those tools do.
+/// OMP's and OpenCode's databases, made by Windows' own SQLite as those tools make them, and read only
+/// once they are closed.
 mod databases {
     use super::super::opencode::{self, Activity, Cost, Report, Store, Tokens};
     use super::super::sqlite::Writer;
@@ -261,21 +262,28 @@ mod databases {
     }
 
     /// The pane is woken through the same descriptor its event loop waits on.
-    fn finish(usage: &mut Usage) {
+    fn settle(usage: &mut Usage) -> External {
         let fd = usage.external_fd().expect("no database read is running");
         let mut ready = [crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 }];
         assert_eq!(crate::sys::poll(&mut ready, 30_000), 1, "the database read did not wake the pane");
-        assert!(matches!(usage.check_external(), External::Redraw));
+        let external = usage.check_external();
         assert!(usage.external_fd().is_none());
+        external
     }
 
+    fn finish(usage: &mut Usage) {
+        assert!(matches!(settle(usage), External::Redraw));
+    }
+
+    /// While OMP has its database open, the limits read when it was last closed stay on screen.
     #[test]
-    fn omp_limits_reach_the_pane_while_omp_holds_its_log_open() {
+    fn omp_limits_reach_the_pane_while_omp_is_closed() {
         let f = Fixture::folder();
         let path = f.root.join("agent.db");
         let writer = Writer::open(&path);
         writer.exec(&format!("PRAGMA journal_mode=WAL;{OMP_SCHEMA}"));
         omp_report(&writer, "0.25");
+        drop(writer);
         let mut tools = UsageTools::default();
         tools[UsageTool::Codex] = Show::Always;
         tools[UsageTool::Claude] = Show::Always;
@@ -289,7 +297,13 @@ mod databases {
         finish(&mut usage);
         assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 75% left", "Claude no saved limits"]);
 
+        let writer = Writer::open(&path);
         omp_report(&writer, "0.65");
+        assert_eq!(usage.key(Key::Char('r')), After::Stay);
+        settle(&mut usage);
+        assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 75% left", "Claude no saved limits"]);
+
+        drop(writer);
         assert_eq!(usage.key(Key::Char('r')), After::Stay);
         finish(&mut usage);
         assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 35% left", "Claude no saved limits"]);
@@ -330,6 +344,8 @@ mod databases {
             cost: Some(Cost { usd: 0.00357, complete: true }),
             last: Some(now - MINUTE),
         };
+        assert_eq!(opencode::read(&path, now, WAIT), Report::Unreadable, "read while OpenCode had it open");
+        drop(writer);
         assert_eq!(opencode::read(&path, now, WAIT), Report::Today(expected));
     }
 }

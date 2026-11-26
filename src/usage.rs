@@ -998,9 +998,12 @@ impl Usage {
             .with_large_figures(prefs.usage_large_figures);
         let (omp, opencode) = (omp::database(home.as_deref()), opencode::database(home.as_deref()));
         #[cfg(windows)]
-        let large = [&omp, &opencode].into_iter().flatten().any(|path| sqlite::too_large(path));
+        let (present, large) = {
+            let found: Vec<_> = [&omp, &opencode].into_iter().flatten().filter(|path| path.is_file()).collect();
+            (!found.is_empty(), found.into_iter().any(|path| sqlite::too_large(path)))
+        };
         #[cfg(unix)]
-        let large = false;
+        let (present, large) = (false, false);
         let mut usage = usage.with_databases(omp, opencode, sqlite::QUERY_WAIT);
         if cfg!(windows) {
             usage.preference_note = if prefs.usage_accounts.any() {
@@ -1008,7 +1011,7 @@ impl Usage {
             } else if large {
                 Some("OMP and OpenCode databases over 64 MiB are not read on Windows yet.")
             } else {
-                note
+                note.or(present.then_some("On Windows, OMP and OpenCode usage is read only while they are closed."))
             };
             return usage;
         }
