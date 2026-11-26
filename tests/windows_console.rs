@@ -540,10 +540,12 @@ fn pictures_and_video_say_what_windows_cannot_show_yet() {
     fs::write(project.join("dusk.jpg"), include_bytes!("rex_lab/river-dusk.jpg")).unwrap();
     fs::write(project.join("river.mp4"), include_bytes!("rex_lab/river-motion.mp4")).unwrap();
     for (file, note) in [
-        ("mark.png", "Pictures need Kitty graphics here; a cell preview is not supported on Windows yet."),
-        ("dusk.jpg", "Decoding this image is not supported on Windows yet"),
-        ("river.mp4", "Video playback is not supported on Windows yet."),
+        ("mark.png", "cell preview is not supported on Windows yet."),
+        ("dusk.jpg", "only PNGs up to 1600 pixels a side are shown."),
+        ("river.mp4", "playback is not supported on Windows yet."),
     ] {
+        // The console redraws only the cells that changed since "Preparing preview…", so only the
+        // end of each note is sure to arrive in one piece.
         let (mut console, at) = open_pane(&scratch, &format!("view {file}"));
         console.see(note, at);
         let mark = console.text().len();
@@ -578,7 +580,7 @@ fn a_review_note_is_handed_to_the_terminal_clipboard() {
     let patch = "--- a/app.txt\n+++ b/app.txt\n@@ -1,2 +1,2 @@\n line 1\n-line 2\n+line two\n";
     fs::write(project.join("change.diff"), patch).unwrap();
     let (mut console, at) = open_pane(&scratch, "review change.diff");
-    console.see("line two", at);
+    console.see("i note", at);
     console.keys(b"i");
     console.keys(ENTER);
     let mark = console.text().len();
