@@ -112,10 +112,12 @@ impl Ssh<'_> {
     }
 
     /// A session over the held connection. Never a second login: with no
-    /// connection to share, ssh may not ask anything.
+    /// connection to share, ssh has no way to reach the host, and nothing is
+    /// forwarded whatever the person's configuration asks.
     fn session(&self, terminal: bool, batch: bool, remote: &[&str]) -> Command {
         let mut command = self.base();
-        command.args(["-o", "ControlMaster=no"]);
+        command.args(["-o", "ControlMaster=no", "-o", "ProxyCommand=false"]);
+        command.args(["-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes"]);
         if batch {
             command.args(["-o", "BatchMode=yes", "-q"]);
         }
@@ -225,7 +227,10 @@ pub fn connect(request: &Request<'_>) -> Result<i32, String> {
         Control::create(&token).map_err(|e| format!("cannot make a private folder for the connection: {e}"))?;
     // The person's keys go to the shell and ssh; Milo only notes them and ends cleanly.
     let _ = term::termination();
-    let ssh = Ssh { host: request.host, config: request.config.map(Path::new), control: &control.socket };
+    // The panes run from their own folders, so they get the file the shell named.
+    let config =
+        request.config.map(std::path::absolute).transpose().map_err(|e| format!("cannot find the -F file: {e}"))?;
+    let ssh = Ssh { host: request.host, config: config.as_deref(), control: &control.socket };
     let mut master = fs_ops::spawn(&mut ssh.master()).map_err(|e| format!("cannot start ssh: {e}"))?;
     if let Some(status) = ssh.ready(&mut master) {
         return Ok(code(status));
@@ -238,7 +243,7 @@ pub fn connect(request: &Request<'_>) -> Result<i32, String> {
         token: token.clone(),
         host: request.host.to_owned(),
         control: control.socket.clone(),
-        config: request.config.map(PathBuf::from),
+        config: config.clone(),
         helper: helper_path.clone(),
     };
     if link.write(&state, &block).is_err() {
@@ -370,6 +375,12 @@ mod tests {
                 "/tmp/milo-ssh-x/c",
                 "-o",
                 "ControlMaster=no",
+                "-o",
+                "ProxyCommand=false",
+                "-o",
+                "ForwardAgent=no",
+                "-o",
+                "ClearAllForwardings=yes",
                 "-o",
                 "BatchMode=yes",
                 "-q",
