@@ -80,14 +80,14 @@ try {
     $result = Invoke-Installer (Join-Path $Upgrade 'install-windows.ps1')
     Check ($result.Code -eq 0) "an upgrade succeeds while the old version runs: $($result.Output.Trim())"
     Check ((Digest $binary) -eq $upgradeDigest) 'the new version is in place'
-    Check ((Old-Copies).Count -eq 1) 'the running old version stepped aside'
+    Check (@(Old-Copies).Count -eq 1) 'the running old version stepped aside'
     Check ((([IO.File]::ReadAllText($receipt)) -split "`n")[0] -eq $upgradeDigest) 'the receipt follows the upgrade'
 
     Stop-Process -Id $running.Id -Force
     $running.WaitForExit()
     $running = $null
     $result = Invoke-Installer (Join-Path $Upgrade 'install-windows.ps1')
-    Check ($result.Code -eq 0 -and (Old-Copies).Count -eq 0) 'the old version is cleared once it has stopped'
+    Check ($result.Code -eq 0 -and @(Old-Copies).Count -eq 0) 'the old version is cleared once it has stopped'
 
     $installed = [IO.File]::ReadAllBytes($binary)
     [IO.File]::AppendAllText($binary, 'x')
