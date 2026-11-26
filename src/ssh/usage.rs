@@ -158,11 +158,13 @@ impl Pane for Scoped {
         Some(command)
     }
 
+    /// The host's usage stays only while its `milo ssh` holds the connection.
+    fn still_lent(&mut self) -> bool {
+        self.state.as_deref().is_some_and(|state| self.link.as_ref().is_some_and(|link| link.current(state, &self.anchor)))
+    }
+
     fn returned(&mut self, finished: bool) -> After {
-        let held = self
-            .state
-            .as_deref()
-            .is_some_and(|state| self.link.as_ref().is_some_and(|link| link.current(state, &self.anchor)));
+        let held = self.still_lent();
         self.shown = if finished || !held { Shown::Here } else { Shown::Ended };
         self.look();
         After::Stay

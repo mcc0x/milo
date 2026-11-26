@@ -47,6 +47,7 @@ pub fn project(
         source,
         last_dir: None,
         retry: None,
+        held: None,
         focus: None,
         tab,
         host: None,
@@ -75,6 +76,7 @@ pub fn remote(
         source,
         last_dir: None,
         retry: None,
+        held: None,
         focus: None,
         tab: None,
         host: Some(host),
@@ -168,6 +170,8 @@ struct Project<F> {
     source: Option<Source>,
     last_dir: Option<PathBuf>,
     retry: Option<(PathBuf, Instant)>,
+    /// A folder the shell reported while the terminal was lent.
+    held: Option<ShellChange>,
     note: Option<&'static str>,
     notice_only: bool,
     preference_note: Option<&'static str>,
@@ -393,6 +397,10 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
         };
         let news = self.source.as_mut().map(Source::read);
         let (change, foreground) = news.map_or((ShellChange::Unchanged, None), |news| (news.change, news.foreground));
+        let change = match (change, self.held.take()) {
+            (ShellChange::Unchanged, Some(held)) => held,
+            (change, _) => change,
+        };
         let moved = foreground.map_or(External::Unchanged, |foreground| self.look_remote(foreground));
         let update = match change {
             ShellChange::Directory(dir) => self.observe(dir),
@@ -412,6 +420,25 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
             (_, External::Redraw, _) | (_, _, External::Redraw) => External::Redraw,
             _ => External::Unchanged,
         }
+    }
+
+    /// Keeps the terminal on the host only while the `milo ssh` that took
+    /// the shell there is still in front of it.
+    fn still_lent(&mut self) -> bool {
+        let Some(news) = self.source.as_mut().map(Source::read) else { return true };
+        if !matches!(news.change, ShellChange::Unchanged) {
+            self.held = Some(news.change);
+        }
+        let Some(tab) = &mut self.tab else { return true };
+        if let Some(foreground) = news.foreground {
+            tab.foreground = foreground;
+        }
+        let Remote::Away(link) = &tab.remote else { return true };
+        if Link::find(&tab.state, &tab.anchor, &tab.foreground).is_some_and(|found| found.token == link.token) {
+            return true;
+        }
+        tab.remote = Remote::Local;
+        false
     }
 
     fn lend(&mut self) -> Option<Command> {
@@ -499,6 +526,7 @@ mod tests {
             source: None,
             last_dir: None,
             retry: None,
+            held: None,
             note: None,
             notice_only: false,
             preference_note: None,
@@ -549,6 +577,7 @@ mod tests {
             source: None,
             last_dir: None,
             retry: None,
+            held: None,
             note: None,
             notice_only: false,
             preference_note: None,
@@ -608,6 +637,7 @@ mod tests {
             source: None,
             last_dir: None,
             retry: None,
+            held: None,
             note: Some(NO_CWD),
             notice_only: false,
             preference_note: None,
@@ -664,6 +694,7 @@ mod tests {
             source: None,
             last_dir: None,
             retry: None,
+            held: None,
             note: None,
             notice_only: false,
             preference_note: None,
@@ -708,6 +739,7 @@ mod tests {
             source: None,
             last_dir: None,
             retry: None,
+            held: None,
             note: None,
             notice_only: false,
             preference_note: None,

@@ -37,6 +37,8 @@ const LEAVE: &[u8] =
     b"\x18\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?1003l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
 /// How long after asking a terminal may take to answer and still be waited for on the way out.
 const ANSWER_WAIT: Duration = Duration::from_millis(250);
+/// How often a program the terminal is lent to is asked after.
+const LEND_LOOK: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Host {
@@ -253,13 +255,26 @@ impl Session {
         Ok(session)
     }
 
-    /// Gives the terminal to `command` until it ends, then takes it back as
-    /// `open` first did. Returns whether the program finished on its own.
-    pub fn lend(&mut self, command: &mut std::process::Command) -> io::Result<bool> {
+    /// Gives the terminal to `command` until it ends or `keep` says it may no
+    /// longer have it, then takes it back as `open` first did. Returns whether
+    /// the program finished on its own.
+    pub fn lend(&mut self, command: &mut std::process::Command, mut keep: impl FnMut() -> bool) -> io::Result<bool> {
         self.restore();
-        let status = crate::fs_ops::spawn(command).and_then(|mut child| child.wait());
+        let finished = crate::fs_ops::spawn(command).is_ok_and(|mut child| {
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status.success(),
+                    Ok(None) if keep() => std::thread::sleep(LEND_LOOK),
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break false;
+                    }
+                }
+            }
+        });
         self.engage()?;
-        Ok(status.is_ok_and(|status| status.success()))
+        Ok(finished)
     }
 
     /// Puts the keyboard in raw mode and the screen in Milo's modes, and asks
@@ -968,9 +983,14 @@ mod tests {
         let seen = std::env::temp_dir().join(format!("milo-lent-{}", std::process::id()));
         let mut lent = std::process::Command::new("/bin/sh");
         lent.args(["-c", "stty -g > \"$0\"", seen.to_str().unwrap()]).stdin(keyboard.try_clone().unwrap());
-        assert!(terminal.lend(&mut lent).unwrap());
+        assert!(terminal.lend(&mut lent, || true).unwrap());
         assert_eq!(modes(&terminal.keyboard), raw);
-        assert!(!terminal.lend(&mut std::process::Command::new("false")).unwrap());
+        assert!(!terminal.lend(&mut std::process::Command::new("false"), || true).unwrap());
+        let started = Instant::now();
+        let mut sleeper = std::process::Command::new("/bin/sleep");
+        sleeper.arg("30");
+        assert!(!terminal.lend(&mut sleeper, || false).unwrap(), "taken back from a program that may not keep it");
+        assert!(started.elapsed() < Duration::from_secs(5));
         drop(terminal);
         assert_eq!(modes(&keyboard), before);
         let shown = std::fs::read_to_string(&seen).unwrap();

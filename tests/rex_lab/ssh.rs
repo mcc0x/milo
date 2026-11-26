@@ -286,6 +286,22 @@ fn panes_follow_a_shell_over_ssh_and_come_back() {
     assert_eq!(fs::read_to_string(local.join("notes.txt")).unwrap(), "saved notes\n");
     evidence(&lab, &session, &outline, "outline-back-after-logout");
 
+    // So does milo ssh no longer being in front, even while its session lingers.
+    work.run(&login);
+    work.shows(&shell, "following this shell on fixture");
+    work.run(&format!("cd '{}'", remote_b.display()));
+    work.shows(&outline, "fixture · showing B");
+    work.shows(&history, "fixture · showing B");
+    let killed = Command::new("pkill").args(["-KILL", "-f", &format!("{milo} ssh -F")]).status().unwrap();
+    assert!(killed.success());
+    work.shows(&outline, "alpha-changed.txt");
+    work.lacks(&outline, "fixture");
+    work.shows(&history, "Commit in alpha");
+    work.shows(&reader, "DRAFT-KEPT");
+    host.cut();
+    work.run("echo local-again");
+    work.shows(&shell, "local-again");
+
     // A lost connection does too.
     work.run(&login);
     work.shows(&shell, "following this shell on fixture");
