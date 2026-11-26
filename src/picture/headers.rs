@@ -30,9 +30,14 @@ fn bmp_size(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
+fn gif_size(bytes: &[u8], control: &DecodeControl<'_>) -> Result<(u32, u32), Refusal> {
+    gif_layout(bytes, control).map(|(size, _)| size)
+}
+
+/// The logical screen and the one image's left, top, width and height on it.
 /// A single image descriptor must fit inside the logical screen. Verify
 /// the complete block sequence, not just the first frame or canvas header.
-fn gif_size(bytes: &[u8], control: &DecodeControl<'_>) -> Result<(u32, u32), Refusal> {
+pub(super) fn gif_layout(bytes: &[u8], control: &DecodeControl<'_>) -> Result<((u32, u32), [u32; 4]), Refusal> {
     use Refusal::{TooLarge, Unreadable, UnsupportedFormat};
     let size = le16_pair(bytes.get(6..10).ok_or(Unreadable)?).ok_or(Unreadable)?;
     if size.0 == 0 || size.1 == 0 {
@@ -45,12 +50,12 @@ fn gif_size(bytes: &[u8], control: &DecodeControl<'_>) -> Result<(u32, u32), Ref
     let table_len = |flags: u8| if flags & 0x80 == 0 { 0 } else { 3 << (1 + (flags & 7)) };
     let global = table_len(*flags);
     let mut rest = rest.get(global..).ok_or(Unreadable)?;
-    let mut has_image = false;
+    let mut image = None;
     loop {
         control.check()?;
         match rest {
-            [b';'] if has_image => return Ok(size),
-            [b',', ..] if has_image => return Err(UnsupportedFormat),
+            [b';'] => return image.map(|image| (size, image)).ok_or(Unreadable),
+            [b',', ..] if image.is_some() => return Err(UnsupportedFormat),
             [b',', rectangle @ ..] => {
                 let (x, y) = le16_pair(rectangle).ok_or(Unreadable)?;
                 let (width, height) = le16_pair(rectangle.get(4..).ok_or(Unreadable)?).ok_or(Unreadable)?;
@@ -67,7 +72,7 @@ fn gif_size(bytes: &[u8], control: &DecodeControl<'_>) -> Result<(u32, u32), Ref
                     return Err(Unreadable);
                 }
                 rest = gif_sub_blocks(blocks, control)?;
-                has_image = true;
+                image = Some([x, y, width, height]);
             }
             [b'!', 0xf9, 4, _, _, _, _, 0, tail @ ..] => rest = tail, // graphic control
             [b'!', 0xfe, blocks @ ..] => rest = gif_sub_blocks(blocks, control)?, // comment
