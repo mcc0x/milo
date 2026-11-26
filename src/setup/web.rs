@@ -372,8 +372,12 @@ impl Editor {
             None => out.push_str("null"),
         }
         if cfg!(windows) {
-            write!(out, ",\"unsupported\":{{\"alerts\":{0},\"presence\":{0},\"automation\":{0}}}", Quoted(NOT_ON_WINDOWS))
-                .expect("writing to a string");
+            write!(
+                out,
+                ",\"unsupported\":{{\"alerts\":{0},\"presence\":{0},\"automation\":{0}}}",
+                Quoted(NOT_ON_WINDOWS)
+            )
+            .expect("writing to a string");
         }
         // Whether an import is kept that the page can offer to take back.
         let undo = setup.store.as_ref().is_some_and(|store| transfer::undo_available(&store.state));
@@ -580,9 +584,6 @@ impl Editor {
         const DRAFT_OPEN: &str = "Save or discard your unsaved changes first, so an import does not replace them.";
         const STALE_DRAFT: &str = "The editor changed in another request. Reload it and try again.";
 
-        if cfg!(windows) {
-            return Refused("Moving settings between computers is not supported on Windows yet.".into());
-        }
         let Some(request) = Value::parse(body) else { return Refused(BAD_ACTION.into()) };
         let [action, groups, scope, bundle, here, basis, version] =
             request.fields(["action", "groups", "scope", "bundle", "here", "basis", "version"]);
@@ -2231,6 +2232,7 @@ mod windows_tests {
     use super::layout::Side;
     use super::*;
     use crate::fixture::Fixture;
+    use std::fs;
 
     fn fixture_store(folder: &Fixture) -> Store {
         Store {
@@ -2296,13 +2298,39 @@ mod windows_tests {
     }
 
     #[test]
-    fn settings_transfer_and_alerts_say_they_are_not_supported_on_windows() {
-        let f = Fixture::folder();
-        let mut editor = outside(fixture_store(&f), Some(&f.root));
-        let TransferReply::Refused(why) = editor.transfer(br#"{"action":"export"}"#) else {
-            panic!("a transfer was not refused")
+    fn settings_move_between_hosts_and_the_import_can_be_taken_back() {
+        let (first, second) = (Fixture::folder(), Fixture::folder());
+        let (from, to) = (fixture_store(&first), fixture_store(&second));
+        for (store, icons) in [(&from, "plain"), (&to, "off")] {
+            fs::create_dir(&store.config).unwrap();
+            fs::write(crate::preferences::layer_file(&store.config, None), format!("icons = {icons}\n")).unwrap();
+        }
+        let mut editor = outside(from, None);
+        let TransferReply::Data(json) =
+            editor.transfer(br#"{"action":"export","groups":["appearance"],"scope":"global"}"#)
+        else {
+            panic!("the export was refused")
         };
-        assert_eq!(why, "Moving settings between computers is not supported on Windows yet.");
+        let bundle = Value::parse(json.as_bytes()).unwrap().fields(["bundle"])[0].unwrap().string(4096).unwrap();
+        assert!(bundle.contains("icons = plain"), "{bundle}");
+
+        let global = crate::preferences::layer_file(&to.config, None);
+        let mut editor = outside(to, None);
+        let bundle = Quoted(&bundle);
+        let TransferReply::Data(json) =
+            editor.transfer(format!(r#"{{"action":"preview","bundle":{bundle}}}"#).as_bytes())
+        else {
+            panic!("the preview was refused")
+        };
+        let basis = Value::parse(json.as_bytes()).unwrap().fields(["basis"])[0].unwrap().string(16).unwrap();
+        assert_eq!(fs::read_to_string(&global).unwrap(), "icons = off\n", "a preview changed a file");
+        let apply = format!(r#"{{"action":"apply","bundle":{bundle},"basis":"{basis}","version":{}}}"#, editor.version);
+        assert!(matches!(editor.transfer(apply.as_bytes()), TransferReply::Changed(_)));
+        assert_eq!(fs::read_to_string(&global).unwrap(), "icons = plain\n");
+
+        let undo = format!(r#"{{"action":"undo","version":{}}}"#, editor.version);
+        assert!(matches!(editor.transfer(undo.as_bytes()), TransferReply::Changed(_)));
+        assert_eq!(fs::read_to_string(&global).unwrap(), "icons = off\n");
         assert!(crate::alerts::Alerts::real().is_none());
         assert!(editor.state().contains(r#""alerts":null"#));
     }

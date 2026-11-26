@@ -842,10 +842,8 @@ fn read_bundle(file: &OsStr) -> Result<String, String> {
 
 /// Runs `milo settings` against this host's own settings folders.
 pub(crate) fn command(request: Request<'_>) -> Result<String, String> {
-    if cfg!(windows) {
-        return Err("milo settings is not supported on Windows yet.".into());
-    }
-    let store = Store::real().ok_or("Could not locate your settings folders. Check HOME and XDG_CONFIG_HOME.")?;
+    let check = if cfg!(windows) { "APPDATA and LOCALAPPDATA" } else { "HOME and XDG_CONFIG_HOME" };
+    let store = Store::real().ok_or_else(|| format!("Could not locate your settings folders. Check {check}."))?;
     let home = paths::home();
     let cwd = Path::new(".");
     let root;
@@ -910,5 +908,5 @@ pub(crate) fn command(request: Request<'_>) -> Result<String, String> {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests;

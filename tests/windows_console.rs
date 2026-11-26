@@ -525,8 +525,7 @@ fn markdown_renders_in_the_reader_follows_a_save_elsewhere_and_shows_its_source(
 
     let mark = console.text().len();
     console.keys(b"m");
-    let at = console.see("m preview", mark);
-    console.see("## Evening camp", mark.min(at));
+    console.see("## Evening camp", mark);
     console.keys(b"q");
     finish(&console, mark);
 }

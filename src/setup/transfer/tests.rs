@@ -1,6 +1,7 @@
 //! Checks bundles, project matching, conflicts and undo with throwaway settings folders.
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -319,6 +320,7 @@ fn an_older_undo_record_still_requires_a_complete_last_line() {
         super::hex(previous.as_bytes())
     );
     let file = host.config().join("preferences.conf");
+    #[cfg(unix)]
     fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
     fs::create_dir_all(host.state()).unwrap();
     let path = host.state().join(JOURNAL);
