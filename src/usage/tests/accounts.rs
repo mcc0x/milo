@@ -960,7 +960,7 @@ fn schedule_look(accounts: &mut Accounts, now: i64, clock: Instant, manual: bool
 #[test]
 #[ignore = "a benchmark; run it alone on a release build"]
 fn usage_profile_account_schedule() {
-    if !Path::new(super::super::http::executable()).is_file() {
+    if !super::super::http::executable().is_file() {
         eprintln!("skipping account fixture: curl is not installed");
         return;
     }
