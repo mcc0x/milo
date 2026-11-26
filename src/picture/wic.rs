@@ -297,7 +297,7 @@ fn pixels(bytes: &mut [u8], format: &str, size: (u32, u32)) -> Result<((u32, u32
     if shown == (columns, rows) {
         return Ok(((columns, rows), image));
     }
-    // Uncovered canvas is transparent, as a GIF's background is when shown.
+    // Uncovered canvas is transparent, as browsers draw it; they ignore the GIF background colour.
     let mut canvas = vec![0; 4 * columns as usize * rows as usize];
     for (row, line) in image.chunks_exact(4 * shown.0 as usize).enumerate() {
         let at = 4 * ((y as usize + row) * columns as usize + x as usize);
