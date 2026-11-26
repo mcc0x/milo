@@ -95,4 +95,7 @@ jobs:
           node "$smoke\node_modules\playwright-core\cli.js" install --only-shell chromium
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:NODE_PATH = "$smoke\node_modules"
+          $env:MILO_SAVED_PREFERENCES = "$env:RUNNER_TEMP\milo-saved-preferences.conf"
           node tests/web-smoke-windows.cjs target\release\milo.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.91.0 test --release --locked --test windows_console usage_follows_preferences_saved_in_the_browser -- --ignored --exact

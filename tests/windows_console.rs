@@ -537,3 +537,43 @@ fn usage_reads_local_codex_sessions_and_quits() {
     console.keys(b"q");
     finish(&console, mark);
 }
+
+/// Run by the native workflow after tests/web-smoke-windows.cjs, with MILO_SAVED_PREFERENCES naming
+/// the preferences file the browser saved. Claude Code's tokens are only shown when it is chosen to
+/// always show, so they appear with that file and not without it.
+#[test]
+#[ignore = "needs the preferences saved by tests/web-smoke-windows.cjs"]
+fn usage_follows_preferences_saved_in_the_browser() {
+    let saved = PathBuf::from(std::env::var_os("MILO_SAVED_PREFERENCES").expect("MILO_SAVED_PREFERENCES is not set"));
+    let scratch = Scratch::new("usage-preferences");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let transcripts = scratch.0.join("profile").join(".claude").join("projects").join("project");
+    fs::create_dir_all(&transcripts).unwrap();
+    fs::write(
+        transcripts.join("session.jsonl"),
+        format!(
+            "{{\"timestamp\":\"{}\",\"type\":\"assistant\",\"message\":{{\"usage\":{{\"input_tokens\":21000,\"output_tokens\":25000,\"cache_creation_input_tokens\":2000,\"cache_read_input_tokens\":0}},\"model\":\"Claude Test\"}}}}\n",
+            utc(now)
+        ),
+    )
+    .unwrap();
+
+    let (mut console, at) = open_pane(&scratch, "usage");
+    console.see("q quit", at);
+    // Long enough for the transcript walk the saved choice makes visible below.
+    std::thread::sleep(Duration::from_secs(3));
+    let mark = console.text().len();
+    console.keys(b"q");
+    finish(&console, mark);
+    assert!(!console.text().contains("tokens today"), "Claude Code was shown without the saved choice");
+
+    let folder = scratch.0.join("profile").join("Roaming").join("milo");
+    fs::create_dir_all(&folder).unwrap();
+    fs::copy(&saved, folder.join("preferences.conf")).unwrap();
+    let (mut console, at) = open_pane(&scratch, "usage");
+    let at = console.see("tokens today", at);
+    console.see("q quit", at);
+    let mark = console.text().len();
+    console.keys(b"q");
+    finish(&console, mark);
+}

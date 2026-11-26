@@ -1,11 +1,13 @@
 // The packaged settings editor on native Windows, driven in Chromium: open it from the private
-// link, save layout numbers for a worktree, start milo web again and find them saved.
+// link, save layout numbers for a worktree and Usage choices globally, start milo web again and
+// find them saved. With MILO_SAVED_PREFERENCES set, the saved preferences file is copied there for
+// tests/windows_console.rs to open the Usage pane with.
 // Run with Node 20+, playwright-core, and either its installed Chromium or CHROME_BIN.
 // Usage: node tests/web-smoke-windows.cjs path\to\milo.exe
 const assert = require('node:assert/strict');
 const {execFileSync, spawn} = require('node:child_process');
 const {once} = require('node:events');
-const {mkdir, mkdtemp, readdir, rm} = require('node:fs/promises');
+const {copyFile, mkdir, mkdtemp, readFile, readdir, rm} = require('node:fs/promises');
 const {tmpdir} = require('node:os');
 const {basename, join, resolve} = require('node:path');
 const {createInterface} = require('node:readline');
@@ -17,6 +19,8 @@ const button = (page, name) => page.getByRole('button', {name, exact: true});
 const dialog = (page, name) => page.getByRole('dialog', {name, exact: true});
 const number = (page, name) => page.getByRole('spinbutton', {name, exact: true});
 const status = (page, text) => page.getByRole('status').filter({hasText: text});
+const usageChoice = (page, name) => page.getByRole('combobox', {name, exact: true});
+const usageChoices = [['Codex', 'auto'], ['Claude Code', 'always'], ['OpenCode', 'hide']];
 const section = (page, name) => page.getByRole('navigation').getByRole('button', {name: new RegExp(`^${name}`)});
 
 async function withMilo(binary, cwd, env, run) {
@@ -57,6 +61,25 @@ async function saveNumbers(page, cwd) {
   }
 }
 
+// The same controls and file as on Unix; what the pane then shows is checked in tests/windows_console.rs.
+async function chooseUsageTools(page, home) {
+  await section(page, 'Usage').click();
+  for (const [tool] of usageChoices) {
+    assert.equal(await usageChoice(page, tool).inputValue(), 'auto', `${tool} starts on Auto`);
+  }
+  await usageChoice(page, 'OpenCode').selectOption('hide');
+  await usageChoice(page, 'Claude Code').selectOption('always');
+  const preferences = join(home, 'roaming', 'milo', 'preferences.conf');
+  await assert.rejects(readFile(preferences), {code: 'ENOENT'}, 'a draft writes no preferences');
+  await button(page, 'Save').click();
+  await button(dialog(page, 'Save changes'), 'Save as global default').click();
+  await status(page, 'Saved global pane preferences. Reopen panes to apply.').waitFor();
+  assert.equal(await readFile(preferences, 'utf8'), 'usage_claude = always\nusage_opencode = hide\n');
+  if (process.env.MILO_SAVED_PREFERENCES) await copyFile(preferences, process.env.MILO_SAVED_PREFERENCES);
+  await section(page, 'Layout').click();
+  console.log('Usage tools: saved globally from the browser');
+}
+
 async function unsupportedIntegrations(page) {
   await section(page, 'Integrations').click();
   for (const name of ['Alert forwarding', 'Discord presence']) {
@@ -88,6 +111,7 @@ async function main() {
     await withMilo(binary, cwd, env, async url => {
       const page = await openEditor(context, url);
       await saveNumbers(page, cwd);
+      await chooseUsageTools(page, home);
       await unsupportedIntegrations(page);
       await page.close();
     });
@@ -97,6 +121,11 @@ async function main() {
         assert.equal(await number(page, name).inputValue(), value, `${name} persisted across a server restart`);
       }
       console.log('Layout: read back after a server restart');
+      await section(page, 'Usage').click();
+      for (const [tool, value] of usageChoices) {
+        assert.equal(await usageChoice(page, tool).inputValue(), value, `${tool} persisted as ${value}`);
+      }
+      console.log('Usage tools: read back after a server restart');
       await page.close();
     });
     const left = (await readdir(join(home, 'local', 'milo')).catch(() => [])).filter(name => name.startsWith('milo-web-'));
