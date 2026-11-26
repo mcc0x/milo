@@ -121,8 +121,16 @@ fn status_command(text: &str) -> Option<json::Value<'_>> {
 
 /// Recognize a shell-quoted absolute launcher, not arbitrary shell code.
 pub(super) fn is_launcher(command: &str) -> bool {
+    fn absolute(rest: &str) -> Option<&str> {
+        if !cfg!(windows) {
+            return rest.strip_prefix('/');
+        }
+        let drive = rest.chars().next().filter(char::is_ascii_alphabetic)?;
+        rest[drive.len_utf8()..].strip_prefix(":/")
+    }
     command
-        .strip_prefix("'/")
+        .strip_prefix('\'')
+        .and_then(absolute)
         .and_then(|path| path.strip_suffix("' claude-status"))
         .is_some_and(|path| !path.is_empty() && path.split("'\\''").all(|part| !part.contains('\'')))
 }

@@ -20,8 +20,8 @@ pub(crate) use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 mod windows;
 #[cfg(windows)]
 pub(crate) use windows::{
-    AsFd, AsRawFd, BorrowedFd, Existing, Job, POLLIN, POLLOUT, RawFd, final_path, inside, local_app_data, plain_path,
-    pollfd, private_dir, private_file, random,
+    AsFd, AsRawFd, Available, BorrowedFd, Existing, Job, POLLIN, POLLOUT, RawFd, available, final_path, inside,
+    local_app_data, plain_path, pollfd, private_dir, private_file, random,
 };
 #[cfg(all(windows, test))]
 pub(crate) use windows::{file_security, private_security};

@@ -11,17 +11,23 @@ use super::settings::{self, Settings, Status};
 pub(super) const OWN_CLAUDE: &str = "claude-status-added";
 const CLAUDE_CREATED: &str = "created";
 const CLAUDE_UPDATED: &str = "updated";
-pub(super) const WINDOWS: &str = "Milo's Claude Code status line is not supported on Windows yet.";
 
+/// Claude Code runs a status line through a POSIX shell, Git Bash on Windows, which takes a drive
+/// path written with forward slashes.
 fn status_command(path: &Path) -> Result<String, &'static str> {
+    #[cfg(windows)]
+    let path = crate::sys::plain_path(path.to_path_buf());
     let path = path.to_str().ok_or("Milo's path is not valid UTF-8 for Claude Code settings.")?;
-    Ok(format!("'{}' claude-status", path.replace('\'', "'\\''")))
+    #[cfg(windows)]
+    let path = &path.replace('\\', "/");
+    let command = format!("'{}' claude-status", path.replace('\'', "'\\''"));
+    if !settings::is_launcher(&command) {
+        return Err("Milo's path is not a plain drive path that Claude Code can run.");
+    }
+    Ok(command)
 }
 
 fn current_command() -> Result<String, &'static str> {
-    if cfg!(windows) {
-        return Err(WINDOWS);
-    }
     status_command(&executable()?)
 }
 

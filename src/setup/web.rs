@@ -200,7 +200,7 @@ impl Editor {
         let layout_save = layout_editable && (!setup.inside || self.live());
         let global_readable = setup.saved_global.as_ref().is_none_or(Result::is_ok);
         let preferences_editable = setup.saved_prefs.is_some();
-        let account_editable = !cfg!(windows) && setup.claude.editable() && self.claude.is_some();
+        let account_editable = setup.claude.editable() && self.claude.is_some();
         (
             GroupState {
                 scope: if setup.scope == Scope::Global { "global" } else { "worktree" },
@@ -271,7 +271,6 @@ impl Editor {
         };
         let project = if prefs.project_mode == ProjectMode::Follow { "follow" } else { "pin" };
         let status = match setup.claude {
-            _ if cfg!(windows) => "Not supported on Windows yet",
             Claude::On => "Managed by Milo",
             Claude::Off => "Not enabled",
             Claude::Foreign => "A user-managed status line is in use",
@@ -409,9 +408,6 @@ impl Editor {
                     Group::Account => account.editable,
                     Group::All => unreachable!("edits affect one group"),
                 };
-                if cfg!(windows) && matches!(edit.group(), Group::Account) {
-                    return Err(claude::WINDOWS.into());
-                }
                 if !editable || (matches!(edit, Edit::AutoArrange(_)) && !self.live()) {
                     return Err(UNAVAILABLE.into());
                 }
@@ -2368,24 +2364,30 @@ mod windows_tests {
             report.contains("\nLive sidebar: not observed (Rex integration is not supported on Windows yet)\n"),
             "{report}"
         );
-        assert!(report.ends_with("\nClaude status line: not supported on Windows yet"), "{report}");
+        assert!(report.ends_with("\nClaude status line: not installed"), "{report}");
         assert!(!store.init.exists(), "doctor wrote Rex's settings");
     }
 
     #[test]
-    fn claude_status_line_is_not_supported_and_writes_nothing() {
+    fn the_claude_status_line_is_written_for_git_bash_and_taken_out_again() {
         let f = Fixture::folder();
         let store = fixture_store(&f);
         let mut editor = outside(store.clone(), Some(&f.root));
-        let state = editor.state();
-        assert!(state.contains(r#""claude_status":"Not supported on Windows yet""#), "{state}");
-        let refused = action(&mut editor, r#""action":"set","field":"account.claude_limits","value":true"#);
-        assert_eq!(refused.unwrap_err(), "Milo's Claude Code status line is not supported on Windows yet.");
-        let refused = action(&mut editor, r#""action":"save","group":"account","scope":"account""#);
-        assert_eq!(refused.unwrap_err(), UNAVAILABLE);
-        let (_, snapshot) = store.claude_snapshot().unwrap();
-        assert_eq!(store.save_claude_draft(true, &snapshot), Err(claude::WINDOWS));
-        assert!(!store.claude.exists() && !store.claude_note().exists(), "Claude Code's settings were written");
+        assert!(editor.state().contains(r#""claude_status":"Not enabled""#), "{}", editor.state());
+        action(&mut editor, r#""action":"set","field":"account.claude_limits","value":true"#).unwrap();
+        action(&mut editor, r#""action":"save","group":"account","scope":"account""#).unwrap();
+        let settings = fs::read_to_string(&store.claude).unwrap();
+        let exe = rex_files::executable().unwrap();
+        let exe = crate::sys::plain_path(exe).to_str().unwrap().replace('\\', "/");
+        assert!(settings.contains(&format!(r#""command": "'{exe}' claude-status""#)), "{settings}");
+        assert!(exe.as_bytes()[1..].starts_with(b":/"), "{exe}");
+        assert!(editor.state().contains(r#""claude_status":"Managed by Milo""#), "{}", editor.state());
+        let report = doctor::report_for(&store, Some(&f.root)).unwrap();
+        assert!(report.ends_with("\nClaude status line: managed by Milo"), "{report}");
+
+        action(&mut editor, r#""action":"set","field":"account.claude_limits","value":false"#).unwrap();
+        action(&mut editor, r#""action":"save","group":"account","scope":"account""#).unwrap();
+        assert!(!store.claude.exists() && !store.claude_note().exists(), "Milo left its status line behind");
     }
 
     #[test]

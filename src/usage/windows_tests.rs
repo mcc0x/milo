@@ -225,7 +225,7 @@ fn a_transcript_replaced_by_a_link_after_discovery_is_no_longer_read() {
 }
 
 #[test]
-fn what_needs_setup_the_status_line_or_a_network_stays_unsupported() {
+fn what_needs_a_network_or_a_menu_bar_stays_unsupported() {
     let mut hidden = UsageTools::default();
     for tool in UsageTool::ALL {
         hidden[tool] = Show::Hide;
@@ -237,12 +237,11 @@ fn what_needs_setup_the_status_line_or_a_network_stays_unsupported() {
     let error = menu_stream().unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     assert!(error.to_string().contains("not supported on Windows yet"));
-    assert_eq!(claude_status(), 0);
     assert!(SystemTime::now() > UNIX_EPOCH);
 }
 
 #[test]
-fn doctor_reads_codex_and_claude_files_and_says_the_status_line_is_not_supported() {
+fn doctor_reads_codex_and_claude_files_and_points_to_the_status_line_switch() {
     let f = Fixture::folder();
     let now = local_noon();
     write(&f, CODEX, &codex(now - MINUTE, 23, now + DAY), now - MINUTE);
@@ -253,7 +252,7 @@ fn doctor_reads_codex_and_claude_files_and_says_the_status_line_is_not_supported
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert!(lines[0].starts_with("Codex limits: ") && !lines[0].contains("no local report"), "{lines:?}");
     assert_eq!(
-        lines[1], "Claude Code limits: no local report; Claude Code's status line is not supported on Windows yet",
+        lines[1], "Claude Code limits: no local report; turn on Show Claude Code limits in milo web",
         "{lines:?}"
     );
     assert!(lines.iter().all(|line| !line.contains("milo setup")), "{lines:?}");
@@ -427,4 +426,24 @@ mod databases {
         drop(writer);
         assert_eq!(opencode::read(&path, now, WAIT), Report::Today(expected));
     }
+}
+
+#[test]
+fn the_status_line_gives_up_on_input_left_open_and_reads_input_that_ends() {
+    let (reader, mut writer) = io::pipe().unwrap();
+    io::Write::write_all(&mut writer, b"{\"model\":").unwrap();
+    let started = std::time::Instant::now();
+    let mut output = Vec::new();
+    assert_eq!(status::run_fd(reader, &mut output, None, NOW, Duration::from_millis(200)), 0);
+    assert_eq!(output, b"\n");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    drop(writer);
+
+    let (reader, mut writer) = io::pipe().unwrap();
+    let input = br#"{"rate_limits":{"five_hour":{"used_percentage":23},"seven_day":{"used_percentage":61}}}"#;
+    io::Write::write_all(&mut writer, input).unwrap();
+    drop(writer);
+    let mut output = Vec::new();
+    assert_eq!(status::run_fd(reader, &mut output, None, NOW, Duration::from_secs(5)), 0);
+    assert_eq!(String::from_utf8(output).unwrap(), "5h 77% · week 39% left\n");
 }

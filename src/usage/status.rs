@@ -145,7 +145,7 @@ fn native_reading(cache: Value<'_>, current: Option<AccountId>) -> Option<Readin
 
 /// A stalled stdin must not leave Claude waiting for its status line.
 pub(super) fn run_fd(
-    input: impl AsRawFd,
+    input: impl AsRawFd + io::Read,
     output: impl Write,
     target: Option<SaveTo<'_>>,
     now: i64,

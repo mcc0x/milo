@@ -344,6 +344,12 @@ fn report_with_worktree(
             .unwrap();
         }
     }
+    write_claude_status(&mut out, &mut health, store);
+    out.pop();
+    Ok((out, health, tools))
+}
+
+fn write_claude_status(out: &mut String, health: &mut Health, store: &Store) {
     out.push_str("Claude status line: ");
     let claude = store.claude_files();
     match claude.as_ref().map_or(Claude::Invalid, |files| files.status()) {
@@ -356,7 +362,8 @@ fn report_with_worktree(
         Claude::Foreign => out.push_str("user-managed; left alone\n"),
         Claude::NotOwned => {
             health.warn("Claude Code’s status line has no matching ownership note.");
-            out.push_str("no matching ownership note; left alone. If Milo was installed with a different XDG_STATE_HOME, rerun with that value.\n");
+            let state = if cfg!(windows) { "LOCALAPPDATA" } else { "XDG_STATE_HOME" };
+            writeln!(out, "no matching ownership note; left alone. If Milo was installed with a different {state}, rerun with that value.").unwrap();
         }
         Claude::Invalid if read(&store.claude_note()).is_err() => {
             health.warn("Milo could not verify Claude Code’s ownership note.");
@@ -372,8 +379,6 @@ fn report_with_worktree(
             writeln!(out, "unreadable; check Claude settings ({:?})", store.claude).unwrap()
         }
     }
-    out.pop();
-    Ok((out, health, tools))
 }
 
 /// What this computer can still show about the layout while Milo's Rex integration is not ported:
@@ -393,9 +398,9 @@ fn write_windows_integrations(out: &mut String, health: &mut Health, store: &Sto
     out.push_str(
         "Rex integration: not supported on Windows yet; the panes work on their own.\n\
          Layout listener: not supported on Windows yet\n\
-         Discord presence: not supported on Windows yet\n\
-         Claude status line: not supported on Windows yet\n",
+         Discord presence: not supported on Windows yet\n",
     );
+    write_claude_status(out, health, store);
 }
 
 fn write_profile_error(out: &mut String, store: &Store, error: &LayoutError) {
@@ -1243,7 +1248,7 @@ mod windows_tests {
                  Rex integration: not supported on Windows yet; the panes work on their own.\n\
                  Layout listener: not supported on Windows yet\n\
                  Discord presence: not supported on Windows yet\n\
-                 Claude status line: not supported on Windows yet"
+                 Claude status line: not installed"
             ),
             "{report}"
         );

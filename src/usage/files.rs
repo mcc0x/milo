@@ -241,9 +241,32 @@ pub(super) fn read_pipe(input: impl AsRawFd, max: usize, deadline: Instant) -> O
     None
 }
 
-/// Pipes are read only where the providers that need them run, which is not yet Windows.
+/// Bounds pipe capture even if its writer stops producing output without closing it. Windows
+/// has no readiness wait for an anonymous pipe, so what it holds is asked for until the deadline.
 #[cfg(windows)]
-pub(super) fn read_pipe(_input: impl AsRawFd, _max: usize, _deadline: Instant) -> Option<Vec<u8>> {
+pub(super) fn read_pipe(mut input: impl AsRawFd + Read, max: usize, deadline: Instant) -> Option<Vec<u8>> {
+    use crate::sys::Available;
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    while Instant::now() < deadline {
+        let waiting = match crate::sys::available(input.as_raw_fd()) {
+            Available::Closed => return Some(bytes),
+            Available::Unknown => return None,
+            Available::Bytes(0) => {
+                std::thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+            Available::Bytes(waiting) => usize::try_from(waiting).ok()?,
+        };
+        let cap = (max + 1 - bytes.len()).min(buffer.len()).min(waiting);
+        match input.read(&mut buffer[..cap]) {
+            Ok(0) => return Some(bytes),
+            Ok(n) if bytes.len() + n > max => return None,
+            Ok(n) => bytes.extend_from_slice(&buffer[..n]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
     None
 }
 

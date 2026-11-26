@@ -110,14 +110,14 @@ fn handle(fd: RawFd) -> *mut c_void {
 }
 
 /// What a pipe holds for reading.
-pub(super) enum Available {
+pub(crate) enum Available {
     Bytes(u32),
     Closed,
     /// Not a pipe.
     Unknown,
 }
 
-pub(super) fn available(fd: RawFd) -> Available {
+pub(crate) fn available(fd: RawFd) -> Available {
     let mut bytes = 0;
     // SAFETY: Only the count output is requested, and it is writable; a handle that is not a pipe fails the call.
     let peeked = unsafe {

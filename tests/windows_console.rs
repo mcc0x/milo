@@ -582,6 +582,49 @@ fn usage_reads_local_codex_sessions_and_quits() {
     finish(&console, mark);
 }
 
+/// The status line command Milo writes into Claude Code's settings, run the way Claude Code runs
+/// it on Windows, through Git Bash: it reads the limits from standard input, prints them, and saves
+/// them where doctor and the Usage pane read them.
+#[test]
+fn claude_status_line_runs_through_git_bash_and_the_usage_pane_shows_its_limits() {
+    let scratch = Scratch::new("claude-status");
+    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("git.exe"))
+        .find(|git| git.is_file())
+        .expect("git.exe is not on PATH");
+    let bash = git.parent().unwrap().parent().unwrap().join("bin").join("bash.exe");
+    assert!(bash.is_file(), "Git Bash is not beside {git:?}");
+    let milo = env!("CARGO_BIN_EXE_milo").replace('\\', "/");
+    let command = format!("'{milo}' claude-status");
+    let milo_command = |program: &Path| {
+        let mut command = Command::new(program);
+        for name in ["HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "CODEX_HOME"] {
+            command.env_remove(name);
+        }
+        command.envs(scratch.environment()).current_dir(scratch.0.join("project"));
+        command
+    };
+    let mut child =
+        milo_command(&bash).args(["-c", &command]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(br#"{"rate_limits":{"seven_day":{"used_percentage":61}}}"#).unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "week 39% left\n");
+
+    let doctor = milo_command(Path::new(env!("CARGO_BIN_EXE_milo"))).arg("doctor").output().unwrap();
+    let report = String::from_utf8(doctor.stdout).unwrap();
+    assert!(report.contains("Claude Code limits: Milo Claude status line"), "{report}");
+
+    let (mut console, at) = open_pane(&scratch, "usage");
+    let at = console.see("Claude", at);
+    console.see("39%", at);
+    let mark = console.text().len();
+    console.keys(b"q");
+    finish(&console, mark);
+}
+
 /// Run by the native workflow after tests/web-smoke-windows.cjs, with MILO_SAVED_PREFERENCES naming
 /// the preferences file the browser saved. Claude Code's tokens are only shown when it is chosen to
 /// always show, so they appear with that file and not without it.

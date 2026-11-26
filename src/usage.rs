@@ -1226,7 +1226,7 @@ impl Usage {
         let codex = self.codex.reported(now);
         let claude = self.claude.reported(now);
         let claude_step = if cfg!(windows) {
-            "Claude Code's status line is not supported on Windows yet"
+            "turn on Show Claude Code limits in milo web"
         } else {
             "turn on Show Claude Code limits in milo setup"
         };
@@ -1419,10 +1419,6 @@ fn help_rows(claude: bool, opencode: bool, accounts: bool) -> Vec<help::HelpRow>
 
 /// Claude Code must get a line and a successful exit even if it sent bad data.
 pub fn claude_status() -> i32 {
-    if cfg!(windows) {
-        println!("Milo usage is not supported on Windows yet");
-        return 0;
-    }
     let claude = paths::claude();
     let config = claude.as_ref().map(paths::ClaudePaths::config);
     let path = claude_state(claude.as_ref()).map(|dir| dir.join(SAVED_LIMITS));
