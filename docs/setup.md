@@ -248,6 +248,23 @@ The same steps are under **Hosts** in the browser editor: tick the groups, **Cre
 
 **Limits.** One worktree’s settings travel per export, the one you run it in. Importing a layout saves the layout; it does not install the Rex integration on a host that has none, so run `milo setup` there once. Panes that are open read the new settings when you reopen them. A bundle written by a newer Milo is refused with a request to update.
 
+### Follow a shell to another computer over SSH
+
+In a Rex tab, `milo ssh HOST` logs in to HOST with your own `ssh` and lets the Outline and History beside that shell follow it there. As you change folders on HOST they show HOST’s files and commits, with HOST’s name at the foot of each pane. When you log out, or the connection drops, they come back to this computer’s worktree as you left them, with any unsaved reader draft still open. Other tabs are not affected.
+
+```sh
+milo ssh dev@build-box
+milo ssh -F ~/.ssh/work-config build-box
+```
+
+- **What it needs on HOST.** Milo on HOST’s search path, in `~/.local/bin` or in `~/.cargo/bin`. Milo installs nothing there and changes no SSH or shell setting on either computer. Without Milo on HOST you are still logged in as plain `ssh` would log you in, and the panes say they can’t follow you.
+- **Your keys stay here.** `milo ssh` uses your ssh configuration, keys and prompts, and keeps one connection for the tab: the panes reuse it instead of logging in again. Agent forwarding is off for it. `-F CONFIG` uses another configuration file, as `ssh -F` does.
+- **Usage stays local until you choose.** Usage keeps showing this computer’s accounts and tools, and says so. Press Tab in it to see HOST’s usage, read by Milo on HOST from HOST’s own files; Tab again comes back. Nothing is copied between the computers.
+- **Read only.** The reader in a pane that follows HOST shows HOST’s files but does not edit them.
+- **Where the folder comes from.** HOST’s system reports the shell’s folder to Milo on HOST. Prompts, window titles and other terminal output are never read for it.
+
+This first version follows one hop. A shell that goes on from HOST to another computer, a plain `ssh` you did not start with `milo ssh`, and tmux on HOST are not followed. Panes opened with a pinned project don’t follow at all.
+
 ## Rex actions
 
 Saving installs these actions in the Rex command palette:

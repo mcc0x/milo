@@ -152,7 +152,7 @@ assert(column[1][1].options.cwd == "/my project" and column[1][2].label == "milo
 assert(column[2].label == "milo:usage" and math.abs(column.ratio - 0.96) < 0.000001 and splits[1].ratio == 0.20)
 assert(not splits[1].focus)
 assert(column[1][1].options.command[3] == "--shell" and column[1][1].options.command[4] == "quick")
-assert(column[2].options.command[3] == nil)
+assert(column[2].options.command[3] == "--shell" and column[2].options.command[4] == "quick")
 emit("terminal.size_changed", "slow")
 assert(#splits == 1)
 processes.slow = project
