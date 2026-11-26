@@ -1,3 +1,5 @@
+import { SiteLink } from '../../site-link';
+
 export const metadata = { title: 'Privacy Policy · Milo', alternates: { canonical: 'https://usemilo.net/privacy/' } };
 
 export default function Privacy() {
@@ -8,6 +10,6 @@ export default function Privacy() {
     <h2>Telegram</h2><p>With your own bot, Milo communicates directly with Telegram. Chat discovery reads recent updates to find chat names and IDs; manual entry is also available. With the official Milo bot, a relay processes pairing details, the selected private chat ID, and alert text to deliver messages on your behalf. The official bot token is not shared with your device.</p>
     <h2>Connection service retention</h2><p>Unfinished pairings expire after ten minutes. For a connected Telegram DM, the relay stores the chat ID and a digest of the device credential across restarts. These records have no automatic expiry; forgetting the device revokes its binding. Send <code>/delete</code> to revoke all devices linked to that DM. The relay does not store alert text in its database. For Discord, it discards OAuth access and refresh tokens after the exchange. The relay uses client network addresses temporarily to limit requests. The hosting provider processes connection metadata such as request paths, timing and IP addresses.</p>
     <h2>Storage and removal</h2><p>Locally saved destination credentials use the macOS Keychain or a private file in Milo’s state directory. Turning forwarding off stops new alerts but keeps the saved destination. Use Forget to remove it. You can revoke a Discord webhook in the channel’s Integrations settings or stop the official bot in Telegram. Disconnecting does not delete messages already delivered; manage those in the destination chat.</p>
-    <h2>Questions and requests</h2><p>Contact the maintainers via the <a href="https://github.com/mcc0x/milo/issues">Milo project</a> for privacy questions or help removing a connection. Ask for a private follow-up rather than posting tokens, chat IDs or message contents. The messaging platforms handle delivered data under their own policies: <a href="https://discord.com/privacy">Discord</a> and <a href="https://telegram.org/privacy">Telegram</a>.</p>
+    <h2>Questions and requests</h2><p>Contact the maintainers via the <SiteLink href="https://github.com/mcc0x/milo/issues">Milo project</SiteLink> for privacy questions or help removing a connection. Ask for a private follow-up rather than posting tokens, chat IDs or message contents. The messaging platforms handle delivered data under their own policies: <SiteLink href="https://discord.com/privacy">Discord</SiteLink> and <SiteLink href="https://telegram.org/privacy">Telegram</SiteLink>.</p>
   </article>;
 }
