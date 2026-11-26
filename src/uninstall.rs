@@ -1,8 +1,48 @@
 //! Uninstall the running, explicitly confirmed copy of Milo, not the first Milo on PATH.
 
+/// Windows cannot remove a program while it runs, so the installer's own uninstaller, kept beside
+/// an installed milo.exe, does it once Milo is closed. Milo only says how.
 #[cfg(windows)]
 pub(crate) fn run() -> Result<String, String> {
-    Err("milo uninstall is not supported on Windows yet. Remove the executable and its settings by hand.".to_owned())
+    let launched = std::env::current_exe().map_err(|e| format!("Could not locate the running Milo: {e}"))?;
+    Err(windows_instructions(&launched))
+}
+
+#[cfg(windows)]
+fn windows_instructions(exe: &std::path::Path) -> String {
+    let exe = crate::sys::plain_path(exe.to_path_buf());
+    let dir = exe.parent().unwrap_or(&exe);
+    let uninstaller = dir.join("uninstall-milo.ps1");
+    if dir.join(".milo-install-receipt").is_file() && uninstaller.is_file() {
+        return format!(
+            "Windows cannot remove a program while it runs. Close every Milo window, then run:\n  powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"\nYour settings are left in place.",
+            uninstaller.display()
+        );
+    }
+    format!(
+        "Milo will not remove {}: it was not installed by the Windows installer. Delete it by hand; your settings are left in place.",
+        exe.display()
+    )
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::windows_instructions;
+    use crate::fixture::Fixture;
+
+    #[test]
+    fn an_installed_copy_is_pointed_at_its_uninstaller_and_any_other_copy_is_left_alone() {
+        let f = Fixture::folder();
+        let exe = f.root.join("milo.exe");
+        std::fs::write(&exe, "").unwrap();
+        let said = windows_instructions(&exe);
+        assert!(said.contains("not installed by the Windows installer"), "{said}");
+        std::fs::write(f.root.join(".milo-install-receipt"), "").unwrap();
+        std::fs::write(f.root.join("uninstall-milo.ps1"), "").unwrap();
+        let said = windows_instructions(&exe);
+        let uninstaller = crate::sys::plain_path(f.root.join("uninstall-milo.ps1"));
+        assert!(said.contains(&format!("-File \"{}\"", uninstaller.display())), "{said}");
+    }
 }
 
 #[cfg(unix)]

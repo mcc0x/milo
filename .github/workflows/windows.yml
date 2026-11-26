@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       recipient:
-        description: Base64 of a PEM certificate. When set, the tested executable is encrypted to it and kept for one day.
+        description: Base64 of a PEM certificate. When set, the tested installer package is encrypted to it and kept for one day.
         required: false
         default: ''
 
@@ -80,9 +80,17 @@ jobs:
           node tests/web-smoke-windows.cjs target\release\milo.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo +1.91.0 test --release --locked --test windows_console usage_follows_preferences_saved_in_the_browser -- --ignored --exact
+      - name: Install, upgrade and remove the packaged release as a person would
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: |
+          ./.github/ci/stage-windows.ps1 -Executable target\release\milo.exe -Destination "$env:RUNNER_TEMP\package"
+          ./.github/ci/stage-windows.ps1 -Executable target\debug\milo.exe -Destination "$env:RUNNER_TEMP\package-upgrade"
+          ./tests/windows-install.ps1 -Release "$env:RUNNER_TEMP\package" -Upgrade "$env:RUNNER_TEMP\package-upgrade"
       # After every test, so a failed run keeps nothing. Only its recipient can open the copy kept: a public
       # artifact would publish a binary.
-      - name: Seal the tested executable for its recipient
+      - name: Seal the tested installer package for its recipient
         if: github.event_name == 'workflow_dispatch' && inputs.recipient != ''
         env:
           RECIPIENT: ${{ inputs.recipient }}
@@ -90,13 +98,15 @@ jobs:
           $openssl = "$env:ProgramFiles\Git\usr\bin\openssl.exe"
           & $openssl version
           [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\recipient.pem", [Convert]::FromBase64String($env:RECIPIENT))
-          & $openssl smime -encrypt -aes256 -binary -outform DER -in target\release\milo.exe -out "$env:RUNNER_TEMP\milo.exe.p7m" "$env:RUNNER_TEMP\recipient.pem"
+          Get-Content "$env:RUNNER_TEMP\package\SHA256SUMS"
+          Compress-Archive -Path "$env:RUNNER_TEMP\package\*" -DestinationPath "$env:RUNNER_TEMP\milo-windows.zip"
+          & $openssl smime -encrypt -aes256 -binary -outform DER -in "$env:RUNNER_TEMP\milo-windows.zip" -out "$env:RUNNER_TEMP\milo-windows.zip.p7m" "$env:RUNNER_TEMP\recipient.pem"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          (Get-FileHash "$env:RUNNER_TEMP\milo.exe.p7m" -Algorithm SHA256).Hash
+          (Get-FileHash "$env:RUNNER_TEMP\milo-windows.zip", "$env:RUNNER_TEMP\milo-windows.zip.p7m" -Algorithm SHA256 | Format-Table Hash, Path -AutoSize | Out-String -Width 200).Trim()
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: github.event_name == 'workflow_dispatch' && inputs.recipient != ''
         with:
           name: milo-windows-x86_64-release-${{ github.sha }}
-          path: ${{ runner.temp }}/milo.exe.p7m
+          path: ${{ runner.temp }}/milo-windows.zip.p7m
           if-no-files-found: error
           retention-days: 1

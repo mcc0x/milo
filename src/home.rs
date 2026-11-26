@@ -495,6 +495,10 @@ fn move_selection(selected: &mut usize, count: usize, shown: usize, key: Key) ->
 fn draw_confirm(s: &mut Screen, body: usize, removal: Removal, selected: usize) -> Picker {
     let labels = removal.choices();
     let (question, note) = match removal {
+        Removal::Milo if cfg!(windows) => (
+            "Uninstall Milo?",
+            "Windows cannot remove a running program, so Milo shows how its installer removes it once Milo is closed. Saved preferences will stay.",
+        ),
         Removal::Milo => (
             "Uninstall Milo?",
             "Removes Milo and its managed Rex and Claude Code integrations. Saved preferences and open panes will stay.",
