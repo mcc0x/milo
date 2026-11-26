@@ -2,7 +2,8 @@
 //! Drives the built Milo executable through a Windows pseudoconsole, the way Windows Terminal
 //! runs it: open a working text file, edit and save it, refuse to write over a change another
 //! program made, quit, and leave the console's modes as they were. The Home, Outline, History and
-//! Usage panes open the same way, draw what they should, move on a key and quit with exit code 0.
+//! Usage panes open the same way, draw what they should, move on a key and quit with exit code 0,
+//! and the Reader's own Markdown view renders a working file and follows a save made elsewhere.
 
 use std::ffi::{OsStr, c_void};
 use std::fs;
@@ -498,6 +499,34 @@ fn home_lists_the_panes_opens_history_and_quits() {
     let mark = console.text().len();
     console.keys(b"q");
     console.see("Git history", mark);
+    console.keys(b"q");
+    finish(&console, mark);
+}
+
+#[test]
+fn markdown_renders_in_the_reader_follows_a_save_elsewhere_and_shows_its_source() {
+    let scratch = Scratch::new("markdown");
+    let file = scratch.0.join("project").join("field-log.md");
+    fs::write(&file, "# Field log\r\n\r\nA **steady** climb past [the hut](https://example.invalid/hut).\r\n").unwrap();
+    let (mut console, at) = open_pane(&scratch, "view field-log.md");
+    let at = console.see("Field log", at);
+    console.see("steady", at);
+    console.see("m source", at);
+    let shown = console.text();
+    assert!(!shown.contains("# Field log"), "the heading was drawn as source:\n{shown}");
+    assert!(!shown.contains("example.invalid"), "a link destination reached the console:\n{shown}");
+
+    // Another program replaces the file; the view redraws the new text without a key.
+    let next = scratch.0.join("project").join("field-log.md.next");
+    fs::write(&next, "# Field log\r\n\r\nA **steady** climb.\r\n\r\n## Evening camp\r\n").unwrap();
+    fs::rename(&next, &file).unwrap();
+    let mark = console.text().len();
+    console.see("Evening camp", mark);
+
+    let mark = console.text().len();
+    console.keys(b"m");
+    let at = console.see("m preview", mark);
+    console.see("## Evening camp", mark.min(at));
     console.keys(b"q");
     finish(&console, mark);
 }

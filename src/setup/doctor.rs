@@ -416,7 +416,7 @@ fn write_profile_error(out: &mut String, store: &Store, error: &LayoutError) {
 
 fn write_markdown_preview(out: &mut String, tool: Result<Option<&Path>, &'static str>, in_rex: bool) {
     if cfg!(windows) {
-        out.push_str("Markdown preview: not supported on Windows yet.\n");
+        out.push_str("Markdown preview: built into the Reader; the separate preview pane needs Rex and is not supported on Windows yet.\n");
         return;
     }
     match tool {
@@ -1234,7 +1234,7 @@ mod windows_tests {
             "{report}"
         );
         assert!(
-            report.contains("\nMarkdown preview: not supported on Windows yet.\nPreferences: built-in defaults\n"),
+            report.contains("\nMarkdown preview: built into the Reader; the separate preview pane needs Rex and is not supported on Windows yet.\nPreferences: built-in defaults\n"),
             "{report}"
         );
         assert!(
