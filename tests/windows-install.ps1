@@ -41,7 +41,11 @@ $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
 $originalKind = if ($null -ne $originalPath) { $key.GetValueKind('Path') } else { $null }
 $key.Close()
 $running = $null
+$startPath = "$work\keep;;%SystemRoot%\keep;"
 try {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    $key.SetValue('Path', $startPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    $key.Close()
     $releaseDigest = Digest (Join-Path $Release 'milo-x86_64-pc-windows-msvc.exe')
     $upgradeDigest = Digest (Join-Path $Upgrade 'milo-x86_64-pc-windows-msvc.exe')
     Check ($releaseDigest -ne $upgradeDigest) 'the two packages hold different executables'
@@ -100,7 +104,7 @@ try {
     $result = Invoke-Installer $uninstaller
     Check ($result.Code -eq 0) "the uninstaller removes Milo: $($result.Output.Trim())"
     Check (@(Get-ChildItem -LiteralPath $bin -Force).Count -eq 0) 'nothing is left in the install folder'
-    Check ((Get-RawPath) -eq $originalPath) 'the user PATH is as it was before'
+    Check ((Get-RawPath) -ceq $startPath) 'the user PATH is as it was before, empty entries included'
     $result = Invoke-Installer (Join-Path $Release 'install-windows.ps1') @('-Uninstall')
     Check ($result.Code -eq 0) 'removing again is harmless'
 } finally {

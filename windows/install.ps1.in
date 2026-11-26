@@ -119,8 +119,9 @@ if ($Uninstall) {
     }
     if ($installed -and $installed.PathEntry) {
         $path = Get-UserPath
-        $kept = @(Get-Entries $path.Value | Where-Object { $_ -ine $installed.PathEntry })
-        if ($kept.Count -ne @(Get-Entries $path.Value).Count) { Set-UserPath ($kept -join ';') $path.Kind }
+        $parts = @(if ($path.Value) { $path.Value -split ';' })
+        $kept = @($parts | Where-Object { $_ -ine $installed.PathEntry })
+        if ($kept.Count -ne $parts.Count) { Set-UserPath ($kept -join ';') $path.Kind }
     }
     Remove-Old
     Remove-Item -LiteralPath $receipt -Force -ErrorAction SilentlyContinue
@@ -159,7 +160,7 @@ try {
 Remove-Old
 Write-Output "Installed Milo at $binary."
 if ($entry -and -not (Test-OnPath $path.Value)) {
-    Set-UserPath ((@(Get-Entries $path.Value) + $entry) -join ';') $path.Kind
+    Set-UserPath $(if ($path.Value) { "$($path.Value);$entry" } else { $entry }) $path.Kind
     Write-Output "Added $dir to your PATH. Open a new terminal, then run milo."
 } else {
     Write-Output 'Open a new terminal, then run milo.'
