@@ -220,7 +220,11 @@ fn save(target: SaveTo<'_>, now: i64, windows: BaseWindows) -> io::Result<()> {
     let dir = target.path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     fs::create_dir_all(dir)?;
     // The file is replaced on each save, so take the lock on its directory.
+    #[cfg(unix)]
     let lock = fs_ops::open_dir(dir)?;
+    // Windows cannot lock a folder, so a private file beside the readings is locked instead.
+    #[cfg(windows)]
+    let lock = crate::sys::private_file(&dir.join("claude-limits.lock"), crate::sys::Existing::Open)?;
     let deadline = Instant::now() + LOCK_WAIT;
     // A holder that has stalled must not keep Claude waiting for its status
     // line. Skipping this save loses nothing the next report will not bring.

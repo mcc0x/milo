@@ -443,6 +443,12 @@ fn the_status_line_gives_up_on_input_left_open_and_reads_input_that_ends() {
     let mut output = Vec::new();
     assert_eq!(status::run_fd(reader, &mut output, None, NOW, Duration::from_secs(5)), 0);
     assert_eq!(String::from_utf8(output).unwrap(), "5h 77% · week 39% left\n");
+
+    let f = Fixture::folder();
+    let saved = f.root.join("state").join("claude-limits.json");
+    assert_eq!(status::run(input, io::sink(), Some(&saved), NOW), 0);
+    let text = fs::read_to_string(&saved).unwrap();
+    assert!(text.contains(r#""seven_day":{"used_percentage":61"#), "{text}");
 }
 
 /// A provider account asked through the curl Windows ships, against a loopback stand-in for the
