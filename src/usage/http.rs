@@ -18,11 +18,29 @@ pub(super) fn executable() -> PathBuf {
     PathBuf::from("/usr/bin/curl")
 }
 
-/// The curl that Windows itself ships, never one a project or \`PATH\` supplies.
+/// The curl that Windows itself ships, never one a project, `PATH` or the environment supplies.
+/// If Windows does not name its system folder, an empty path that cannot be run.
 #[cfg(windows)]
 pub(super) fn executable() -> PathBuf {
-    let root = std::env::var_os("SystemRoot").map(PathBuf::from).filter(|root| root.is_absolute());
-    root.unwrap_or_else(|| PathBuf::from(r"C:\Windows")).join("System32").join("curl.exe")
+    system_directory().map(|system| system.join("curl.exe")).unwrap_or_default()
+}
+
+/// The system folder as Windows reports it, whatever `SystemRoot` was inherited.
+#[cfg(windows)]
+fn system_directory() -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt as _;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    }
+
+    let mut buffer = [0_u16; 260];
+    // SAFETY: buffer is writable for exactly the advertised number of UTF-16 code units.
+    let len = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), 260) };
+    let len = usize::try_from(len).ok().filter(|&len| len > 0 && len < buffer.len())?;
+    Some(PathBuf::from(OsString::from_wide(&buffer[..len]))).filter(|system| system.is_absolute())
 }
 
 /// One GET. `url` and `headers` are built by Milo; only `bearer` comes from the user.
@@ -165,25 +183,10 @@ pub(crate) fn post_anonymous_counts(
 
 #[cfg(windows)]
 fn counts_curl() -> Option<Command> {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt as _;
     use std::os::windows::process::CommandExt as _;
-    use std::path::PathBuf;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
-    }
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut buffer = [0_u16; 260];
-    // SAFETY: buffer is writable for exactly the advertised number of UTF-16 code units.
-    let len = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), 260) };
-    let len = usize::try_from(len).ok().filter(|&len| len > 0 && len < buffer.len())?;
-    let system = PathBuf::from(OsString::from_wide(&buffer[..len]));
-    if !system.is_absolute() {
-        return None;
-    }
+    let system = system_directory()?;
     let mut command = Command::new(system.join("curl.exe"));
     // The system directory also supplies the working directory for DLL searches.
     // Do not inherit SystemRoot, proxy settings, or certificate overrides.
@@ -279,6 +282,7 @@ mod tests {
                 let (name, root) = command.get_envs().next().unwrap();
                 assert_eq!(name, "SystemRoot");
                 assert_eq!(root.map(Path::new), system.parent());
+                assert_eq!(executable(), program);
                 return;
             }
             let f = crate::fixture::Fixture::folder();
