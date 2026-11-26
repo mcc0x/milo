@@ -55,6 +55,8 @@ const LEAVE: &[u8] =
     b"\x18\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?1003l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
 /// How long after asking a terminal may take to answer and still be waited for on the way out.
 const ANSWER_WAIT: Duration = Duration::from_millis(250);
+/// How often a program the terminal is lent to is asked after.
+const LEND_LOOK: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Host {
@@ -259,7 +261,6 @@ impl Session {
     }
 
     fn enter(keyboard: Keyboard, output: File, signal: PipeReader, capabilities: Capabilities) -> io::Result<Self> {
-        let saved = raw_mode(&keyboard, &output)?;
         let mut session = Self {
             keyboard,
             input: Input::default(),
@@ -269,23 +270,58 @@ impl Session {
             signal,
             pending_interrupt: false,
             cancelled_output: false,
-            saved: Some(saved),
+            saved: None,
             capabilities,
             answers_due: None,
         };
+        session.engage()?;
+        Ok(session)
+    }
+
+    /// Gives the terminal to `command` until it ends or `keep` says it may no
+    /// longer have it, then takes it back as `open` first did. Returns whether
+    /// the program finished on its own.
+    pub fn lend(&mut self, command: &mut std::process::Command, mut keep: impl FnMut() -> bool) -> io::Result<bool> {
+        self.restore();
+        let finished = crate::fs_ops::spawn(command).is_ok_and(|mut child| {
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status.success(),
+                    Ok(None) if keep() => std::thread::sleep(LEND_LOOK),
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break false;
+                    }
+                }
+            }
+        });
+        self.engage()?;
+        Ok(finished)
+    }
+
+    /// Puts the keyboard in raw mode and the screen in Milo's modes, and asks
+    /// the terminal what it can do.
+    fn engage(&mut self) -> io::Result<()> {
+        self.saved = Some(raw_mode(&self.keyboard, &self.output)?);
+        // What was read before the terminal was lent belongs to its last owner.
+        self.input = Input::default();
+        self.keys.clear();
+        self.cancelled_input = false;
+        self.cancelled_output = false;
         // There is no reliable distinction between a pasted control byte and a
         // key until the terminal receives the bracketed-paste mode request.
-        session.write_until(ENTER, None, false)?;
-        session.answers_due = Some(Instant::now() + ANSWER_WAIT);
-        if capabilities.asks_background() {
-            session.write_until(ASK_BACKGROUND, None, false)?;
+        self.write_until(ENTER, None, false)?;
+        self.answers_due = Some(Instant::now() + ANSWER_WAIT);
+        if self.capabilities.asks_background() {
+            self.write_until(ASK_BACKGROUND, None, false)?;
         }
-        if capabilities.graphics {
-            session.write_until(ASK_GRAPHICS, None, false)?;
+        if self.capabilities.graphics {
+            self.write_until(ASK_GRAPHICS, None, false)?;
         }
-        session.write_until(ASK_END, None, false)?;
-        session.answers_due = Some(Instant::now() + ANSWER_WAIT);
-        Ok(session)
+        self.write_until(ASK_END, None, false)?;
+        self.answers_due = Some(Instant::now() + ANSWER_WAIT);
+        Ok(())
     }
 
     pub(crate) fn capabilities(&self) -> Capabilities {
@@ -987,6 +1023,52 @@ mod tests {
             at += n;
         }
         assert!(output.starts_with(ENTER) && output.ends_with(LEAVE));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lent_terminal_has_the_shell_s_modes_and_gets_milo_s_back_after() {
+        let (keyboard, mut master) = test_pair();
+        let before = modes(&keyboard);
+        let mut terminal = Session::enter(
+            keyboard.try_clone().unwrap(),
+            keyboard.try_clone().unwrap(),
+            io::pipe().unwrap().0,
+            Capabilities::TEST,
+        )
+        .unwrap();
+        let raw = modes(&terminal.keyboard);
+        assert_ne!(raw, before);
+        // The program sees the modes the shell left, and reports them.
+        let seen = std::env::temp_dir().join(format!("milo-lent-{}", std::process::id()));
+        let mut lent = std::process::Command::new("/bin/sh");
+        lent.args(["-c", "stty -g > \"$0\"", seen.to_str().unwrap()]).stdin(keyboard.try_clone().unwrap());
+        assert!(terminal.lend(&mut lent, || true).unwrap());
+        assert_eq!(modes(&terminal.keyboard), raw);
+        assert!(!terminal.lend(&mut std::process::Command::new("false"), || true).unwrap());
+        let started = Instant::now();
+        let mut sleeper = std::process::Command::new("/bin/sleep");
+        sleeper.arg("30");
+        assert!(!terminal.lend(&mut sleeper, || false).unwrap(), "taken back from a program that may not keep it");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(terminal);
+        assert_eq!(modes(&keyboard), before);
+        let shown = std::fs::read_to_string(&seen).unwrap();
+        std::fs::remove_file(&seen).unwrap();
+        assert!(!shown.trim().is_empty());
+        let asked = ENTER.len() + ASK_BACKGROUND.len() + ASK_GRAPHICS.len() + ASK_END.len();
+        let mut output = vec![0; 3 * (asked + LEAVE.len())];
+        let mut at = 0;
+        while at < output.len() {
+            let mut ready = [libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+            assert!(wait_ready(&mut ready, 1000) > 0, "missing terminal output after {at} bytes");
+            let n = master.read(&mut output[at..]).unwrap();
+            assert_ne!(n, 0);
+            at += n;
+        }
+        for turn in output.chunks(asked + LEAVE.len()) {
+            assert!(turn.starts_with(ENTER) && turn.ends_with(LEAVE));
+        }
     }
 
     #[cfg(unix)]

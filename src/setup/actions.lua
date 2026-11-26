@@ -298,7 +298,7 @@ local function pane(role, cwd, shell, origin, trial)
   if origin then
     command = { milo, role, "--peek-origin", origin }
     if shell then command[5], command[6] = "--shell", shell end
-  elseif shell and role ~= "usage" then
+  elseif shell then
     command = { milo, role, "--shell", shell }
   end
   return rex.layout.block{
