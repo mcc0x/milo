@@ -61,6 +61,7 @@ pub const PROTOCOL: &str = "1";
 const OUTSIDE_REX: &str = "milo ssh follows a shell in a Rex tab; outside Rex, use ssh";
 const PROBE_WAIT: Duration = Duration::from_secs(20);
 const STOP_WAIT: Duration = Duration::from_secs(5);
+const LOST_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Request<'a> {
@@ -247,10 +248,17 @@ pub fn connect(request: &Request<'_>) -> Result<i32, String> {
     let mut session = ssh.session(true, false, remote.as_ref().map_or(&[], |words| &words[..]));
     let status = fs_ops::spawn(&mut session).and_then(|mut child| child.wait());
     link.remove(&state, &block);
-    let lost = matches!(master.try_wait(), Ok(Some(_)));
+    // ssh ends a shared session as the connection goes, a moment before its master.
+    let lost = status.as_ref().is_ok_and(|status| status.code() == Some(255)) && {
+        let until = Instant::now() + LOST_WAIT;
+        while matches!(master.try_wait(), Ok(None)) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        matches!(master.try_wait(), Ok(Some(_)))
+    };
     ssh.stop(&mut master);
     let status = status.map_err(|e| format!("cannot start ssh: {e}"))?;
-    if lost && status.code() == Some(255) {
+    if lost {
         eprintln!("milo: lost the connection to {}. This tab's panes are back on this computer.", request.host);
     }
     Ok(code(status))
