@@ -329,11 +329,11 @@ mod plain_path_tests {
         let plain = |text: &str| plain_path(PathBuf::from(text)).to_str().unwrap().to_owned();
         assert_eq!(plain(r"\\?\D:\a\_temp\project"), r"D:\a\_temp\project");
         assert_eq!(plain(r"\\?\D:\"), r"D:\");
-        for kept in [r"\\?\D:\a\name.", r"\\?\D:\a\name ", r"\\?\D:\a\con.txt", r"\\?\D:\COM1", r"\\?\UNC\host\share\a"] {
+        for kept in [r"\\?\D:\a\name.", r"\\?\D:\a\name ", r"\\?\D:\a\con.txt", r"\\?\D:\COM1", r"\\?\UNC\host\share\a"]
+        {
             assert_eq!(plain(kept), kept);
         }
         let long = format!(r"\\?\D:\{}", "a".repeat(300));
         assert_eq!(plain(&long), long);
     }
 }
-

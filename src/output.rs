@@ -124,7 +124,9 @@ impl Worktree {
         }
         let cwd = crate::sys::canonicalize(cwd).ok().filter(|dir| dir.is_dir())?;
         let checkout = git::checkout(&cwd).ok().flatten();
-        let root = checkout.and_then(|checkout| crate::sys::canonicalize(&checkout.root).ok()).filter(|root| cwd.starts_with(root));
+        let root = checkout
+            .and_then(|checkout| crate::sys::canonicalize(&checkout.root).ok())
+            .filter(|root| cwd.starts_with(root));
         Some(Self { root: root.unwrap_or_else(|| cwd.clone()), cwd })
     }
 
