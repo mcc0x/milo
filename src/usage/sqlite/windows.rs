@@ -8,9 +8,10 @@
 //!
 //! The answer is written as the sqlite3 shell's `-json` output, so the readers parse one format.
 
-use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
+use std::ffi::{CStr, CString, OsString, c_char, c_int, c_uint, c_void};
 use std::fs::File;
 use std::io;
+use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::windows::fs::FileExt as _;
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
@@ -57,6 +58,8 @@ unsafe extern "system" {
         overlapped: *mut Overlapped,
     ) -> i32;
     fn UnlockFileEx(file: *mut c_void, reserved: u32, low: u32, high: u32, overlapped: *mut Overlapped) -> i32;
+    fn GetFinalPathNameByHandleW(file: *mut c_void, path: *mut u16, len: u32, flags: u32) -> u32;
+    fn GetShortPathNameW(long: *const u16, short: *mut u16, len: u32) -> u32;
 }
 
 type Open = unsafe extern "system" fn(*const c_char, *mut *mut Db, c_int, *const c_char) -> c_int;
@@ -367,12 +370,26 @@ struct FileIdInfo {
     id: [u8; 16],
 }
 
+#[repr(C)]
+#[derive(Default)]
+struct FileStandardInfo {
+    allocation_size: i64,
+    end_of_file: i64,
+    number_of_links: u32,
+    delete_pending: u8,
+    directory: u8,
+}
+
 /// SQLite's lock bytes on a database on Windows, past the end of any database Milo reads.
 const PENDING_BYTE: u32 = 0x4000_0000;
 const SHARED_FIRST: u32 = PENDING_BYTE + 2;
 const SHARED_SIZE: u32 = 510;
 const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x1;
 const FILE_ID_INFO: c_int = 0x12;
+const FILE_STANDARD_INFO: c_int = 0x1;
+const FILE_NAME_NORMALIZED: u32 = 0;
+/// The longest path Windows names, in UTF-16 units.
+const MAX_PATH_UNITS: usize = 32_768;
 
 /// A shared lock on a byte range, released when dropped. Locks change no bytes.
 struct Held<'a> {
@@ -419,6 +436,66 @@ fn identity(file: &File) -> Option<(u64, [u8; 16])> {
     (found != 0).then_some((info.volume_serial, info.id))
 }
 
+/// Whether the open file has one name, so no other name can have a log or a journal beside it.
+fn one_name(file: &File) -> bool {
+    let mut info = FileStandardInfo::default();
+    let Ok(size) = u32::try_from(size_of::<FileStandardInfo>()) else { return false };
+    // SAFETY: The handle is open, and the output is a writable FILE_STANDARD_INFO of the size given.
+    let found =
+        unsafe { GetFileInformationByHandleEx(file.as_raw_handle(), FILE_STANDARD_INFO, (&raw mut info).cast(), size) };
+    found != 0 && info.number_of_links == 1 && info.delete_pending == 0 && info.directory == 0
+}
+
+/// A path's UTF-16 form, NUL-terminated.
+fn wide(path: &Path) -> Vec<u16> {
+    path.as_os_str().encode_wide().chain([0]).collect()
+}
+
+/// The text a Windows call wrote into `buffer`, if it fitted.
+fn written(buffer: &[u16], len: u32) -> Option<PathBuf> {
+    let len = usize::try_from(len).ok().filter(|&len| len > 0 && len < buffer.len())?;
+    Some(PathBuf::from(OsString::from_wide(&buffer[..len])))
+}
+
+/// The open file's own long name, as Windows records it.
+fn final_name(file: &File) -> Option<OsString> {
+    let mut buffer = vec![0u16; MAX_PATH_UNITS];
+    let len = u32::try_from(buffer.len()).ok()?;
+    // SAFETY: The handle is open, and the buffer holds `len` units.
+    let got =
+        unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), buffer.as_mut_ptr(), len, FILE_NAME_NORMALIZED) };
+    written(&buffer, got)?.file_name().map(ToOwned::to_owned)
+}
+
+/// The short (8.3) spelling of a path, when the volume keeps one that differs.
+fn short_spelling(path: &Path) -> Option<PathBuf> {
+    let long = wide(path);
+    let mut buffer = vec![0u16; MAX_PATH_UNITS];
+    let len = u32::try_from(buffer.len()).ok()?;
+    // SAFETY: The name is NUL-terminated, and the buffer holds `len` units.
+    let got = unsafe { GetShortPathNameW(long.as_ptr(), buffer.as_mut_ptr(), len) };
+    let short = written(&buffer, got)?;
+    let name = short.file_name()?;
+    (Some(name) != path.file_name()).then(|| path.with_file_name(name))
+}
+
+/// Every name SQLite could give this database's log, index and journal: the name it is read by,
+/// which must be its own long name, and that name's short spelling. A database known by any other
+/// name, through a second link, could have a writer whose files are beside that name instead.
+fn names(path: &Path, db: &File) -> Option<Vec<PathBuf>> {
+    let name = path.file_name()?;
+    if !one_name(db) || final_name(db)?.to_str()?.to_lowercase() != name.to_str()?.to_lowercase() {
+        return None;
+    }
+    Some([Some(path.to_owned()), short_spelling(path)].into_iter().flatten().collect())
+}
+
+/// Whether a log or an index is beside a database, as one is while any connection uses it through a
+/// write-ahead log. Only names are looked at.
+pub(in crate::usage) fn in_use(path: &Path) -> bool {
+    ["-wal", "-shm"].into_iter().any(|suffix| std::fs::symlink_metadata(sidecar(path, suffix)).is_ok())
+}
+
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
@@ -457,16 +534,22 @@ pub(super) enum Attempt {
 /// so a database with a log or an index beside it is left unread. With neither, the database file
 /// holds every committed transaction. SQLite's shared lock, held for the copy, keeps rollback writers
 /// out of the file and keeps a connection that opens meanwhile from removing the log and index it
-/// makes; finding neither after the copy, and the same file at the same size, means none did. The
-/// sidecars are looked for before the lock too, so a database in use is never locked at all.
+/// makes; finding neither after the copy, and the same file at the same size, means none did. That
+/// holds only for the names the files are looked for under, so a database with a second link, or
+/// read by a name other than its own, is left unread. The sidecars are looked for before the lock
+/// too, so a database already in use when a look starts is not locked.
 pub(super) fn copy(path: &Path, limit: u64, deadline: Instant) -> Attempt {
     use Attempt::{Again, Unreadable};
     let Ok(Some(db)) = open(path) else { return Unreadable };
     if db.metadata().map_or(true, |m| m.len() > limit) {
         return Unreadable;
     }
-    let (log, index) = (sidecar(path, "-wal"), sidecar(path, "-shm"));
-    let quiet = || now_at(&log) == Ok(None) && now_at(&index) == Ok(None);
+    let Some(names) = names(path, &db) else { return Unreadable };
+    let quiet = || {
+        names
+            .iter()
+            .all(|name| now_at(&sidecar(name, "-wal")) == Ok(None) && now_at(&sidecar(name, "-shm")) == Ok(None))
+    };
     if !quiet() {
         return Unreadable;
     }
@@ -475,15 +558,18 @@ pub(super) fn copy(path: &Path, limit: u64, deadline: Instant) -> Attempt {
         return Unreadable;
     }
     // A journal that starts with anything but zero belongs to a transaction only its writer can finish or undo.
-    match open(&sidecar(path, "-journal")) {
-        Ok(None) => {}
-        Ok(Some(journal)) if start(&journal, 1).is_some_and(|b| b.first().is_none_or(|&b| b == 0)) => {}
-        Ok(Some(_)) => return Again,
-        Err(()) => return Unreadable,
+    for name in &names {
+        match open(&sidecar(name, "-journal")) {
+            Ok(None) => {}
+            Ok(Some(journal)) if start(&journal, 1).is_some_and(|b| b.first().is_none_or(|&b| b == 0)) => {}
+            Ok(Some(_)) => return Again,
+            Err(()) => return Unreadable,
+        }
     }
     let (Some(id), Ok(size)) = (identity(&db), db.metadata().map(|m| m.len())) else { return Unreadable };
     let Some(bytes) = read_all(&db, limit, deadline) else { return Unreadable };
-    let settled = quiet() && now_at(path) == Ok(Some(id)) && db.metadata().is_ok_and(|m| m.len() == size);
+    let settled =
+        quiet() && one_name(&db) && now_at(path) == Ok(Some(id)) && db.metadata().is_ok_and(|m| m.len() == size);
     if !settled {
         return Again;
     }

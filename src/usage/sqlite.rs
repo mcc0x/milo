@@ -21,7 +21,7 @@ mod windows;
 #[cfg(all(test, windows))]
 pub(super) use windows::Writer;
 #[cfg(windows)]
-pub(super) use windows::too_large;
+pub(super) use windows::{in_use, too_large};
 
 const INTERVAL: Duration = Duration::from_secs(20);
 /// A database whose files have not changed is still read again this often,
@@ -119,6 +119,11 @@ impl<T: Send + 'static> Poll<T> {
 
     pub(super) fn fd(&self) -> Option<RawFd> {
         self.job.as_ref().map(Job::fd)
+    }
+
+    #[cfg(windows)]
+    pub(super) fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     /// None means there is no completed query; a completed query can also fail.

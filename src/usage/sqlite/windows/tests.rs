@@ -206,6 +206,36 @@ fn a_link_to_a_database_is_refused_and_nothing_is_made_beside_it() {
 }
 
 #[test]
+fn a_database_with_a_second_link_is_left_unread_under_either_name() {
+    let f = Fixture::folder();
+    let path = closed(&f);
+    let folder = path.parent().unwrap();
+    let link = folder.join("other.db");
+    fs::hard_link(&path, &link).unwrap();
+    let before = state(folder);
+    assert_eq!(count(&path), None, "a database with a second name was read");
+    assert_eq!(count(&link), None, "a second name of a database was read");
+    assert!(state(folder) == before, "a query changed the folder of a linked database");
+    fs::remove_file(&link).unwrap();
+    assert_eq!(count(&path).as_deref(), Some("[{\"c\":1}]\n"));
+}
+
+#[test]
+fn a_database_is_read_only_by_its_own_name_and_a_log_beside_its_short_name_counts() {
+    let f = Fixture::folder();
+    let path = f.root.join("long agent database.db");
+    let writer = Writer::open(&path);
+    writer.exec("CREATE TABLE t(n); INSERT INTO t VALUES (1);");
+    drop(writer);
+    let Some(short) = short_spelling(&path) else { return };
+    assert_eq!(count(&short), None, "a database was read by its short name");
+    assert_eq!(count(&path).as_deref(), Some("[{\"c\":1}]\n"));
+    fs::write(sidecar(&short, "-wal"), b"").unwrap();
+    assert!(in_use(&short));
+    assert_eq!(count(&path), None, "a log beside the short name was missed");
+}
+
+#[test]
 fn time_output_and_size_are_bounded() {
     let f = Fixture::folder();
     let path = closed(&f);

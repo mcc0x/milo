@@ -983,6 +983,8 @@ pub struct Usage {
     large_figures: bool,
     tools: UsageTools,
     preference_note: Option<&'static str>,
+    /// Whether the last look found OMP or OpenCode using its database, which Windows leaves unread.
+    databases_in_use: bool,
     #[cfg(test)]
     fixed_now: Option<i64>,
     #[cfg(test)]
@@ -998,12 +1000,9 @@ impl Usage {
             .with_large_figures(prefs.usage_large_figures);
         let (omp, opencode) = (omp::database(home.as_deref()), opencode::database(home.as_deref()));
         #[cfg(windows)]
-        let (present, large) = {
-            let found: Vec<_> = [&omp, &opencode].into_iter().flatten().filter(|path| path.is_file()).collect();
-            (!found.is_empty(), found.into_iter().any(|path| sqlite::too_large(path)))
-        };
+        let large = [&omp, &opencode].into_iter().flatten().any(|path| sqlite::too_large(path));
         #[cfg(unix)]
-        let (present, large) = (false, false);
+        let large = false;
         let mut usage = usage.with_databases(omp, opencode, sqlite::QUERY_WAIT);
         if cfg!(windows) {
             usage.preference_note = if prefs.usage_accounts.any() {
@@ -1011,7 +1010,7 @@ impl Usage {
             } else if large {
                 Some("OMP and OpenCode databases over 64 MiB are not read on Windows yet.")
             } else {
-                note.or(present.then_some("On Windows, OMP and OpenCode usage is read only while they are closed."))
+                note
             };
             return usage;
         }
@@ -1093,6 +1092,7 @@ impl Usage {
             large_figures: false,
             tools: UsageTools::default(),
             preference_note: None,
+            databases_in_use: false,
             #[cfg(test)]
             fixed_now: Some(now),
             #[cfg(test)]
@@ -1127,6 +1127,11 @@ impl Usage {
             self.opencode.poll.start(now, clock);
         }
         self.accounts.start(now, clock, manual);
+        #[cfg(windows)]
+        {
+            self.databases_in_use =
+                [self.omp.path(), self.opencode.poll.path()].into_iter().flatten().any(sqlite::in_use);
+        }
         let mut codex_budget = Budget::new(CODEX_BYTES);
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
         self.check_limits(&mut claude_budget);
@@ -1236,7 +1241,9 @@ impl Usage {
 
 impl Pane for Usage {
     fn notice(&self) -> Option<&'static str> {
-        self.preference_note
+        self.preference_note.or(self
+            .databases_in_use
+            .then_some("On Windows, OMP and OpenCode usage is read only while they are closed."))
     }
 
     fn check(&mut self) -> bool {

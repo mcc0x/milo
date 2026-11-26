@@ -296,17 +296,20 @@ mod databases {
         assert_eq!(frame(&mut usage, 22, 2), ["Codex · checking", "Claude · checking"]);
         finish(&mut usage);
         assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 75% left", "Claude no saved limits"]);
+        assert_eq!(usage.notice(), None);
 
         let writer = Writer::open(&path);
         omp_report(&writer, "0.65");
         assert_eq!(usage.key(Key::Char('r')), After::Stay);
         settle(&mut usage);
         assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 75% left", "Claude no saved limits"]);
+        assert_eq!(usage.notice(), Some("On Windows, OMP and OpenCode usage is read only while they are closed."));
 
         drop(writer);
         assert_eq!(usage.key(Key::Char('r')), After::Stay);
         finish(&mut usage);
         assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 35% left", "Claude no saved limits"]);
+        assert_eq!(usage.notice(), None);
     }
 
     #[test]
