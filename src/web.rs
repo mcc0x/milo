@@ -1,58 +1,53 @@
 //! Serves the settings editor on an ephemeral loopback address for this invocation only.
 
-#[cfg(unix)]
 mod assets;
-#[cfg(unix)]
 mod http;
 #[cfg(unix)]
+mod launch;
+#[cfg(windows)]
+#[path = "web/launch_windows.rs"]
 mod launch;
 #[cfg(unix)]
 mod remote;
 
-#[cfg(unix)]
-use crate::sys::AsRawFd;
+use crate::sys::{AsRawFd, SocketFd as _};
 use std::ffi::OsStr;
 #[cfg(unix)]
 use std::fs::File;
-#[cfg(unix)]
 use std::io::{self, PipeReader, Read, Write};
 #[cfg(unix)]
 use std::mem::MaybeUninit;
-#[cfg(unix)]
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::fd::IntoRawFd;
-#[cfg(unix)]
+#[cfg(windows)]
+use std::os::windows::io::IntoRawHandle as _;
 use std::sync::Arc;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
+#[cfg(windows)]
+use std::sync::atomic::AtomicIsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-#[cfg(unix)]
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
 use self::http::{Access, Input, Request, Response, Route};
-#[cfg(unix)]
 use self::launch::Launch;
 #[cfg(unix)]
-use crate::rex::{self, Viewers};
-#[cfg(unix)]
+use crate::rex;
+use crate::rex::Viewers;
 use crate::setup::web::Editor;
 
 pub(crate) const DEFAULT_PORT: u16 = 6110;
-#[cfg(unix)]
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-#[cfg(unix)]
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(unix)]
 const MAX_CLIENTS: usize = 16;
-#[cfg(unix)]
 static STOP: AtomicBool = AtomicBool::new(false);
 #[cfg(unix)]
 static WAKE_WRITER: AtomicI32 = AtomicI32::new(-1);
+#[cfg(windows)]
+static WAKE_WRITER: AtomicIsize = AtomicIsize::new(-1);
 
-#[cfg(unix)]
 // Browsers omit the default port in both Host and Origin.
 fn http_authority(address: std::net::SocketAddr) -> String {
     if address.port() == 80 { address.ip().to_string() } else { address.to_string() }
@@ -71,29 +66,35 @@ pub(crate) enum Start<'a> {
     Host { host: &'a OsStr, project: Option<&'a OsStr>, open_browser: bool, port: u16 },
 }
 
-#[cfg(unix)]
 /// What `milo web --forwarded-port` prints after its link, so that the
 /// computer carrying the forward knows which port to carry it to.
 pub(crate) const FORWARD_TARGET: &str = "milo web: serving a forward on 127.0.0.1:";
 
-#[cfg(windows)]
-pub(crate) fn run(_: Start<'_>) -> Result<(), String> {
-    Err("milo web is not supported on Windows yet.".into())
-}
-
-#[cfg(unix)]
 pub(crate) fn run(start: Start<'_>) -> Result<(), String> {
+    #[cfg(windows)]
+    match start {
+        Start::Local { .. } => {}
+        Start::Forwarded { .. } => return Err("milo web --forwarded-port is not supported on Windows yet.".into()),
+        Start::Host { .. } => return Err("milo web --host is not supported on Windows yet.".into()),
+    }
     STOP.store(false, Ordering::Relaxed);
     let wake = WakePipe::open().map_err(|error| format!("could not create a termination pipe: {error}"))?;
+    #[cfg(unix)]
     let install =
         |signal| Signal::install(signal).map_err(|error| format!("could not handle termination signals: {error}"));
+    #[cfg(unix)]
     let _signals = (install(libc::SIGINT)?, install(libc::SIGTERM)?, install(libc::SIGHUP)?, install(libc::SIGQUIT)?);
+    #[cfg(windows)]
+    let _control = ConsoleControl::install().map_err(|error| format!("could not handle Ctrl-C: {error}"))?;
     let (open_browser, port, forwarded_port) = match start {
         Start::Local { open_browser, port } => (open_browser, port, None),
         Start::Forwarded { port, forwarded_port } => (false, port, Some(forwarded_port)),
+        #[cfg(unix)]
         Start::Host { host, project, open_browser, port } => {
             return remote::run(&remote::Request { host, project, open_browser, port }, &wake.0);
         }
+        #[cfg(windows)]
+        Start::Host { .. } => unreachable!("refused above"),
     };
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
         .map_err(|error| format!("could not listen on 127.0.0.1:{port}: {error}; use --port 0 for a free port"))?;
@@ -122,7 +123,7 @@ pub(crate) fn run(start: Start<'_>) -> Result<(), String> {
     }
     let mut launcher = None;
     let viewers = if open_browser {
-        let checked = open_beside(&wake.0, &mut launcher, rex::viewers);
+        let checked = open_beside(&wake.0, &mut launcher, viewers);
         let Some(viewers) = checked.map_err(|error| format!("could not check the Rex apps: {error}"))? else {
             return Ok(());
         };
@@ -134,7 +135,7 @@ pub(crate) fn run(start: Start<'_>) -> Result<(), String> {
     // The listener already holds the browser's connections. None is answered
     // before the editor is whole, and the viewer check need not run twice.
     let opened = open_beside(&wake.0, &mut launcher, move || {
-        Editor::open(forwarded_port.is_some(), || if open_browser { viewers } else { rex::viewers() })
+        Editor::open(forwarded_port.is_some(), || if open_browser { viewers } else { self::viewers() })
     });
     let Some(editor) = opened.map_err(|error| format!("could not open the editor: {error}"))? else {
         return Ok(());
@@ -142,7 +143,14 @@ pub(crate) fn run(start: Start<'_>) -> Result<(), String> {
     serve(listener, &wake.0, &access, editor, launcher).map_err(|error| format!("settings server: {error}"))
 }
 
-#[cfg(unix)]
+/// Which Rex apps could show the page. Rex does not run natively on Windows, so none is asked there.
+fn viewers() -> Option<Viewers> {
+    #[cfg(unix)]
+    return rex::viewers();
+    #[cfg(windows)]
+    None
+}
+
 fn launch_browser(url: &str, viewers: Option<Viewers>) -> Option<Launch> {
     if STOP.load(Ordering::Relaxed) {
         return None;
@@ -165,7 +173,6 @@ fn launch_browser(url: &str, viewers: Option<Viewers>) -> Option<Launch> {
     }
 }
 
-#[cfg(unix)]
 /// Runs a startup step off the server loop while keeping the browser handoff
 /// in order. Its file must still go when its time is up or Milo is stopped.
 /// Returns None when stopped first, leaving the read to the end of the process.
@@ -206,11 +213,13 @@ fn open_beside<T: Send + 'static>(
     }
 }
 
-#[cfg(unix)]
 fn random_token() -> io::Result<String> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut bytes = [0; 32];
+    #[cfg(unix)]
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    #[cfg(windows)]
+    crate::sys::random(&mut bytes)?;
     let mut token = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         token.push(char::from(HEX[usize::from(byte >> 4)]));
@@ -225,33 +234,79 @@ extern "C" fn stop(_: libc::c_int) {
     close_wake_writer();
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn SetConsoleCtrlHandler(handler: Option<unsafe extern "system" fn(u32) -> i32>, add: i32) -> i32;
+    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+}
+
+/// Ctrl-C, Ctrl-Break, closing the console, logging off and shutting down stop the server
+/// the way termination signals do on Unix. The handler runs on a thread of its own.
+#[cfg(windows)]
+unsafe extern "system" fn on_control(_event: u32) -> i32 {
+    STOP.store(true, Ordering::Relaxed);
+    close_wake_writer();
+    1
+}
+
+#[cfg(windows)]
+struct ConsoleControl;
+
+#[cfg(windows)]
+impl ConsoleControl {
+    fn install() -> io::Result<Self> {
+        // SAFETY: The handler only stores an atomic and closes a handle it takes from that atomic,
+        // and it lives for the whole program.
+        if unsafe { SetConsoleCtrlHandler(Some(on_control), 1) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ConsoleControl {
+    fn drop(&mut self) {
+        // SAFETY: This removes the handler that `install` added.
+        unsafe { SetConsoleCtrlHandler(Some(on_control), 0) };
+    }
+}
+
 struct WakePipe(PipeReader);
 
-#[cfg(unix)]
 impl WakePipe {
     fn open() -> io::Result<Self> {
         let (reader, writer) = io::pipe()?;
+        #[cfg(unix)]
         WAKE_WRITER.store(writer.into_raw_fd(), Ordering::Relaxed);
+        #[cfg(windows)]
+        WAKE_WRITER.store(writer.into_raw_handle() as isize, Ordering::Relaxed);
         Ok(Self(reader))
     }
 }
 
-#[cfg(unix)]
 impl Drop for WakePipe {
     fn drop(&mut self) {
         close_wake_writer();
     }
 }
 
-#[cfg(unix)]
 fn close_wake_writer() {
     // Whichever path takes the writer owns it. Closing it wakes poll with POLLHUP,
     // even for a signal delivered on a different thread or just before poll starts.
     let fd = WAKE_WRITER.swap(-1, Ordering::Relaxed);
     if fd >= 0 {
         // SAFETY: The atomic holds the sole write end of the pipe, and close is async-signal-safe.
-        unsafe { libc::close(fd) };
+        #[cfg(unix)]
+        unsafe {
+            libc::close(fd)
+        };
+        // SAFETY: The atomic holds the sole write end of the pipe, which nothing else closes.
+        #[cfg(windows)]
+        unsafe {
+            CloseHandle(fd as *mut std::ffi::c_void)
+        };
     }
 }
 
@@ -284,7 +339,6 @@ impl Drop for Signal {
     }
 }
 
-#[cfg(unix)]
 fn serve(
     listener: TcpListener,
     wake: &PipeReader,
@@ -318,14 +372,12 @@ fn serve(
     result
 }
 
-#[cfg(unix)]
 struct EditorWorker {
     send: SyncSender<EditorJob>,
     receive: Receiver<Completion>,
     ready: PipeReader,
 }
 
-#[cfg(unix)]
 impl EditorWorker {
     fn submit(&self, job: EditorJob) -> io::Result<()> {
         // The poll loop submits only when no other job is in flight.
@@ -338,7 +390,6 @@ impl EditorWorker {
     }
 }
 
-#[cfg(unix)]
 fn serve_clients(
     listener: TcpListener,
     wake: &PipeReader,
@@ -374,10 +425,10 @@ fn serve_clients(
         }
         let polled_clients = clients.len();
         let sockets = polled_clients + usize::from(active.is_some()) + usize::from(pending.is_some());
-        fds[0].fd = if closing || sockets == MAX_CLIENTS { -1 } else { listener.as_raw_fd() };
+        fds[0].fd = if closing || sockets == MAX_CLIENTS { -1 } else { listener.socket_fd() };
         for (fd, client) in fds[3..].iter_mut().zip(&clients) {
             deadline = deadline.min(client.deadline);
-            *fd = crate::sys::pollfd { fd: client.socket.as_raw_fd(), events: client.interest(), revents: 0 };
+            *fd = crate::sys::pollfd { fd: client.socket.socket_fd(), events: client.interest(), revents: 0 };
         }
         let timeout = crate::term::milliseconds(deadline.saturating_duration_since(Instant::now()));
         let ready = crate::term::wait_ready(&mut fds[..polled_clients + 3], timeout);
@@ -474,20 +525,17 @@ fn serve_clients(
     Ok(())
 }
 
-#[cfg(unix)]
 struct Client {
     socket: TcpStream,
     exchange: Exchange,
     deadline: Instant,
 }
 
-#[cfg(unix)]
 enum Exchange {
     Reading(Request),
     Writing(Response),
 }
 
-#[cfg(unix)]
 enum Progress {
     Wait,
     Reply { authenticated: bool },
@@ -495,7 +543,6 @@ enum Progress {
     Done,
 }
 
-#[cfg(unix)]
 impl Client {
     fn new(socket: TcpStream) -> io::Result<Self> {
         socket.set_nonblocking(true)?;
@@ -544,7 +591,6 @@ impl Client {
     }
 }
 
-#[cfg(unix)]
 fn respond_read(route: Route, snapshot: &Arc<String>) -> Response {
     match route {
         Route::Static(asset) => asset.response(),
@@ -558,23 +604,24 @@ fn respond_read(route: Route, snapshot: &Arc<String>) -> Response {
     }
 }
 
-#[cfg(unix)]
 struct EditorJob {
     route: Route,
     request: Request,
 }
 
-#[cfg(unix)]
 struct Completion {
     response: Response,
     snapshot: Option<Arc<String>>,
     close: bool,
 }
 
-#[cfg(unix)]
 impl EditorJob {
     fn apply(self, editor: &mut Editor, hosted: &mut Vec<HostedReceipt>) -> Completion {
         let body = self.request.body();
+        if cfg!(windows) && matches!(self.route, Route::TelegramChats | Route::HostedConnect) {
+            let response = Response::bad_request("Alerts are not supported on Windows yet.");
+            return Completion { response, snapshot: None, close: false };
+        }
         if self.route == Route::MenuIndicator {
             // The committed draft snapshot can be served while the worker is busy.
             // Only this explicit menu read needs to observe another client's save.
@@ -606,7 +653,6 @@ impl EditorJob {
     }
 }
 
-#[cfg(unix)]
 fn respond_close(body: &[u8], editor: &mut Editor) -> (Response, bool) {
     use crate::setup::web::CloseError;
 
@@ -625,7 +671,6 @@ fn respond_close(body: &[u8], editor: &mut Editor) -> (Response, bool) {
     (response, false)
 }
 
-#[cfg(unix)]
 /// A preview or an export answers with its own data and leaves the editor
 /// as it was. An import or its undo answers with the editor's new state.
 fn respond_transfer(body: &[u8], editor: &mut Editor) -> Completion {
@@ -643,7 +688,6 @@ fn respond_transfer(body: &[u8], editor: &mut Editor) -> Completion {
     }
 }
 
-#[cfg(unix)]
 fn respond_telegram_chats(body: &[u8], editor: &Editor) -> Response {
     use crate::alerts::TelegramChatsError::{InvalidToken, Unavailable};
 
@@ -656,21 +700,18 @@ fn respond_telegram_chats(body: &[u8], editor: &Editor) -> Response {
     }
 }
 
-#[cfg(unix)]
 struct HostedReceipt {
     key: String,
     end: Instant,
     outcome: HostedOutcome,
 }
 
-#[cfg(unix)]
 #[derive(Clone, Copy)]
 enum HostedOutcome {
     Saved,
     Discarded { cleanup_confirmed: bool },
 }
 
-#[cfg(unix)]
 fn respond_hosted_connect(body: &[u8], editor: &mut Editor, receipts: &mut Vec<HostedReceipt>) -> Completion {
     use crate::alerts::relay::{ConnectError, Connected, ConnectionRequest};
     use crate::setup::web::HostedSaveError;
@@ -732,7 +773,6 @@ fn respond_hosted_connect(body: &[u8], editor: &mut Editor, receipts: &mut Vec<H
     reply
 }
 
-#[cfg(unix)]
 fn hosted_replay(receipts: &mut Vec<HostedReceipt>, key: &str, now: Instant, editor: &Editor) -> Option<Completion> {
     receipts.retain(|receipt| receipt.end > now);
     let receipt = receipts.iter().find(|receipt| receipt.key == key)?;
@@ -744,13 +784,11 @@ fn hosted_replay(receipts: &mut Vec<HostedReceipt>, key: &str, now: Instant, edi
     })
 }
 
-#[cfg(unix)]
 fn hosted_saved(state: String) -> Completion {
     let snapshot = Arc::new(state);
     Completion { response: Response::json(Arc::clone(&snapshot)), snapshot: Some(snapshot), close: false }
 }
 
-#[cfg(unix)]
 fn hosted_error(error: crate::alerts::relay::ConnectError) -> Response {
     use crate::alerts::relay::ConnectError;
 
@@ -771,7 +809,6 @@ fn hosted_error(error: crate::alerts::relay::ConnectError) -> Response {
     }
 }
 
-#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,12 +867,81 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn forwards_and_other_hosts_are_not_supported_on_windows_yet() {
+        assert_eq!(
+            run(Start::Forwarded { port: 0, forwarded_port: 80 }),
+            Err("milo web --forwarded-port is not supported on Windows yet.".into())
+        );
+        let host = Start::Host { host: OsStr::new("example"), project: None, open_browser: false, port: 0 };
+        assert_eq!(run(host), Err("milo web --host is not supported on Windows yet.".into()));
+    }
+
+    #[test]
+    fn a_save_over_http_is_there_after_the_server_restarts() {
+        const BEARER: &str = "Bearer restart";
+        let folder = Fixture::folder();
+
+        fn exchange(address: std::net::SocketAddr, method: &str, path: &str, body: &str) -> String {
+            let mut socket = TcpStream::connect(address).unwrap();
+            socket.set_read_timeout(Some(IO_TIMEOUT * 2)).unwrap();
+            write!(
+                socket,
+                "{method} {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: http://{address}\r\nAuthorization: {BEARER}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            let mut reply = String::new();
+            socket.read_to_string(&mut reply).unwrap();
+            reply
+        }
+
+        // One server's whole life: what `visit` does with its address, then Done.
+        let session = |visit: &dyn Fn(std::net::SocketAddr) -> u64| {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let host = address.to_string();
+            let origin = format!("http://{host}");
+            let access = Access { host: &host, origin: &origin, bearer: BEARER };
+            let (wake, running) = io::pipe().unwrap();
+            std::thread::scope(|scope| {
+                let server = scope.spawn(|| serve(listener, &wake, &access, Editor::test_outside(&folder), None));
+                // A failed check stops the server instead of leaving it to wait for Done.
+                let _stop_on_failure = running;
+                let version = visit(address);
+                let done = exchange(address, "POST", "/api/close", &format!(r#"{{"version":{version}}}"#));
+                assert!(done.starts_with("HTTP/1.1 204 No Content\r\n"), "{done}");
+                server.join().unwrap().unwrap();
+            });
+        };
+
+        session(&|address| {
+            let state = exchange(address, "GET", "/api/state", "");
+            assert!(state.contains(r#""appearance":{"icons":"plain""#), "{state}");
+            let set = r#"{"version":1,"action":"set","field":"appearance.icons","value":"off"}"#;
+            assert!(exchange(address, "POST", "/api/action", set).starts_with("HTTP/1.1 200 OK\r\n"));
+            let save = r#"{"version":2,"action":"save","group":"preferences","scope":"global"}"#;
+            let saved = exchange(address, "POST", "/api/action", save);
+            assert!(saved.starts_with("HTTP/1.1 200 OK\r\n") && saved.contains(r#""dirty":false"#), "{saved}");
+            3
+        });
+        session(&|address| {
+            let state = exchange(address, "GET", "/api/state", "");
+            assert!(state.contains(r#""appearance":{"icons":"off""#), "the save was lost on restart: {state}");
+            1
+        });
+    }
+
     #[test]
     fn session_authority_matches_browser_origin_serialization() {
         assert_eq!(http_authority((Ipv4Addr::LOCALHOST, 80).into()), "127.0.0.1");
         assert_eq!(http_authority((Ipv4Addr::LOCALHOST, 6110).into()), "127.0.0.1:6110");
     }
 
+    #[cfg(unix)]
     /// A browser handoff made by an opener that runs `script`, and a count of the files left of it.
     fn handoff(folder: &Fixture, script: &str) -> (Option<Launch>, impl Fn() -> usize) {
         let mut opener = std::process::Command::new("/bin/sh");
@@ -845,6 +951,7 @@ mod tests {
         (Some(launch), move || std::fs::read_dir(&root).unwrap().count())
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_failed_handoff_is_removed_while_the_editor_is_still_opening() {
         let folder = Fixture::folder();
@@ -864,6 +971,7 @@ mod tests {
         assert!(launcher.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn stopping_while_the_editor_opens_removes_the_handoff_without_waiting_for_it() {
         let folder = Fixture::folder();
@@ -934,6 +1042,7 @@ mod tests {
         close(&mut editor, current.as_bytes(), b"HTTP/1.1 204 No Content\r\n", true);
     }
 
+    #[cfg(unix)]
     #[test]
     fn close_waits_for_the_active_trial_to_undo() {
         use std::fs;
@@ -1005,6 +1114,7 @@ mod tests {
         assert_eq!(fs::read_to_string("undo.log").unwrap(), "undo\nundo\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn reads_serve_the_committed_snapshot_while_an_action_waits_for_rex() {
         use std::fs;
@@ -1138,13 +1248,4 @@ mod tests {
             result.unwrap();
         });
     }
-}
-
-#[cfg(all(test, windows))]
-#[test]
-fn the_settings_dashboard_is_unsupported_on_windows() {
-    assert_eq!(
-        run(Start::Local { open_browser: false, port: 0 }),
-        Err("milo web is not supported on Windows yet.".into())
-    );
 }

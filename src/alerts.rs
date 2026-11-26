@@ -558,6 +558,10 @@ enum ForwardingChange {
 
 impl Alerts {
     pub(crate) fn real() -> Option<Self> {
+        // Alerts are not supported on Windows yet; Settings shows them as unavailable there.
+        if cfg!(windows) {
+            return None;
+        }
         let profile::Profile { config, state, secrets, isolated } = profile::Profile::real()?;
         let named = cfg!(debug_assertions).then(|| std::env::var(TEST_ENDPOINT).ok()).flatten();
         let stand_in = named.and_then(|named| stand_in(&named).map(str::to_owned));

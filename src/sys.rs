@@ -19,7 +19,11 @@ pub(crate) use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub(crate) use windows::{AsFd, AsRawFd, BorrowedFd, Job, POLLIN, POLLOUT, RawFd, pollfd};
+pub(crate) use windows::{
+    AsFd, AsRawFd, BorrowedFd, Existing, Job, POLLIN, POLLOUT, RawFd, pollfd, private_file, random,
+};
+#[cfg(all(windows, test))]
+pub(crate) use windows::{file_security, private_security};
 
 /// Waits up to `timeout_ms` for any of `fds` to be ready, or forever when it is negative.
 /// Returns how many are ready, zero on timeout, or a negative result on failure or interruption.
@@ -32,6 +36,25 @@ pub(crate) fn poll(fds: &mut [pollfd], timeout_ms: i32) -> i32 {
     }
     #[cfg(windows)]
     windows::poll(fds, timeout_ms)
+}
+
+/// A socket as a descriptor that [`poll`] can wait on. Windows keeps sockets apart from other handles.
+pub(crate) trait SocketFd {
+    fn socket_fd(&self) -> RawFd;
+}
+
+#[cfg(unix)]
+impl<T: AsRawFd> SocketFd for T {
+    fn socket_fd(&self) -> RawFd {
+        self.as_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl<T: std::os::windows::io::AsRawSocket> SocketFd for T {
+    fn socket_fd(&self) -> RawFd {
+        RawFd::try_from(self.as_raw_socket()).unwrap_or(-1)
+    }
 }
 
 /// Makes writes to a pipe end return at once rather than wait for room. Read such an end
@@ -228,6 +251,32 @@ mod tests {
         }
         let mut fds = [pollfd { fd: reader.as_raw_fd(), events: POLLIN, revents: 0 }];
         assert_eq!(poll(&mut fds, 0), 1);
+    }
+
+    #[test]
+    fn a_socket_is_ready_for_a_connection_input_and_its_peer_closing() {
+        use std::net::{Ipv4Addr, TcpListener, TcpStream};
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut fds = [pollfd { fd: listener.socket_fd(), events: POLLIN, revents: 0 }];
+        assert_eq!(poll(&mut fds, 0), 0);
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        assert_eq!(poll(&mut fds, 5000), 1);
+        let (server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let mut fds = [pollfd { fd: server.socket_fd(), events: POLLIN, revents: 0 }];
+        assert_eq!(poll(&mut fds, 0), 0, "nothing to read yet");
+        fds[0].events = POLLOUT;
+        assert_eq!(poll(&mut fds, 5000), 1);
+        assert_ne!(fds[0].revents & POLLOUT, 0);
+        client.write_all(b"ab").unwrap();
+        fds[0].events = POLLIN;
+        assert_eq!(poll(&mut fds, 5000), 1);
+        let mut buf = [0; 8];
+        assert_eq!(io::Read::read(&mut &server, &mut buf).unwrap(), 2);
+        drop(client);
+        assert_eq!(poll(&mut fds, 5000), 1);
+        assert_eq!(io::Read::read(&mut &server, &mut buf).unwrap(), 0);
     }
 
     #[test]

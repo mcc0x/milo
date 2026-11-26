@@ -1,9 +1,12 @@
 //! Windows forms of the facilities in [`super`]: handle values, readiness checks and file identity.
 
 use std::ffi::c_void;
+use std::fs::File;
 use std::io;
+use std::os::windows::ffi::OsStrExt as _;
+use std::os::windows::fs::MetadataExt as _;
 use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle as _, OwnedHandle};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// A handle's value. -1 is `INVALID_HANDLE_VALUE`, which a wait skips like a negative descriptor.
@@ -131,13 +134,17 @@ pub(super) fn available(fd: RawFd) -> Available {
 
 /// What a handle is ready for now, out of `events`.
 fn readiness(fd: RawFd, events: i16) -> i16 {
+    // SAFETY: The call only inspects the handle and fails for one that is not open.
+    let kind = unsafe { GetFileType(handle(fd)) };
+    // Windows reports a socket as a pipe, but only Winsock can say what a socket is ready for.
+    if kind == FILE_TYPE_PIPE && is_socket(fd) {
+        return socket_readiness(fd, events);
+    }
     // Writes to pipes and the console are not made to fail early, so a writer is never held back here.
     let mut ready = events & POLLOUT;
     if events & POLLIN == 0 {
         return ready;
     }
-    // SAFETY: The call only inspects the handle and fails for one that is not open.
-    let kind = unsafe { GetFileType(handle(fd)) };
     ready |= match kind {
         FILE_TYPE_PIPE => match available(fd) {
             Available::Bytes(0) => 0,
@@ -160,6 +167,56 @@ fn readiness(fd: RawFd, events: i16) -> i16 {
         _ if unsafe { WaitForSingleObject(handle(fd), 0) } == WAIT_OBJECT_0 => POLLIN,
         _ => 0,
     };
+    ready
+}
+
+#[repr(C)]
+struct WsaPollFd {
+    socket: usize,
+    events: i16,
+    revents: i16,
+}
+
+const SOL_SOCKET: i32 = 0xffff;
+const SO_TYPE: i32 = 0x1008;
+const WSA_POLLRDNORM: i16 = 0x100;
+const WSA_POLLWRNORM: i16 = 0x10;
+const WSA_POLLERR: i16 = 0x1;
+const WSA_POLLHUP: i16 = 0x2;
+const WSA_POLLNVAL: i16 = 0x4;
+
+#[link(name = "ws2_32")]
+unsafe extern "system" {
+    fn getsockopt(socket: usize, level: i32, name: i32, value: *mut c_void, length: *mut i32) -> i32;
+    fn WSAPoll(fds: *mut WsaPollFd, count: u32, timeout: i32) -> i32;
+}
+
+fn is_socket(fd: RawFd) -> bool {
+    let (mut kind, mut length) = (0i32, 4i32);
+    // SAFETY: Both outputs are writable and `length` is the size of `kind`; a handle that is not a socket fails the call.
+    unsafe { getsockopt(fd.cast_unsigned(), SOL_SOCKET, SO_TYPE, (&raw mut kind).cast(), &raw mut length) == 0 }
+}
+
+/// A socket's readiness in the Unix form: a closed or failed socket is ready for whatever was
+/// asked, so that the read or write that follows reports it.
+fn socket_readiness(fd: RawFd, events: i16) -> i16 {
+    let wanted =
+        if events & POLLIN != 0 { WSA_POLLRDNORM } else { 0 } | if events & POLLOUT != 0 { WSA_POLLWRNORM } else { 0 };
+    let mut record = WsaPollFd { socket: fd.cast_unsigned(), events: wanted, revents: 0 };
+    // SAFETY: One writable record is passed, and a zero timeout only checks the socket.
+    if unsafe { WSAPoll(&raw mut record, 1, 0) } < 0 {
+        return POLLHUP | (events & (POLLIN | POLLOUT));
+    }
+    let mut ready = 0;
+    if record.revents & WSA_POLLRDNORM != 0 {
+        ready |= POLLIN;
+    }
+    if record.revents & WSA_POLLWRNORM != 0 {
+        ready |= POLLOUT;
+    }
+    if record.revents & (WSA_POLLERR | WSA_POLLHUP | WSA_POLLNVAL) != 0 {
+        ready |= POLLHUP | (events & (POLLIN | POLLOUT));
+    }
     ready
 }
 
@@ -298,6 +355,263 @@ impl Job {
     }
 }
 
+#[link(name = "bcrypt")]
+unsafe extern "system" {
+    fn BCryptGenRandom(algorithm: *mut c_void, buffer: *mut u8, size: u32, flags: u32) -> i32;
+}
+
+const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 2;
+
+/// Fills `buffer` from the system's cryptographic random number generator.
+pub(crate) fn random(buffer: &mut [u8]) -> io::Result<()> {
+    let size = u32::try_from(buffer.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
+    // SAFETY: The buffer is writable for `size` bytes, and this flag needs no algorithm handle.
+    let status =
+        unsafe { BCryptGenRandom(std::ptr::null_mut(), buffer.as_mut_ptr(), size, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    if status != 0 {
+        return Err(io::Error::other(format!("the system random number generator failed ({status:#x})")));
+    }
+    Ok(())
+}
+
+#[repr(C)]
+struct SecurityAttributes {
+    length: u32,
+    descriptor: *mut c_void,
+    inherit: i32,
+}
+
+const TOKEN_QUERY: u32 = 0x8;
+const TOKEN_USER: i32 = 1;
+const SDDL_REVISION_1: u32 = 1;
+const OWNER_SECURITY_INFORMATION: u32 = 0x1;
+const DACL_SECURITY_INFORMATION: u32 = 0x4;
+const SE_FILE_OBJECT: i32 = 1;
+const GENERIC_READ: u32 = 0x8000_0000;
+const GENERIC_WRITE: u32 = 0x4000_0000;
+const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x7;
+const CREATE_NEW: u32 = 1;
+const OPEN_ALWAYS: u32 = 4;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn OpenProcessToken(process: *mut c_void, access: u32, token: *mut *mut c_void) -> i32;
+    fn GetTokenInformation(token: *mut c_void, class: i32, info: *mut c_void, size: u32, needed: *mut u32) -> i32;
+    fn ConvertSidToStringSidW(sid: *mut c_void, text: *mut *mut u16) -> i32;
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        text: *const u16,
+        revision: u32,
+        descriptor: *mut *mut c_void,
+        size: *mut u32,
+    ) -> i32;
+    fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        descriptor: *mut c_void,
+        revision: u32,
+        information: u32,
+        text: *mut *mut u16,
+        length: *mut u32,
+    ) -> i32;
+    fn GetSecurityInfo(
+        handle: *mut c_void,
+        kind: i32,
+        information: u32,
+        owner: *mut *mut c_void,
+        group: *mut *mut c_void,
+        dacl: *mut *mut c_void,
+        sacl: *mut *mut c_void,
+        descriptor: *mut *mut c_void,
+    ) -> u32;
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    safe fn GetCurrentProcess() -> *mut c_void;
+    fn LocalFree(memory: *mut c_void) -> *mut c_void;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        security: *const SecurityAttributes,
+        disposition: u32,
+        flags: u32,
+        template: *mut c_void,
+    ) -> *mut c_void;
+}
+
+/// Memory the system allocated for a result, freed with this value.
+struct Local(*mut c_void);
+
+impl Drop for Local {
+    fn drop(&mut self) {
+        // SAFETY: The memory came from a call that allocates with LocalAlloc, and is freed only here.
+        unsafe { LocalFree(self.0) };
+    }
+}
+
+impl Local {
+    /// The NUL-terminated UTF-16 text the system wrote here.
+    fn text(&self) -> String {
+        let start = self.0.cast::<u16>();
+        let mut length = 0;
+        // SAFETY: Every unit up to and including the terminating NUL is part of the allocation.
+        while unsafe { start.wrapping_add(length).read() } != 0 {
+            length += 1;
+        }
+        // SAFETY: The `length` units before the NUL were just read from this allocation.
+        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(start, length) })
+    }
+}
+
+/// This process's user as a SID string, such as S-1-5-21-…-1001.
+fn user_sid() -> io::Result<String> {
+    let mut token = std::ptr::null_mut();
+    // SAFETY: This process's pseudo handle needs no closing, and the token output is writable.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: The token was just opened for this call and is closed with the value.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    // A TOKEN_USER record: a pointer to the user's SID and its attributes, then the SID itself.
+    let mut record = [0usize; 64];
+    let size = u32::try_from(size_of_val(&record)).expect("the token record fits in a u32");
+    let mut needed = 0;
+    // SAFETY: The record is writable, aligned for its pointer and `size` bytes long.
+    let read = unsafe {
+        GetTokenInformation(token.as_raw_handle(), TOKEN_USER, record.as_mut_ptr().cast(), size, &raw mut needed)
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut text = std::ptr::null_mut();
+    // SAFETY: The record's first field points at the SID stored later in the record, which is alive.
+    if unsafe { ConvertSidToStringSidW(record[0] as *mut c_void, &raw mut text) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Local(text.cast()).text())
+}
+
+/// This user owns a private file, and only this user and SYSTEM may open it. The protected
+/// list takes nothing from the folder, whoever else the folder lets in.
+fn private_descriptor() -> io::Result<Local> {
+    let user = user_sid()?;
+    let text: Vec<u16> = format!("O:{user}D:P(A;;FA;;;{user})(A;;FA;;;SY)").encode_utf16().chain([0]).collect();
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: The text is NUL-terminated and the descriptor output is writable; the size is not asked for.
+    let made = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            text.as_ptr(),
+            SDDL_REVISION_1,
+            &raw mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if made == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Local(descriptor))
+}
+
+/// A descriptor's owner and access list in the system's text form.
+fn security_text(descriptor: &Local) -> io::Result<String> {
+    let mut text = std::ptr::null_mut();
+    // SAFETY: The descriptor is valid and the text output is writable; the length is not asked for.
+    let written = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor.0,
+            SDDL_REVISION_1,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &raw mut text,
+            std::ptr::null_mut(),
+        )
+    };
+    if written == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Local(text.cast()).text())
+}
+
+/// The owner and access list of an open file, in the form [`private_security`] gives.
+pub(crate) fn file_security(file: &File) -> io::Result<String> {
+    let mut descriptor = std::ptr::null_mut();
+    let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let null = std::ptr::null_mut;
+    // SAFETY: The handle is open, and only the descriptor output is asked for, which is writable.
+    let status = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            information,
+            null(),
+            null(),
+            null(),
+            null(),
+            &raw mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(i32::try_from(status).unwrap_or(i32::MAX)));
+    }
+    security_text(&Local(descriptor))
+}
+
+/// The owner and access list every private file is given.
+pub(crate) fn private_security() -> io::Result<String> {
+    security_text(&private_descriptor()?)
+}
+
+/// What [`private_file`] does when the name is taken.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Existing {
+    Refuse,
+    Open,
+}
+
+/// Opens a file for reading and writing that only this user and SYSTEM may open, creating it
+/// with that security in place from the start, so no other program can open it in between.
+/// A link or other reparse point is never followed, and a file that already exists is refused
+/// unless it is a plain file with exactly that security.
+pub(crate) fn private_file(path: &Path, existing: Existing) -> io::Result<File> {
+    let descriptor = private_descriptor()?;
+    let attributes = SecurityAttributes {
+        length: u32::try_from(size_of::<SecurityAttributes>()).expect("security attributes fit in a u32"),
+        descriptor: descriptor.0,
+        inherit: 0,
+    };
+    let name: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let disposition = if existing == Existing::Open { OPEN_ALWAYS } else { CREATE_NEW };
+    // SAFETY: The name is NUL-terminated, and the attributes and their descriptor live for the call.
+    let raw = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ_WRITE_DELETE,
+            &raw const attributes,
+            disposition,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if raw as RawFd == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: The handle was just created for this call and is closed with the file.
+    let file = File::from(unsafe { OwnedHandle::from_raw_handle(raw) });
+    if existing == Existing::Refuse {
+        return Ok(file);
+    }
+    let info = file.metadata()?;
+    if info.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !info.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    if file_security(&file)? != security_text(&descriptor)? {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the file is not private to this user"));
+    }
+    Ok(file)
+}
+
 /// A verbatim drive path without its \\?\ prefix, when the plain form names the same file:
 /// Windows trims a trailing dot or space, reads a device name such as CON as the device and
 /// stops at the old length limit, so such paths keep the prefix.
@@ -317,6 +631,58 @@ pub(crate) fn plain_path(path: PathBuf) -> PathBuf {
         return path;
     }
     PathBuf::from(plain)
+}
+
+#[cfg(test)]
+mod private_file_tests {
+    use super::*;
+    use crate::fixture::Fixture;
+
+    #[test]
+    fn a_private_file_is_owned_by_this_user_and_shut_to_everyone_else() {
+        let fixture = Fixture::folder();
+        let path = fixture.root.join("secret.txt");
+        let file = private_file(&path, Existing::Refuse).unwrap();
+        let expected = private_security().unwrap();
+        // Windows writes a well-known account, such as the built-in Administrator, by its alias.
+        let owner = expected.strip_prefix("O:").and_then(|rest| rest.split_once("D:")).unwrap().0;
+        assert!(owner == user_sid().unwrap() || owner.len() == 2, "{expected}");
+        assert_eq!(expected, format!("O:{owner}D:P(A;;FA;;;{owner})(A;;FA;;;SY)"));
+        assert_eq!(file_security(&file).unwrap(), expected, "nothing is inherited from the folder");
+        drop(file);
+        assert_eq!(private_file(&path, Existing::Refuse).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        let reopened = private_file(&path, Existing::Open).unwrap();
+        assert_eq!(file_security(&reopened).unwrap(), expected);
+
+        let inherited = fixture.root.join("inherited.txt");
+        std::fs::write(&inherited, "").unwrap();
+        assert_ne!(file_security(&File::open(&inherited).unwrap()).unwrap(), expected);
+        let refused = private_file(&inherited, Existing::Open).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_private_file_is_never_reached_through_a_link() {
+        let fixture = Fixture::folder();
+        let target = fixture.root.join("target.txt");
+        drop(private_file(&target, Existing::Refuse).unwrap());
+        let link = fixture.root.join("link.txt");
+        // Creating a link on Windows needs Developer Mode or an elevated user.
+        if std::os::windows::fs::symlink_file(&target, &link).is_err() {
+            return;
+        }
+        assert!(private_file(&link, Existing::Open).is_err());
+        assert_eq!(private_file(&link, Existing::Refuse).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn random_bytes_differ_between_draws() {
+        let (mut first, mut second) = ([0u8; 32], [0u8; 32]);
+        random(&mut first).unwrap();
+        random(&mut second).unwrap();
+        assert_ne!(first, second);
+        assert_ne!(first, [0; 32]);
+    }
 }
 
 #[cfg(test)]
