@@ -107,6 +107,23 @@ pub trait Pane {
         External::Unchanged
     }
 
+    /// A program to lend the terminal to until it ends, such as this pane's
+    /// counterpart on the computer its shell reached with `milo ssh`.
+    fn lend(&mut self) -> Option<std::process::Command> {
+        None
+    }
+
+    /// While the terminal is lent, whether the lent program may keep it.
+    fn still_lent(&mut self) -> bool {
+        true
+    }
+
+    /// The lent program ended: on its own when `finished`, otherwise through
+    /// a failure or a lost connection. The pane draws afresh.
+    fn returned(&mut self, _finished: bool) -> After {
+        After::Stay
+    }
+
     /// Records a filesystem notification before the next scheduled check.
     fn filesystem_changed(&mut self) {}
 
@@ -640,6 +657,23 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
     let mut first_frame = true;
     let mut keys = VecDeque::new();
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
+        if let Some(mut lent) = pane.lend() {
+            let finished =
+                terminal.lend(&mut lent, || pane.still_lent()).map_err(|e| format!("cannot use this terminal: {e}"))?;
+            if pane.returned(finished) == After::Leave {
+                break;
+            }
+            // What the shell did meanwhile was kept for now.
+            let started = Instant::now();
+            if matches!(pane.check_external(), External::NewScope) {
+                (watcher, pace) = watch_opened_pane(pane.as_mut(), check_on_open, started.elapsed());
+                help = help.map(|_| pane.help());
+            }
+            // The terminal comes back blank, in Milo's modes but without motion reports.
+            (first_frame, tracking, pointer) = (true, false, None);
+            keys.clear();
+            continue;
+        }
         let resized = term::RESIZED.swap(false, Ordering::Relaxed);
         if first_frame || resized {
             first_frame = false;

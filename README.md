@@ -122,3 +122,5 @@ In Rex, start a coding agent on a task without leaving your pane. `milo task new
 [Integrations](docs/integrations.md) · [Setup and removal](docs/setup.md) · [Keys and marks](docs/keys.md) · [Usage limits](docs/usage.md) · [Discord presence](docs/presence.md) · [Pane behaviour](docs/panes.md) · [How it works](docs/internals.md)
 
 [Contributing](CONTRIBUTING.md) · [MIT licence](LICENSE)
+
+Made with love by [mcc](https://bymcc.net/).

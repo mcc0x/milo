@@ -50,6 +50,15 @@ pub use pick::{Picked, PickedLine, Viewed};
 pub use rescue::take_notes as take_rescue_notes;
 pub use tabs::{TabSets, Tabs};
 
+/// Why no reader in this process may edit, when a pane only shows another
+/// computer's files to someone working from elsewhere.
+static FORBIDDEN: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Stops every reader in this process from editing, for the reason given.
+pub fn forbid_edits(why: &'static str) {
+    let _ = FORBIDDEN.set(why);
+}
+
 /// Lines of context kept above a change when jumping to it.
 const LEAD: usize = 3;
 const CHANGE_NOTICE: Duration = Duration::from_secs(4);
@@ -1048,6 +1057,9 @@ impl Reader {
 
     /// Reads the file as it is now, which is what gets edited, not the lines on screen.
     fn open_editor(&mut self) -> Result<Editor, ReadOnly> {
+        if let Some(why) = FORBIDDEN.get() {
+            return Err(ReadOnly(why));
+        }
         // What is shown decides part of the answer, so bring it up to date first.
         self.refresh(false);
         if let Some(why) = self.read_only {
@@ -1068,6 +1080,9 @@ impl Reader {
 
     /// Whether the file may be edited, as far as its place and what is shown of it can say.
     fn edit_refusal(&self) -> Option<ReadOnly> {
+        if let Some(why) = FORBIDDEN.get() {
+            return Some(ReadOnly(why));
+        }
         let work = match self.source.working() {
             Ok(work) => work,
             Err(why) => return Some(why),

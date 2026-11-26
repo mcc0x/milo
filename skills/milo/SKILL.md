@@ -60,6 +60,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo task new --agent AGENT (--branch NAME [--base REF] \| --worktree DIR) [--prompt TEXT]` | Starts `claude`, `codex`, `omp` or `opencode` interactively in a Git worktree and a background Rex session. Prints `worktree DIR` and `session ID`. Pass the prompt as one quoted argument. `--host HOST --project DIR` starts it on another Rex host. |
 | `milo setup` | Opens terminal settings. In Rex it can also manage the sidebar layout. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. |
+| `milo ssh [-F CONFIG] HOST` | Run by a person in a Rex shell: logs in with their ssh and lets that tab's Outline and History follow the shell on HOST, read-only, until logout. Needs `milo` on HOST. Interactive; do not run it for the person. |
 | `milo web --host HOST [--project DIR]` | Opens another Rex host's settings dashboard on this computer through a loopback Rex forward, and closes both when done. `HOST` is a label from `rex hosts`. |
 | `milo settings export GROUPS` / `import FILE [--apply]` / `undo` | Copies chosen pane settings to another host as a file. `import` only previews until `--apply`. Never carries tokens, destinations, accounts or integrations. |
 | `milo presence [status]` | Says whether the optional Discord presence is on and what Discord shows now. |

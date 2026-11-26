@@ -20,7 +20,7 @@ jobs:
   native:
     name: Native Windows x86-64 tests
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: never
     steps:
@@ -46,10 +46,16 @@ jobs:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
         run: cargo +1.91.0 test --locked --test windows_console -- --nocapture
-      - name: Record the tested executable
+      # The optimised build is what a release would ship, so it runs every test again.
+      - name: Test the release build
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: cargo +1.91.0 test --release --locked
+      - name: Record the tested executables
         run: |
           git rev-parse HEAD
-          (Get-FileHash target\debug\milo.exe -Algorithm SHA256).Hash
+          (Get-FileHash target\debug\milo.exe, target\release\milo.exe -Algorithm SHA256 | Format-Table Hash, Path -AutoSize | Out-String -Width 200).Trim()
       # Only its recipient can open the copy kept: a public artifact would publish a binary.
       - name: Seal the tested executable for its recipient
         if: github.event_name == 'workflow_dispatch' && inputs.recipient != ''
@@ -59,13 +65,13 @@ jobs:
           $openssl = "$env:ProgramFiles\Git\usr\bin\openssl.exe"
           & $openssl version
           [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\recipient.pem", [Convert]::FromBase64String($env:RECIPIENT))
-          & $openssl smime -encrypt -aes256 -binary -outform DER -in target\debug\milo.exe -out "$env:RUNNER_TEMP\milo.exe.p7m" "$env:RUNNER_TEMP\recipient.pem"
+          & $openssl smime -encrypt -aes256 -binary -outform DER -in target\release\milo.exe -out "$env:RUNNER_TEMP\milo.exe.p7m" "$env:RUNNER_TEMP\recipient.pem"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           (Get-FileHash "$env:RUNNER_TEMP\milo.exe.p7m" -Algorithm SHA256).Hash
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: github.event_name == 'workflow_dispatch' && inputs.recipient != ''
         with:
-          name: milo-windows-x86_64-debug-${{ github.sha }}
+          name: milo-windows-x86_64-release-${{ github.sha }}
           path: ${{ runner.temp }}/milo.exe.p7m
           if-no-files-found: error
           retention-days: 1
