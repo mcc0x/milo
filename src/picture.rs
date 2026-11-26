@@ -97,8 +97,12 @@ impl Refusal {
         match self {
             Self::TooLarge => "This image exceeds the preview size limit.",
             Self::Cancelled => "This image preview was cancelled.",
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(all(not(target_os = "macos"), not(windows)))]
             Self::UnsupportedPlatform => "Decoding this image requires macOS.",
+            #[cfg(windows)]
+            Self::UnsupportedPlatform => {
+                "Decoding this image is not supported on Windows yet; only PNGs up to 1600 pixels a side are shown."
+            }
             Self::UnsupportedFormat => "This image format is not previewed.",
             Self::Unreadable => "This image could not be decoded.",
         }

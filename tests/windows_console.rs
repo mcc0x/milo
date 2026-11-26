@@ -4,6 +4,8 @@
 //! program made, quit, and leave the console's modes as they were. The Home, Outline, History and
 //! Usage panes open the same way, draw what they should, move on a key and quit with exit code 0,
 //! and the Reader's own Markdown view renders a working file and follows a save made elsewhere.
+//! Pictures and video say what Windows cannot show yet, a file opens as of a commit, and a review
+//! note is copied through the terminal.
 
 use std::ffi::{OsStr, c_void};
 use std::fs;
@@ -526,6 +528,66 @@ fn markdown_renders_in_the_reader_follows_a_save_elsewhere_and_shows_its_source(
     let mark = console.text().len();
     console.keys(b"m");
     console.see("## Evening camp", mark);
+    console.keys(b"q");
+    finish(&console, mark);
+}
+
+#[test]
+fn pictures_and_video_say_what_windows_cannot_show_yet() {
+    let scratch = Scratch::new("media");
+    let project = scratch.0.join("project");
+    fs::write(project.join("mark.png"), include_bytes!("../src/usage/marks/codex.png")).unwrap();
+    fs::write(project.join("dusk.jpg"), include_bytes!("rex_lab/river-dusk.jpg")).unwrap();
+    fs::write(project.join("river.mp4"), include_bytes!("rex_lab/river-motion.mp4")).unwrap();
+    for (file, note) in [
+        ("mark.png", "Pictures in this terminal are not supported on Windows yet"),
+        ("dusk.jpg", "Decoding this image is not supported on Windows yet"),
+        ("river.mp4", "Video playback is not supported on Windows yet."),
+    ] {
+        let (mut console, at) = open_pane(&scratch, &format!("view {file}"));
+        console.see(note, at);
+        let mark = console.text().len();
+        console.keys(b"q");
+        finish(&console, mark);
+    }
+}
+
+#[test]
+fn an_older_version_opens_from_a_commit() {
+    let scratch = Scratch::new("commit");
+    repository(&scratch);
+    let first =
+        Command::new("git").arg("-C").arg(scratch.0.join("project")).args(["rev-parse", "HEAD~1"]).output().unwrap();
+    let first = String::from_utf8(first.stdout).unwrap();
+    let (mut console, at) = open_pane(&scratch, &format!("view docs/guide.md --commit {}", first.trim()));
+    console.see("guide", at);
+    console.see("? help", at);
+    let mark = console.text().len();
+    let shown = console.text();
+    assert!(!shown[at..mark].contains("more"), "the working version was drawn:\n{shown}");
+    console.keys(b"q");
+    finish(&console, mark);
+}
+
+#[test]
+fn a_review_note_is_handed_to_the_terminal_clipboard() {
+    let scratch = Scratch::new("review");
+    repository(&scratch);
+    let project = scratch.0.join("project");
+    fs::write(project.join("app.txt"), "line 1\nline two\n").unwrap();
+    let patch = "--- a/app.txt\n+++ b/app.txt\n@@ -1,2 +1,2 @@\n line 1\n-line 2\n+line two\n";
+    fs::write(project.join("change.diff"), patch).unwrap();
+    let (mut console, at) = open_pane(&scratch, "review change.diff");
+    console.see("line two", at);
+    console.keys(b"i");
+    console.keys(ENTER);
+    let mark = console.text().len();
+    console.keys(b"Clip check");
+    console.see("Clip check", mark);
+    // Ctrl+Y copies the note now, as OSC 52 with the note in base64; "Review note\n" is the start.
+    console.keys(b"\x19");
+    console.see("\x1b]52;c;UmV2aWV3IG5vdGUK", mark);
+    let mark = console.text().len();
     console.keys(b"q");
     finish(&console, mark);
 }
