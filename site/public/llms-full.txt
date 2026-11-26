@@ -131,6 +131,8 @@ In Rex, start a coding agent on a task without leaving your pane. `milo task new
 
 [Contributing](https://github.com/mcc0x/milo/blob/main/CONTRIBUTING.md) · [MIT licence](https://github.com/mcc0x/milo/blob/main/LICENSE)
 
+Made with love by [mcc](https://bymcc.net/).
+
 ---
 
 Source: https://github.com/mcc0x/milo/blob/main/docs/setup.md
