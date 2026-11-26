@@ -302,7 +302,8 @@ mod tests {
         let launch = Launch::spawn(&folder.root, open, &url).unwrap();
         let path = launch.handoff.as_ref().unwrap().0.path().to_path_buf();
         let mut chrome = chrome.recv_timeout(Duration::from_secs(10)).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
+        // A browser's first start on a fresh computer can take well over ten seconds.
+        let deadline = Instant::now() + LIFETIME - Duration::from_secs(10);
         let watcher = thread::spawn(move || {
             let connected = loop {
                 if Instant::now() >= deadline || chrome.try_wait().unwrap().is_some() {
