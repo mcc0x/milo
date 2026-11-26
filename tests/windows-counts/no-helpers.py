@@ -37,16 +37,15 @@ try:
     limits = BasicLimits(flags=8, active_processes=2)
     check(kernel.SetInformationJobObject(job, 2, ctypes.byref(limits), ctypes.sizeof(limits)))
     check(kernel.AssignProcessToJobObject(job, wintypes.HANDLE(-1)))
-    with open('CONIN$', 'rb', buffering=0) as stdin, open('CONOUT$', 'r+b', buffering=0) as stdout:
-        with subprocess.Popen([sys.argv[1], 'view', 'sample.txt'], stdin=stdin, stdout=stdout, stderr=stdout) as reader:
-            curl = Path(os.environ['SystemRoot']) / 'System32' / 'curl.exe'
-            try:
-                probe = subprocess.run([curl, '-q', '--version'], stdin=subprocess.DEVNULL,
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except OSError as error:
-                assert error.winerror in (5, 1816), f'Unexpected child creation failure: {error}'
-            else:
-                assert probe.returncode != 0, 'System curl could still start inside the job'
-            assert reader.wait(timeout=45) == 0
+    with subprocess.Popen([sys.argv[1], 'view', 'sample.txt']) as reader:
+        curl = Path(os.environ['SystemRoot']) / 'System32' / 'curl.exe'
+        try:
+            probe = subprocess.run([curl, '-q', '--version'], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as error:
+            assert error.winerror in (5, 1816), f'Unexpected child creation failure: {error}'
+        else:
+            assert probe.returncode != 0, 'System curl could still start inside the job'
+        assert reader.wait(timeout=45) == 0
 finally:
     check(kernel.CloseHandle(job))
