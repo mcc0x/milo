@@ -5,13 +5,16 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::fs_ops::Temp;
 
-const LIFETIME: Duration = Duration::from_secs(15);
+// A cold browser on a slow machine can take far longer than a few seconds to read the file.
+// The file is deleted as soon as the browser authenticates, so this only bounds an unused one.
+const LIFETIME: Duration = Duration::from_secs(120);
 const CHILD_CHECK: Duration = Duration::from_millis(100);
 
 pub(super) struct Launch {
@@ -50,8 +53,10 @@ impl Launch {
         )?;
         drop(file);
         let expires = Instant::now() + LIFETIME;
+        // Its own process group keeps a browser the opener starts alive when Ctrl-C stops Milo.
         let child = command
             .arg(file_url(handoff.path()))
+            .process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -139,6 +144,37 @@ mod tests {
         assert!(path.exists(), "the browser can read the file after the opener returns");
         assert_eq!(launch.poll(expires), None);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_slow_browser_can_still_read_the_handoff() {
+        let folder = Fixture::folder();
+        let command = shell(&folder, r#"sleep 1; cat "${1#file://}" > page"#);
+        let mut launch = Launch::spawn(&folder.root, command, PRIVATE_URL).unwrap();
+        let (handoff, expires) = launch.handoff.as_ref().unwrap();
+        let path = handoff.path().to_path_buf();
+        let started = *expires - LIFETIME;
+
+        assert!(launch.poll(started + Duration::from_secs(16)).is_some(), "a cold start must outlast 15 seconds");
+        assert!(path.exists());
+        assert!(launch.child.as_mut().unwrap().wait().unwrap().success());
+        assert!(fs::read_to_string(folder.root.join("page")).unwrap().contains(PRIVATE_URL));
+
+        assert_eq!(launch.poll(started + Duration::from_secs(60)), Some(*launch.handoff.as_ref().map(|(_, e)| e).unwrap()));
+        assert!(path.exists());
+        launch.connected();
+        assert!(!path.exists(), "authentication removes the file at once");
+    }
+
+    #[test]
+    fn the_opener_does_not_share_the_terminal_process_group() {
+        let folder = Fixture::folder();
+        let command = shell(&folder, "ps -o pgid= -p $$ > pgid");
+        let mut launch = Launch::spawn(&folder.root, command, PRIVATE_URL).unwrap();
+        assert!(launch.child.as_mut().unwrap().wait().unwrap().success());
+        let own = String::from_utf8(Command::new("ps").args(["-o", "pgid=", "-p", &std::process::id().to_string()]).output().unwrap().stdout).unwrap();
+        let opener = fs::read_to_string(folder.root.join("pgid")).unwrap();
+        assert_ne!(opener.trim(), own.trim(), "Ctrl-C would also stop the browser");
     }
 
     #[test]
