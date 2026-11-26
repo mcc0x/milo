@@ -93,7 +93,12 @@ impl Rex {
 impl Host {
     /// Asks this computer and the Rex server of this terminal. It starts no server.
     /// A caller that already checked where the apps are can reuse that answer.
+    /// Windows asks nothing: the bare `rex` command is searched in the working directory there, and
+    /// Milo's Rex integration is not ported to Windows yet.
     pub(crate) fn probe(forwarded: bool, viewers: impl FnOnce() -> Option<Viewers>) -> Option<Self> {
+        if cfg!(windows) {
+            return Some(Self { name: computer_name(), rex: None, forwarded });
+        }
         if cfg!(test) {
             return None;
         }
@@ -109,7 +114,11 @@ impl Host {
     pub(crate) fn report(&self, out: &mut String) {
         let Some(rex) = &self.rex else {
             writeln!(out, "Host: {}", self.name).unwrap();
-            out.push_str("Rex server: none answered; the panes work without it\n");
+            out.push_str(if cfg!(windows) {
+                "Rex server: not supported on Windows yet; the panes work without it\n"
+            } else {
+                "Rex server: none answered; the panes work without it\n"
+            });
             return;
         };
         writeln!(out, "Host: {} (Rex host {})", self.name, rex.short_id()).unwrap();
@@ -245,9 +254,22 @@ mod tests {
                  Rex apps: connected from another device only; on that computer, milo web --host LABEL opens these settings\n"
             )
         );
-        let mut without = String::new();
-        Host { name: "studio".into(), rex: None, forwarded: false }.report(&mut without);
-        assert_eq!(without, "Host: studio\nRex server: none answered; the panes work without it\n");
+        #[cfg(unix)]
+        {
+            let mut without = String::new();
+            Host { name: "studio".into(), rex: None, forwarded: false }.report(&mut without);
+            assert_eq!(without, "Host: studio\nRex server: none answered; the panes work without it\n");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_never_asks_rex_and_says_its_integration_is_not_supported() {
+        let host = Host::probe(true, || panic!("Windows must not ask which Rex apps are open")).unwrap();
+        assert!(host.rex.is_none() && host.forwarded);
+        let mut out = String::new();
+        host.report(&mut out);
+        assert!(out.ends_with("Rex server: not supported on Windows yet; the panes work without it\n"), "{out}");
     }
 
     #[test]

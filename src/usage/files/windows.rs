@@ -5,6 +5,7 @@
 use std::ffi::{OsStr, OsString, c_void};
 use std::fs::File;
 use std::io;
+use std::ops::ControlFlow;
 use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::windows::fs::MetadataExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
@@ -196,11 +197,11 @@ fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
 }
 
-/// Every name in a folder except `.` and `..`.
-fn list(dir: &File) -> io::Result<Vec<Listed>> {
+/// Every name in a folder except `.` and `..`, handed over as each batch is read so that stopping
+/// early also stops the reading.
+fn list(dir: &File, mut each: impl FnMut(Listed) -> ControlFlow<()>) -> io::Result<()> {
     let mut buffer = vec![0_u64; 8192];
     let size = u32::try_from(buffer.len() * size_of::<u64>()).unwrap_or(0);
-    let mut listed = Vec::new();
     let mut restart = 1;
     loop {
         let mut block = IoStatusBlock::default();
@@ -222,7 +223,7 @@ fn list(dir: &File) -> io::Result<Vec<Listed>> {
         };
         restart = 0;
         if status == STATUS_NO_MORE_FILES {
-            return Ok(listed);
+            return Ok(());
         }
         check(status)?;
         // SAFETY: The buffer is initialized, and its bytes are only read while it is borrowed.
@@ -239,8 +240,8 @@ fn list(dir: &File) -> io::Result<Vec<Listed>> {
             let units = bytes.get(at + NAMES_AT..end).ok_or(io::ErrorKind::InvalidData)?;
             let name: Vec<u16> = units.as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).collect();
             let name = OsString::from_wide(&name);
-            if name != "." && name != ".." {
-                listed.push(Listed { name, attributes });
+            if name != "." && name != ".." && each(Listed { name, attributes }).is_break() {
+                return Ok(());
             }
             if next == 0 {
                 break;
@@ -252,18 +253,24 @@ fn list(dir: &File) -> io::Result<Vec<Listed>> {
 
 impl Scan {
     pub(super) fn directory(&mut self, dir: &File, tree: &Tree, path: &mut PathBuf, depth: usize) {
-        let Ok(mut entries) = list(dir) else { return };
         if depth < 3 && matches!(tree, Tree::Codex) {
-            entries.retain(|entry| entry.is_dir() && tree.directory(entry.name.as_encoded_bytes(), depth));
-            entries.sort_unstable_by(|a, b| b.name.as_encoded_bytes().cmp(a.name.as_encoded_bytes()));
-            for entry in entries {
-                if !self.descend(dir, &entry.name, tree, path, depth) {
+            let mut names = Vec::new();
+            let listed = list(dir, |entry| {
+                if entry.is_dir() && tree.directory(entry.name.as_encoded_bytes(), depth) {
+                    names.push(entry.name);
+                }
+                ControlFlow::Continue(())
+            });
+            self.unreadable(listed);
+            names.sort_unstable_by(|a, b| b.as_encoded_bytes().cmp(a.as_encoded_bytes()));
+            for name in names {
+                if !self.descend(dir, &name, tree, path, depth) {
                     break;
                 }
             }
             return;
         }
-        for entry in entries {
+        let listed = list(dir, |entry| {
             let bytes = entry.name.as_encoded_bytes();
             if entry.is_file()
                 && tree.file(bytes, depth)
@@ -272,14 +279,23 @@ impl Scan {
                 && tree.includes(version)
             {
                 if !self.admit() {
-                    break;
+                    return ControlFlow::Break(());
                 }
                 self.keep(tree.limit(), path, &entry.name, version);
             }
             if entry.is_dir() && tree.directory(bytes, depth) && !self.descend(dir, &entry.name, tree, path, depth) {
-                break;
+                return ControlFlow::Break(());
             }
-        }
+            ControlFlow::Continue(())
+        });
+        self.unreadable(listed);
+    }
+
+    /// A folder that stops answering mid-read leaves the result short, as a refused folder does.
+    fn unreadable(&mut self, listed: io::Result<()>) {
+        let Err(error) = listed else { return };
+        self.partial = true;
+        self.inaccessible |= error.kind() == io::ErrorKind::PermissionDenied;
     }
 
     fn descend(&mut self, dir: &File, name: &OsStr, tree: &Tree, path: &mut PathBuf, depth: usize) -> bool {

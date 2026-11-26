@@ -63,7 +63,25 @@ jobs:
         run: |
           git rev-parse HEAD
           (Get-FileHash target\debug\milo.exe, target\release\milo.exe -Algorithm SHA256 | Format-Table Hash, Path -AutoSize | Out-String -Width 200).Trim()
-      # Only its recipient can open the copy kept: a public artifact would publish a binary.
+      # It drives the release build tested and recorded above, and uploads nothing.
+      - name: Smoke-test packaged settings in Chromium
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: |
+          $smoke = "$env:RUNNER_TEMP\milo-web-smoke"
+          npm install --prefix $smoke --no-save --no-audit --no-fund --ignore-scripts playwright-core@1.65.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PLAYWRIGHT_BROWSERS_PATH = "$smoke\browsers"
+          node "$smoke\node_modules\playwright-core\cli.js" install --only-shell chromium
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:NODE_PATH = "$smoke\node_modules"
+          $env:MILO_SAVED_PREFERENCES = "$env:RUNNER_TEMP\milo-saved-preferences.conf"
+          node tests/web-smoke-windows.cjs target\release\milo.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.91.0 test --release --locked --test windows_console usage_follows_preferences_saved_in_the_browser -- --ignored --exact
+      # After every test, so a failed run keeps nothing. Only its recipient can open the copy kept: a public
+      # artifact would publish a binary.
       - name: Seal the tested executable for its recipient
         if: github.event_name == 'workflow_dispatch' && inputs.recipient != ''
         env:
@@ -82,20 +100,3 @@ jobs:
           path: ${{ runner.temp }}/milo.exe.p7m
           if-no-files-found: error
           retention-days: 1
-      # Last, and uploading nothing: it drives the release build tested and recorded above.
-      - name: Smoke-test packaged settings in Chromium
-        env:
-          TEMP: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-        run: |
-          $smoke = "$env:RUNNER_TEMP\milo-web-smoke"
-          npm install --prefix $smoke --no-save --no-audit --no-fund --ignore-scripts playwright-core@1.65.1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:PLAYWRIGHT_BROWSERS_PATH = "$smoke\browsers"
-          node "$smoke\node_modules\playwright-core\cli.js" install --only-shell chromium
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:NODE_PATH = "$smoke\node_modules"
-          $env:MILO_SAVED_PREFERENCES = "$env:RUNNER_TEMP\milo-saved-preferences.conf"
-          node tests/web-smoke-windows.cjs target\release\milo.exe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo +1.91.0 test --release --locked --test windows_console usage_follows_preferences_saved_in_the_browser -- --ignored --exact

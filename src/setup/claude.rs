@@ -11,6 +11,7 @@ use super::settings::{self, Settings, Status};
 pub(super) const OWN_CLAUDE: &str = "claude-status-added";
 const CLAUDE_CREATED: &str = "created";
 const CLAUDE_UPDATED: &str = "updated";
+pub(super) const WINDOWS: &str = "Milo's Claude Code status line is not supported on Windows yet.";
 
 fn status_command(path: &Path) -> Result<String, &'static str> {
     let path = path.to_str().ok_or("Milo's path is not valid UTF-8 for Claude Code settings.")?;
@@ -18,6 +19,9 @@ fn status_command(path: &Path) -> Result<String, &'static str> {
 }
 
 fn current_command() -> Result<String, &'static str> {
+    if cfg!(windows) {
+        return Err(WINDOWS);
+    }
     status_command(&executable()?)
 }
 

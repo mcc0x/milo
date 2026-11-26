@@ -975,7 +975,6 @@ mod tests {
         assert_eq!(snapshot.as_deref(), Some(b"true ".as_slice()));
     }
 
-    #[cfg(unix)]
     #[test]
     fn the_walk_budget_is_spent_in_the_newest_year_month_and_day_first() {
         let f = Fixture::folder();
@@ -994,7 +993,6 @@ mod tests {
         assert_eq!(sessions.files[0].path, Path::new(newest));
     }
 
-    #[cfg(unix)]
     #[test]
     fn compressed_and_irrelevant_paths_do_not_spend_the_walk_budget() {
         let f = Fixture::folder();
@@ -1008,5 +1006,19 @@ mod tests {
         assert!(!sessions.partial);
         assert_eq!(sessions.files.len(), 1);
         assert_eq!(sessions.files[0].path, Path::new(plain));
+    }
+
+    #[test]
+    fn one_folder_larger_than_the_walk_budget_stops_at_the_budget() {
+        let f = Fixture::folder();
+        for i in 0..20 {
+            f.write(&format!("project/session-{i}.jsonl"), "{}\n");
+        }
+        let sessions = SessionRoot(fs_ops::open_dir(&f.root).unwrap()).scan(Tree::Claude { since: 0 }, 6).unwrap();
+        assert!(sessions.partial && !sessions.inaccessible);
+        assert_eq!(sessions.files.len(), 5, "the folder spends one entry, then the files spend the rest");
+        let sessions = SessionRoot(fs_ops::open_dir(&f.root).unwrap()).scan(Tree::Claude { since: 0 }, 21).unwrap();
+        assert!(!sessions.partial);
+        assert_eq!(sessions.files.len(), 20);
     }
 }

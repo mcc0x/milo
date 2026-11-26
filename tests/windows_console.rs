@@ -146,8 +146,24 @@ impl Console {
         let mut block = Vec::new();
         for (name, value) in std::env::vars_os().filter(|(name, _)| {
             ![
-                "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "CODEX_HOME",
-                "CLAUDE_CONFIG_DIR", "TERM",
+                "HOME",
+                "USERPROFILE",
+                "APPDATA",
+                "LOCALAPPDATA",
+                "XDG_CONFIG_HOME",
+                "XDG_STATE_HOME",
+                "XDG_DATA_HOME",
+                "CODEX_HOME",
+                "CLAUDE_CONFIG_DIR",
+                "PI_CODING_AGENT_DIR",
+                "OPENCODE_DB",
+                "MILO_DEEPSEEK_API_KEY",
+                "MILO_OPENROUTER_API_KEY",
+                "MILO_DEVIN_API_KEY",
+                "MILO_DEVIN_ORG",
+                "MILO_GITHUB_TOKEN",
+                "MILO_GITHUB_USER",
+                "TERM",
             ]
             .iter()
             .any(|isolated| name.eq_ignore_ascii_case(isolated))

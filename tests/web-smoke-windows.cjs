@@ -11,9 +11,11 @@ const {copyFile, mkdir, mkdtemp, readFile, readdir, rm} = require('node:fs/promi
 const {tmpdir} = require('node:os');
 const {basename, join, resolve} = require('node:path');
 const {createInterface} = require('node:readline');
+const {inspect} = require('node:util');
 const {chromium} = require('playwright-core');
 
 const timeout = 10_000;
+const editorUrl = /^http:\/\/127\.0\.0\.1:\d+\/#[0-9a-f]{64}$/;
 const edits = [['Rail width', '37'], ['Usage height', '8']];
 const button = (page, name) => page.getByRole('button', {name, exact: true});
 const dialog = (page, name) => page.getByRole('dialog', {name, exact: true});
@@ -21,6 +23,8 @@ const number = (page, name) => page.getByRole('spinbutton', {name, exact: true})
 const status = (page, text) => page.getByRole('status').filter({hasText: text});
 const usageChoice = (page, name) => page.getByRole('combobox', {name, exact: true});
 const usageChoices = [['Codex', 'auto'], ['Claude Code', 'always'], ['OpenCode', 'hide']];
+// The editor URL carries its token, and Playwright puts the URL it was given into its errors.
+const redact = text => text.replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '[url]').replace(/[A-Za-z0-9_-]{32,}/g, '[token]');
 const section = (page, name) => page.getByRole('navigation').getByRole('button', {name: new RegExp(`^${name}`)});
 
 async function withMilo(binary, cwd, env, run) {
@@ -32,7 +36,7 @@ async function withMilo(binary, cwd, env, run) {
       once(stdout, 'line', {signal: AbortSignal.timeout(timeout)}).then(([line]) => line),
       exited.then(([code]) => { throw new Error(`Milo exited before printing its URL (${code})`); }),
     ]);
-    assert.match(url, /^http:\/\/127\.0\.0\.1:\d+\/#[0-9a-f]{64}$/);
+    assert(editorUrl.test(url), 'Milo printed something other than its private editor URL');
     stdout.close();
     await run(url);
   } finally {
@@ -128,7 +132,11 @@ async function main() {
       console.log('Usage tools: read back after a server restart');
       await page.close();
     });
-    const left = (await readdir(join(home, 'local', 'milo')).catch(() => [])).filter(name => name.startsWith('milo-web-'));
+    const handoffs = await readdir(join(home, 'local', 'milo', 'web')).catch(error => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
+    const left = handoffs.filter(name => name.startsWith('milo-web-'));
     assert.deepEqual(left, [], 'no browser handoff is left behind');
   } finally {
     try {
@@ -140,6 +148,6 @@ async function main() {
 }
 
 main().catch(error => {
-  console.error(error);
+  console.error(redact(inspect(error, {depth: 4})));
   process.exitCode = 1;
 });
