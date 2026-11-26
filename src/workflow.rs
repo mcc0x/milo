@@ -501,6 +501,7 @@ mod tests {
     use crate::fixture::Fixture;
     use crate::outline::Outline;
     use crate::reader::{Floated, OpenReader};
+    #[cfg(unix)]
     use crate::ssh::link::Link;
 
     fn floated(block: &str) -> Floated {
@@ -720,6 +721,7 @@ mod tests {
         assert_eq!(pane.next_frame(), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_shell_taken_to_another_host_lends_the_pane_there_and_gets_it_back() {
         let f = Fixture::new();
@@ -827,6 +829,7 @@ mod tests {
         assert!(pane.lend().is_some());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pane_on_the_host_names_the_host_it_shows() {
         let f = Fixture::new();
