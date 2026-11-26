@@ -4,7 +4,9 @@ use crate::sys::{AsRawFd, RawFd};
 use std::ffi::OsStr;
 use std::io::{self, PipeReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
+#[cfg(unix)]
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -13,6 +15,11 @@ use crate::fs_ops;
 
 use super::files;
 use super::signature::Signature;
+
+#[cfg(windows)]
+mod windows;
+#[cfg(all(test, windows))]
+pub(super) use windows::Writer;
 
 const INTERVAL: Duration = Duration::from_secs(20);
 /// A database whose files have not changed is still read again this often,
@@ -243,16 +250,25 @@ fn read_only_uri(path: &Path) -> String {
 }
 
 /// Bound both child output and wall time so a busy database cannot keep a worker alive.
-pub(super) fn query(executable: &OsStr, path: &Path, sql: &str, wait: Duration) -> Option<Vec<u8>> {
+/// Windows has no sqlite3 program; its own SQLite library answers there instead.
+pub(super) fn query(
+    #[cfg_attr(windows, allow(unused_variables))] executable: &OsStr,
+    path: &Path,
+    sql: &str,
+    wait: Duration,
+) -> Option<Vec<u8>> {
     if !path.is_absolute() {
         return None;
     }
     // `-nofollow` also rejects links in ancestors, including /tmp on macOS.
-    let path = path.parent()?.canonicalize().ok()?.join(path.file_name()?);
+    let path = crate::sys::canonicalize(path.parent()?).ok()?.join(path.file_name()?);
     if !readable(&path) {
         return None;
     }
     let deadline = Instant::now() + wait;
+    #[cfg(windows)]
+    return windows::query(&path, &read_only_uri(&path), sql, deadline, MAX_OUTPUT);
+    #[cfg(unix)]
     let child = Command::new(executable)
         // The database operand always starts with "file:". Older SQLite CLIs reject "--".
         .args(["-batch", "-safe", "-bail", "-nofollow", "-readonly", "-json", "-init", "/dev/null"])
@@ -263,6 +279,7 @@ pub(super) fn query(executable: &OsStr, path: &Path, sql: &str, wait: Duration) 
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    #[cfg(unix)]
     capture(child, MAX_OUTPUT, deadline)
 }
 

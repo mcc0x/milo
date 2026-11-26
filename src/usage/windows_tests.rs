@@ -234,3 +234,102 @@ fn what_needs_setup_the_status_line_or_a_network_stays_unsupported() {
     assert_eq!(claude_status(), 0);
     assert!(SystemTime::now() > UNIX_EPOCH);
 }
+
+/// OMP's and OpenCode's databases, made and kept open by Windows' own SQLite as those tools do.
+mod databases {
+    use super::super::opencode::{self, Activity, Cost, Report, Store, Tokens};
+    use super::super::sqlite::Writer;
+    use super::*;
+
+    const WAIT: Duration = Duration::from_secs(30);
+    const OMP_SCHEMA: &str = "
+        CREATE TABLE cache(key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);
+        CREATE TABLE usage_history(id INTEGER PRIMARY KEY, recorded_at INTEGER, provider TEXT,
+            account_key TEXT NOT NULL, email TEXT, account_id TEXT, limit_id TEXT, label TEXT, window_label TEXT,
+            used_fraction REAL, status TEXT, resets_at INTEGER);
+    ";
+
+    fn omp_report(writer: &Writer, fraction: &str) {
+        let (ms, reset) = (NOW * 1000, (NOW + DAY) * 1000);
+        let week = format!(
+            r#"{{"id":"openai-codex:primary","amount":{{"usedFraction":{fraction}}},"scope":{{"tier":null}},"window":{{"durationMs":604800000,"resetsAt":{reset}}}}}"#
+        );
+        writer.exec(&format!(
+            r#"INSERT OR REPLACE INTO cache VALUES ('usage_cache:report:openai-codex:default:oauth|account:codex',
+               '{{"value":{{"provider":"openai-codex","fetchedAt":{ms},"limits":[{week}]}}}}',0);"#
+        ));
+    }
+
+    /// The pane is woken through the same descriptor its event loop waits on.
+    fn finish(usage: &mut Usage) {
+        let fd = usage.external_fd().expect("no database read is running");
+        let mut ready = [crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 }];
+        assert_eq!(crate::sys::poll(&mut ready, 30_000), 1, "the database read did not wake the pane");
+        assert!(matches!(usage.check_external(), External::Redraw));
+        assert!(usage.external_fd().is_none());
+    }
+
+    #[test]
+    fn omp_limits_reach_the_pane_while_omp_holds_its_log_open() {
+        let f = Fixture::folder();
+        let path = f.root.join("agent.db");
+        let writer = Writer::open(&path);
+        writer.exec(&format!("PRAGMA journal_mode=WAL;{OMP_SCHEMA}"));
+        omp_report(&writer, "0.25");
+        let mut tools = UsageTools::default();
+        tools[UsageTool::Codex] = Show::Always;
+        tools[UsageTool::Claude] = Show::Always;
+        let mut usage =
+            Usage::from_dirs(Some(f.root.join("codex")), Some(f.root.join("claude")), Some(f.root.join("state")), NOW)
+                .showing(tools);
+        usage.omp = omp::poll(Some(path.clone()), WAIT);
+
+        assert!(usage.check());
+        assert_eq!(frame(&mut usage, 22, 2), ["Codex · checking", "Claude · checking"]);
+        finish(&mut usage);
+        assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 75% left", "Claude no saved limits"]);
+
+        omp_report(&writer, "0.65");
+        assert_eq!(usage.key(Key::Char('r')), After::Stay);
+        finish(&mut usage);
+        assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 35% left", "Claude no saved limits"]);
+    }
+
+    #[test]
+    fn opencode_totals_for_today_are_read_from_a_checked_release() {
+        let f = Fixture::folder();
+        let path = f.root.join("opencode.db");
+        let writer = Writer::open(&path);
+        let schema = include_str!("tests/opencode/v2.3.2.sql");
+        writer.exec(&format!(
+            "PRAGMA journal_mode=WAL;BEGIN;\n{schema}\n\
+             INSERT INTO project (id,worktree,time_created,time_updated,sandboxes) VALUES ('global','/',0,0,'[]');COMMIT;"
+        ));
+        let now = local_noon();
+        let since = Today::at(now, when::local_day(now)).since;
+        let session = since * 1000;
+        writer.exec(&format!(
+            "INSERT INTO session_v2 (id,project_id,fork_session_id,slug,directory,version,time_created,time_updated)
+             VALUES ('ses_a','global',NULL,'ses_a','/work','2.3.2',{session},{session});"
+        ));
+        for (n, at, input) in [(1, since - HOUR, 70_000), (2, now - MINUTE, 1000)] {
+            let ms = at * 1000 + 494;
+            let data = format!(
+                r#"{{"time":{{"created":{ms},"completed":{ms}}},"agent":"build","model":{{"id":"fake-1","providerID":"fake"}},"content":[{{"type":"text","text":"SYNTHETIC-REPLY"}}],"finish":"stop","cost":0.00357,"tokens":{{"input":{input},"output":30,"reasoning":4,"cache":{{"read":200,"write":0}}}}}}"#
+            );
+            writer.exec(&format!(
+                "INSERT INTO session_message (id,session_id,type,seq,time_created,time_updated,data)
+                 VALUES ('msg_{n}','ses_a','assistant',{n},{ms},{ms},'{data}');"
+            ));
+        }
+        let expected = Activity {
+            since,
+            store: Store::V2 { legacy: false },
+            steps: 1,
+            tokens: Tokens { input: 1000, output: 30, reasoning: 4, cache_read: 200, cache_write: 0 },
+            cost: Some(Cost { usd: 0.00357, complete: true }),
+            last: Some(now - MINUTE),
+        };
+        assert_eq!(opencode::read(&path, now, WAIT), Report::Today(expected));
+    }
+}
