@@ -1,5 +1,9 @@
 //! Parses the command line and dispatches commands.
 
+// Features not yet ported to Windows stay compiled there but cannot be reached, so their
+// helpers count as unused. Unix builds still report dead code as usual.
+#![cfg_attr(windows, allow(dead_code))]
+
 mod actions;
 mod alerts;
 mod diff;

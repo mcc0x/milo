@@ -1,34 +1,58 @@
 //! Serves the settings editor on an ephemeral loopback address for this invocation only.
 
+#[cfg(unix)]
 mod assets;
+#[cfg(unix)]
 mod http;
+#[cfg(unix)]
 mod launch;
+#[cfg(unix)]
 mod remote;
 
+#[cfg(unix)]
 use crate::sys::AsRawFd;
 use std::ffi::OsStr;
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::io::{self, PipeReader, Read, Write};
+#[cfg(unix)]
 use std::mem::MaybeUninit;
+#[cfg(unix)]
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
+#[cfg(unix)]
 use std::os::fd::IntoRawFd;
+#[cfg(unix)]
 use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+#[cfg(unix)]
 use std::sync::mpsc::{self, Receiver, SyncSender};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use self::http::{Access, Input, Request, Response, Route};
+#[cfg(unix)]
 use self::launch::Launch;
+#[cfg(unix)]
 use crate::rex::{self, Viewers};
+#[cfg(unix)]
 use crate::setup::web::Editor;
 
 pub(crate) const DEFAULT_PORT: u16 = 6110;
+#[cfg(unix)]
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+#[cfg(unix)]
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(unix)]
 const MAX_CLIENTS: usize = 16;
+#[cfg(unix)]
 static STOP: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
 static WAKE_WRITER: AtomicI32 = AtomicI32::new(-1);
 
+#[cfg(unix)]
 // Browsers omit the default port in both Host and Origin.
 fn http_authority(address: std::net::SocketAddr) -> String {
     if address.port() == 80 { address.ip().to_string() } else { address.to_string() }
@@ -36,6 +60,7 @@ fn http_authority(address: std::net::SocketAddr) -> String {
 
 /// How `milo web` was asked to run.
 #[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) enum Start<'a> {
     /// Serve the editor and open it on this computer.
     Local { open_browser: bool, port: u16 },
@@ -46,10 +71,17 @@ pub(crate) enum Start<'a> {
     Host { host: &'a OsStr, project: Option<&'a OsStr>, open_browser: bool, port: u16 },
 }
 
+#[cfg(unix)]
 /// What `milo web --forwarded-port` prints after its link, so that the
 /// computer carrying the forward knows which port to carry it to.
 pub(crate) const FORWARD_TARGET: &str = "milo web: serving a forward on 127.0.0.1:";
 
+#[cfg(windows)]
+pub(crate) fn run(_: Start<'_>) -> Result<(), String> {
+    Err("milo web is not supported on Windows yet.".into())
+}
+
+#[cfg(unix)]
 pub(crate) fn run(start: Start<'_>) -> Result<(), String> {
     STOP.store(false, Ordering::Relaxed);
     let wake = WakePipe::open().map_err(|error| format!("could not create a termination pipe: {error}"))?;
@@ -110,6 +142,7 @@ pub(crate) fn run(start: Start<'_>) -> Result<(), String> {
     serve(listener, &wake.0, &access, editor, launcher).map_err(|error| format!("settings server: {error}"))
 }
 
+#[cfg(unix)]
 fn launch_browser(url: &str, viewers: Option<Viewers>) -> Option<Launch> {
     if STOP.load(Ordering::Relaxed) {
         return None;
@@ -132,6 +165,7 @@ fn launch_browser(url: &str, viewers: Option<Viewers>) -> Option<Launch> {
     }
 }
 
+#[cfg(unix)]
 /// Runs a startup step off the server loop while keeping the browser handoff
 /// in order. Its file must still go when its time is up or Milo is stopped.
 /// Returns None when stopped first, leaving the read to the end of the process.
@@ -172,6 +206,7 @@ fn open_beside<T: Send + 'static>(
     }
 }
 
+#[cfg(unix)]
 fn random_token() -> io::Result<String> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut bytes = [0; 32];
@@ -184,13 +219,16 @@ fn random_token() -> io::Result<String> {
     Ok(token)
 }
 
+#[cfg(unix)]
 extern "C" fn stop(_: libc::c_int) {
     STOP.store(true, Ordering::Relaxed);
     close_wake_writer();
 }
 
+#[cfg(unix)]
 struct WakePipe(PipeReader);
 
+#[cfg(unix)]
 impl WakePipe {
     fn open() -> io::Result<Self> {
         let (reader, writer) = io::pipe()?;
@@ -199,12 +237,14 @@ impl WakePipe {
     }
 }
 
+#[cfg(unix)]
 impl Drop for WakePipe {
     fn drop(&mut self) {
         close_wake_writer();
     }
 }
 
+#[cfg(unix)]
 fn close_wake_writer() {
     // Whichever path takes the writer owns it. Closing it wakes poll with POLLHUP,
     // even for a signal delivered on a different thread or just before poll starts.
@@ -215,8 +255,10 @@ fn close_wake_writer() {
     }
 }
 
+#[cfg(unix)]
 struct Signal(libc::c_int, libc::sigaction);
 
+#[cfg(unix)]
 impl Signal {
     fn install(number: libc::c_int) -> io::Result<Self> {
         // SAFETY: Zeroed flags and a mask initialized by sigemptyset are valid for sigaction.
@@ -234,6 +276,7 @@ impl Signal {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Signal {
     fn drop(&mut self) {
         // SAFETY: The saved action came from sigaction for the same signal number.
@@ -241,6 +284,7 @@ impl Drop for Signal {
     }
 }
 
+#[cfg(unix)]
 fn serve(
     listener: TcpListener,
     wake: &PipeReader,
@@ -274,12 +318,14 @@ fn serve(
     result
 }
 
+#[cfg(unix)]
 struct EditorWorker {
     send: SyncSender<EditorJob>,
     receive: Receiver<Completion>,
     ready: PipeReader,
 }
 
+#[cfg(unix)]
 impl EditorWorker {
     fn submit(&self, job: EditorJob) -> io::Result<()> {
         // The poll loop submits only when no other job is in flight.
@@ -292,6 +338,7 @@ impl EditorWorker {
     }
 }
 
+#[cfg(unix)]
 fn serve_clients(
     listener: TcpListener,
     wake: &PipeReader,
@@ -427,17 +474,20 @@ fn serve_clients(
     Ok(())
 }
 
+#[cfg(unix)]
 struct Client {
     socket: TcpStream,
     exchange: Exchange,
     deadline: Instant,
 }
 
+#[cfg(unix)]
 enum Exchange {
     Reading(Request),
     Writing(Response),
 }
 
+#[cfg(unix)]
 enum Progress {
     Wait,
     Reply { authenticated: bool },
@@ -445,6 +495,7 @@ enum Progress {
     Done,
 }
 
+#[cfg(unix)]
 impl Client {
     fn new(socket: TcpStream) -> io::Result<Self> {
         socket.set_nonblocking(true)?;
@@ -493,6 +544,7 @@ impl Client {
     }
 }
 
+#[cfg(unix)]
 fn respond_read(route: Route, snapshot: &Arc<String>) -> Response {
     match route {
         Route::Static(asset) => asset.response(),
@@ -506,17 +558,20 @@ fn respond_read(route: Route, snapshot: &Arc<String>) -> Response {
     }
 }
 
+#[cfg(unix)]
 struct EditorJob {
     route: Route,
     request: Request,
 }
 
+#[cfg(unix)]
 struct Completion {
     response: Response,
     snapshot: Option<Arc<String>>,
     close: bool,
 }
 
+#[cfg(unix)]
 impl EditorJob {
     fn apply(self, editor: &mut Editor, hosted: &mut Vec<HostedReceipt>) -> Completion {
         let body = self.request.body();
@@ -551,6 +606,7 @@ impl EditorJob {
     }
 }
 
+#[cfg(unix)]
 fn respond_close(body: &[u8], editor: &mut Editor) -> (Response, bool) {
     use crate::setup::web::CloseError;
 
@@ -569,6 +625,7 @@ fn respond_close(body: &[u8], editor: &mut Editor) -> (Response, bool) {
     (response, false)
 }
 
+#[cfg(unix)]
 /// A preview or an export answers with its own data and leaves the editor
 /// as it was. An import or its undo answers with the editor's new state.
 fn respond_transfer(body: &[u8], editor: &mut Editor) -> Completion {
@@ -586,6 +643,7 @@ fn respond_transfer(body: &[u8], editor: &mut Editor) -> Completion {
     }
 }
 
+#[cfg(unix)]
 fn respond_telegram_chats(body: &[u8], editor: &Editor) -> Response {
     use crate::alerts::TelegramChatsError::{InvalidToken, Unavailable};
 
@@ -598,18 +656,21 @@ fn respond_telegram_chats(body: &[u8], editor: &Editor) -> Response {
     }
 }
 
+#[cfg(unix)]
 struct HostedReceipt {
     key: String,
     end: Instant,
     outcome: HostedOutcome,
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy)]
 enum HostedOutcome {
     Saved,
     Discarded { cleanup_confirmed: bool },
 }
 
+#[cfg(unix)]
 fn respond_hosted_connect(body: &[u8], editor: &mut Editor, receipts: &mut Vec<HostedReceipt>) -> Completion {
     use crate::alerts::relay::{ConnectError, Connected, ConnectionRequest};
     use crate::setup::web::HostedSaveError;
@@ -671,6 +732,7 @@ fn respond_hosted_connect(body: &[u8], editor: &mut Editor, receipts: &mut Vec<H
     reply
 }
 
+#[cfg(unix)]
 fn hosted_replay(receipts: &mut Vec<HostedReceipt>, key: &str, now: Instant, editor: &Editor) -> Option<Completion> {
     receipts.retain(|receipt| receipt.end > now);
     let receipt = receipts.iter().find(|receipt| receipt.key == key)?;
@@ -682,11 +744,13 @@ fn hosted_replay(receipts: &mut Vec<HostedReceipt>, key: &str, now: Instant, edi
     })
 }
 
+#[cfg(unix)]
 fn hosted_saved(state: String) -> Completion {
     let snapshot = Arc::new(state);
     Completion { response: Response::json(Arc::clone(&snapshot)), snapshot: Some(snapshot), close: false }
 }
 
+#[cfg(unix)]
 fn hosted_error(error: crate::alerts::relay::ConnectError) -> Response {
     use crate::alerts::relay::ConnectError;
 
@@ -707,6 +771,7 @@ fn hosted_error(error: crate::alerts::relay::ConnectError) -> Response {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1073,4 +1138,13 @@ mod tests {
             result.unwrap();
         });
     }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn the_settings_dashboard_is_unsupported_on_windows() {
+    assert_eq!(
+        run(Start::Local { open_browser: false, port: 0 }),
+        Err("milo web is not supported on Windows yet.".into())
+    );
 }

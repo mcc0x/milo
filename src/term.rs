@@ -159,7 +159,9 @@ impl Capabilities {
     const TEST: Self = Self { colors: Colors::Rgb, graphics: true };
 }
 
-pub(crate) use crate::sys::{poll as wait_ready, wake};
+pub(crate) use crate::sys::poll as wait_ready;
+#[cfg(any(unix, test))]
+pub(crate) use crate::sys::wake;
 
 pub fn milliseconds(wait: Duration) -> i32 {
     i32::try_from(wait.as_millis() + 1).unwrap_or(i32::MAX)

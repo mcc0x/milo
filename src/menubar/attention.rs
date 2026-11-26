@@ -5,7 +5,10 @@
 //! and off means no process, no Rex call and no timer. It is separate from
 //! alert mirroring and from low-quota notifications, and needs neither.
 
+#![cfg_attr(windows, allow(dead_code))]
+
 mod board;
+#[cfg(unix)]
 mod watch;
 
 use std::io;
@@ -158,7 +161,12 @@ impl Command {
     }
 }
 
+const UNSUPPORTED: &str = "The menu bar app is not supported on Windows.";
+
 pub(crate) fn run(command: Command) -> Result<(), String> {
+    if cfg!(windows) {
+        return Err(UNSUPPORTED.into());
+    }
     let config = paths::config_dir().ok_or("Milo's configuration directory is unavailable")?;
     let file = Indicator::file(&config);
     let saved = |result: io::Result<()>| result.map_err(|error| format!("Could not save the menu's choice: {error}"));
@@ -177,7 +185,10 @@ pub(crate) fn run(command: Command) -> Result<(), String> {
             saved(save_value(&config, "attention_states", |_| Ok(states.value())))?;
             report(&Attention { show: Attention::load(&file).unwrap_or_default().show, states }.describe())
         }
+        #[cfg(unix)]
         Command::Watch => watch::run(&file).map_err(|error| format!("The watch on Rex ended: {error}")),
+        #[cfg(windows)]
+        Command::Watch => Err(UNSUPPORTED.into()),
         Command::Jump { host, block } => report(&rex::jump(&host, &block).report()),
     }
 }

@@ -10,13 +10,15 @@ use std::fmt;
 use std::fs;
 use std::hash::{BuildHasher as _, DefaultHasher, Hasher as _, RandomState};
 use std::io::{self, Read as _};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use super::{Alerts, AlertsEdit, Destination, Settings, send};
-use crate::{fs_ops, preferences, setup::lock};
+use crate::setup::lock;
+use crate::{fs_ops, preferences};
 
 /// A per-opt-in, opaque comparison tag for the exact recipient credential.
 /// This is deliberately not a secret-store format, so legacy pairings work
@@ -289,8 +291,9 @@ fn queue(edit: &AlertsEdit<'_>, settings: &Settings, destination: Destination, n
             .current_dir("/")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0);
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        notice.process_group(0);
         fs_ops::spawn(&mut notice)
     });
     if let Ok(mut child) = spawned {

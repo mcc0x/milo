@@ -55,6 +55,9 @@ const USAGE: &str = "unexpected arguments; see milo alerts --help";
 
 /// Runs one `milo alerts` command and prints what it did.
 pub(crate) fn command(action: Option<&OsStr>, rest: &[OsString]) -> Result<(), String> {
+    if cfg!(windows) {
+        return Err("milo alerts is not supported on Windows yet.".into());
+    }
     let alerts = Alerts::real().ok_or("Milo could not find its settings folder; HOME is not set.")?;
     let words: Vec<_> = action.into_iter().chain(rest.iter().map(OsString::as_os_str)).map(OsStr::to_str).collect();
     let report = match words.as_slice() {
@@ -153,6 +156,7 @@ fn secret(prompt: &str) -> Result<String, String> {
     if hidden.is_some() {
         eprintln!();
     }
+    #[cfg_attr(windows, allow(clippy::drop_non_drop))]
     drop(hidden);
     match read {
         Ok(_) if !line.trim().is_empty() => Ok(line.trim().to_owned()),
@@ -161,9 +165,11 @@ fn secret(prompt: &str) -> Result<String, String> {
 }
 
 /// The keyboard's modes as they were before the prompt, for `interrupted`.
+#[cfg(unix)]
 static SHOWN: std::sync::OnceLock<libc::termios> = std::sync::OnceLock::new();
 
 /// Puts typed characters back on the screen before Ctrl-C ends the prompt.
+#[cfg(unix)]
 extern "C" fn interrupted(_: libc::c_int) {
     if let Some(modes) = SHOWN.get() {
         // SAFETY: Standard input is open for the life of the process, the modes
@@ -175,8 +181,10 @@ extern "C" fn interrupted(_: libc::c_int) {
 }
 
 /// Keeps typed characters off the screen until dropped.
+#[cfg(unix)]
 struct Echo(libc::c_int, libc::termios);
 
+#[cfg(unix)]
 impl Echo {
     fn off(fd: libc::c_int) -> Option<Self> {
         // SAFETY: A zeroed termios is plain numbers, and tcgetattr fills it in.
@@ -199,9 +207,27 @@ impl Echo {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Echo {
     fn drop(&mut self) {
         // SAFETY: The descriptor is still open and the modes are those read from it.
         unsafe { libc::tcsetattr(self.0, libc::TCSAFLUSH, &raw const self.1) };
     }
+}
+
+/// Windows has no way here to hide typed characters, so no prompt is hidden.
+#[cfg(windows)]
+struct Echo;
+
+#[cfg(windows)]
+impl Echo {
+    fn off(_: crate::sys::RawFd) -> Option<Self> {
+        None
+    }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn every_alerts_command_is_unsupported_on_windows() {
+    assert_eq!(command(None, &[]), Err("milo alerts is not supported on Windows yet.".into()));
 }

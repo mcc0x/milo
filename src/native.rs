@@ -3,26 +3,47 @@
 mod local;
 pub(crate) mod trusted;
 
+#[cfg(unix)]
 use crate::sys::AsRawFd as _;
+#[cfg(unix)]
 use std::ffi::{CStr, CString};
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::io;
+#[cfg(unix)]
 use std::mem::MaybeUninit;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt as _;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
-use std::path::{Component, Path};
+#[cfg(unix)]
+use std::path::Component;
+use std::path::Path;
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
-use crate::{fs_ops, keys::Key};
+#[cfg(unix)]
+use crate::fs_ops;
+use crate::keys::Key;
 
+#[cfg(unix)]
 const ROOT_CHANGED: &str = "Can't verify the original project folder";
+#[cfg(unix)]
 const INVALID_PATH: &str = "This is not a path inside the project";
+#[cfg(unix)]
 const MISSING: &str = "The selected path no longer exists";
+#[cfg(unix)]
 const LINK: &str = "Can't use a symbolic link or a path through one";
+#[cfg(unix)]
 const UNVERIFIED: &str = "Can't verify the selected path";
+#[cfg(unix)]
 const LAUNCHABLE: &str = "Use Reveal for launchable files and aliases";
+#[cfg(unix)]
 const OPEN_WAIT: Duration = Duration::from_secs(2);
+#[cfg(unix)]
 const OPEN_TIMEOUT: &str = "The macOS opener took too long";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,7 +60,10 @@ impl Action {
             _ => None,
         }
     }
+}
 
+#[cfg(unix)]
+impl Action {
     pub(crate) fn run(self, root: &Path, identity: Option<(u64, u64)>, relative: &Path) -> Result<(), &'static str> {
         locality(root)?;
         self.validate(&working_entry(root, identity, relative)?)?;
@@ -79,14 +103,29 @@ impl Action {
     }
 }
 
+#[cfg(windows)]
+impl Action {
+    pub(crate) fn run(self, root: &Path, _: Option<(u64, u64)>, _: &Path) -> Result<(), &'static str> {
+        locality(root)?;
+        Err("Native opening is only available on macOS")
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Choices {
     pub(crate) open: bool,
     pub(crate) reveal: bool,
 }
 
+/// Windows has no native opener, so no action is offered.
+#[cfg(windows)]
+pub(crate) fn choices(_: &Path, _: Option<(u64, u64)>, _: &Path) -> Choices {
+    Choices::default()
+}
+
 /// An explicit menu opening needs one location check and one path traversal
 /// for both native actions. A later dispatch checks them again independently.
+#[cfg(unix)]
 pub(crate) fn choices(root: &Path, identity: Option<(u64, u64)>, relative: &Path) -> Choices {
     let Ok(entry) = working_entry(root, identity, relative) else { return Choices::default() };
     if Action::Reveal.validate(&entry).is_err() || locality(root).is_err() {
@@ -104,16 +143,39 @@ fn locality(root: &Path) -> Result<(), &'static str> {
 }
 
 /// Capture the original directory before the user can request an action.
+#[cfg(unix)]
 pub(crate) fn identity(root: &Path) -> Option<(u64, u64)> {
     dir_id(&root_dir(root)?)
 }
 
+/// Capture the original directory before the user can request an action.
+#[cfg(windows)]
+pub(crate) fn identity(root: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    if !root.is_absolute() {
+        return None;
+    }
+    let dir = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(root)
+        .ok()?;
+    if !dir.metadata().ok()?.is_dir() {
+        return None;
+    }
+    crate::sys::identity(&dir).ok()
+}
+
+#[cfg(unix)]
 pub(crate) struct WorkingEntry {
     pub(crate) dir: File,
     pub(crate) name: CString,
     pub(crate) stat: libc::stat,
 }
 
+#[cfg(unix)]
 /// Resolve a working entry through the original directory, without any links
 /// or normalized-away components in the requested relative path.
 pub(crate) fn working_entry(
@@ -139,11 +201,13 @@ pub(crate) fn working_entry(
     Ok(WorkingEntry { dir, name, stat })
 }
 
+#[cfg(unix)]
 fn dir_id(dir: &File) -> Option<(u64, u64)> {
     let metadata = dir.metadata().ok()?;
     Some((metadata.dev(), metadata.ino()))
 }
 
+#[cfg(unix)]
 fn root_dir(root: &Path) -> Option<File> {
     let mut components = root.components();
     if components.next() != Some(Component::RootDir) {
@@ -158,6 +222,7 @@ fn root_dir(root: &Path) -> Option<File> {
     Some(dir)
 }
 
+#[cfg(unix)]
 fn child_name(bytes: &[u8]) -> Result<CString, &'static str> {
     if matches!(bytes, b"" | b"." | b"..") {
         return Err(INVALID_PATH);
@@ -165,6 +230,7 @@ fn child_name(bytes: &[u8]) -> Result<CString, &'static str> {
     CString::new(bytes).map_err(|_| INVALID_PATH)
 }
 
+#[cfg(unix)]
 fn path_error(error: io::Error) -> &'static str {
     match error.raw_os_error() {
         Some(libc::ENOENT) => MISSING,
@@ -174,6 +240,7 @@ fn path_error(error: io::Error) -> &'static str {
     }
 }
 
+#[cfg(unix)]
 fn stat_at(dir: &File, name: &CStr) -> io::Result<libc::stat> {
     let mut stat = MaybeUninit::uninit();
     // SAFETY: The descriptor and NUL-terminated name are live and the output is writable.
@@ -185,6 +252,7 @@ fn stat_at(dir: &File, name: &CStr) -> io::Result<libc::stat> {
     Ok(unsafe { stat.assume_init() })
 }
 
+#[cfg(unix)]
 fn check_open(dir: &File, name: &CStr, stat: &libc::stat) -> Result<(), &'static str> {
     // Some types are launched based on their name even without POSIX execute bits.
     const EXTENSIONS: &[&[u8]] = &[
@@ -249,6 +317,7 @@ fn xattr(file: &File, name: &CStr, buffer: &mut [u8]) -> Result<Option<usize>, &
     }
 }
 
+#[cfg(unix)]
 fn launch(mut command: Command) -> Result<(), &'static str> {
     let mut child = command
         .stdin(Stdio::null())
@@ -259,6 +328,7 @@ fn launch(mut command: Command) -> Result<(), &'static str> {
     wait_for_open(&mut child, OPEN_WAIT)
 }
 
+#[cfg(unix)]
 fn wait_for_open(child: &mut Child, timeout: Duration) -> Result<(), &'static str> {
     let deadline = Instant::now() + timeout;
     let failure = loop {
@@ -280,13 +350,18 @@ fn wait_for_open(child: &mut Child, timeout: Duration) -> Result<(), &'static st
 #[cfg(test)]
 pub(crate) mod tests {
     use std::cell::RefCell;
+    #[cfg(unix)]
     use std::ffi::OsStr;
+    #[cfg(unix)]
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt as _, symlink};
+    #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
     use std::path::PathBuf;
 
     use super::*;
+    #[cfg(unix)]
     use crate::fixture::Fixture;
 
     struct Fake {
@@ -331,6 +406,7 @@ pub(crate) mod tests {
         })
     }
 
+    #[cfg(unix)]
     pub(super) fn capture(action: Action, command: &Command) -> bool {
         FAKE.with(|slot| {
             let mut slot = slot.borrow_mut();
@@ -348,6 +424,7 @@ pub(crate) mod tests {
         })
     }
 
+    #[cfg(unix)]
     #[test]
     fn exact_arguments_for_duplicate_basenames_and_folders() {
         let fixture = Fixture::folder();
@@ -369,6 +446,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn passes_os_bytes_without_a_lossy_conversion() {
         let path = Path::new(OsStr::from_bytes(b"/project/-name\xff.pdf"));
@@ -376,6 +454,7 @@ pub(crate) mod tests {
         assert_eq!(command.get_args().collect::<Vec<_>>(), [path.as_os_str()]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn denies_remote_before_checking_the_path() {
         let (result, calls) =
@@ -384,6 +463,7 @@ pub(crate) mod tests {
         assert!(calls.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn menu_eligibility_checks_paths_and_locality_without_launching() {
         let fixture = Fixture::folder();
@@ -407,6 +487,7 @@ pub(crate) mod tests {
         assert!(calls.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn rejects_missing_traversal_and_special_paths() {
         let fixture = Fixture::folder();
@@ -430,6 +511,7 @@ pub(crate) mod tests {
         assert!(calls.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn refuses_linked_leaf_directory_and_root_ancestor() {
         let fixture = Fixture::folder();
@@ -453,6 +535,7 @@ pub(crate) mod tests {
         assert!(calls.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn detects_same_named_root_replacement_and_unavailable_identity() {
         let fixture = Fixture::folder();
@@ -469,6 +552,7 @@ pub(crate) mod tests {
         assert!(calls.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn launchable_formats_and_executable_mode_are_reveal_only() {
         let fixture = Fixture::folder();
@@ -492,6 +576,7 @@ pub(crate) mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn refuses_finder_alias_metadata_and_per_file_app_bindings() {
         let fixture = Fixture::folder();
@@ -523,6 +608,7 @@ pub(crate) mod tests {
         assert_eq!(calls.len(), 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn reports_spawn_and_child_failure_without_a_gui() {
         let fixture = Fixture::folder();
@@ -532,6 +618,7 @@ pub(crate) mod tests {
         assert_eq!(launch(failing), Err("The macOS opener couldn't open the selected path"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn kills_and_reaps_an_opener_that_does_not_exit() {
         let mut child = Command::new("/bin/cat").stdin(Stdio::piped()).spawn().unwrap();

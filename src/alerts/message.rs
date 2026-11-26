@@ -19,6 +19,7 @@ const MILO_BLUE: u32 = 0x4582f9;
 const MILO_ICON: &str = "https://usemilo.net/apple-touch-icon.png";
 
 /// UTC send time for Discord's localized embed footer, fixed across delivery retries.
+#[cfg(unix)]
 fn discord_timestamp() -> String {
     let now = libc::time_t::try_from(crate::when::now()).unwrap_or(0);
     let mut utc = std::mem::MaybeUninit::uninit();
@@ -36,6 +37,28 @@ fn discord_timestamp() -> String {
         utc.tm_hour,
         utc.tm_min,
         utc.tm_sec
+    )
+}
+
+/// UTC send time for Discord's localized embed footer, fixed across delivery retries.
+#[cfg(windows)]
+fn discord_timestamp() -> String {
+    let now = crate::when::now();
+    let (days, seconds) = (now.div_euclid(crate::when::DAY), now.rem_euclid(crate::when::DAY));
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        ",\"timestamp\":\"{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z\"",
+        seconds / 3600,
+        seconds % 3600 / 60,
+        seconds % 60
     )
 }
 

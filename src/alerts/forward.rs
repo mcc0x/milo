@@ -5,9 +5,12 @@ use crate::sys::AsRawFd as _;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::io::{self, BufRead as _, BufReader, Read as _};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdout};
+#[cfg(unix)]
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -16,8 +19,10 @@ use std::time::{Duration, Instant};
 use super::event::{self, Alert, Seen};
 use super::send::{self, Outcome};
 use super::{Alerts, Destination, Health, Settings, lifecycle, message, origin, secret};
+#[cfg(unix)]
+use crate::fs_ops;
 use crate::setup::lock;
-use crate::{fs_ops, preferences, rex};
+use crate::{preferences, rex};
 
 /// The longest line of the stream that is read. Rex's largest alert is far smaller.
 const LINE_LIMIT: u64 = 1 << 16;
@@ -44,14 +49,17 @@ const STATUS_LIMIT: u64 = 1 << 10;
 const REFUSED_CREDENTIAL: &str =
     "Paused: the saved destination refused its credential. Save it again or turn its forwarding off and on.";
 
+#[cfg(unix)]
 static STOP: AtomicBool = AtomicBool::new(false);
 
+#[cfg(unix)]
 extern "C" fn caught(signal: libc::c_int) {
     if signal != libc::SIGCHLD {
         STOP.store(true, Ordering::Relaxed);
     }
 }
 
+#[cfg(unix)]
 fn empty_mask() -> libc::sigset_t {
     // SAFETY: sigset_t is integer storage; initialize all words, including any unused by libc.
     let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -60,10 +68,12 @@ fn empty_mask() -> libc::sigset_t {
     mask
 }
 
+#[cfg(unix)]
 /// Wait for SIGCHLD or a stop request without polling an idle worker. Keep
 /// signals blocked between checking its state and atomically waiting for them.
 struct Signals(libc::sigset_t);
 
+#[cfg(unix)]
 impl Signals {
     fn watch() -> io::Result<Self> {
         let watched = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGCHLD];
@@ -145,10 +155,12 @@ impl Backoff {
     }
 }
 
+#[cfg(unix)]
 /// A private process group contains the worker, Rex and in-flight deliveries.
 /// Keep the worker's PID reserved until the whole group has been signalled.
 struct Worker(Option<Child>);
 
+#[cfg(unix)]
 impl Worker {
     fn start(milo: &Path, signals: &Signals, recovery: Recovery) -> io::Result<Self> {
         let mut command = Command::new(milo);
@@ -173,6 +185,7 @@ impl Worker {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Worker {
     fn drop(&mut self) {
         if self.0.is_some() {
@@ -181,6 +194,7 @@ impl Drop for Worker {
     }
 }
 
+#[cfg(unix)]
 /// Examine a direct child without releasing its PID (and group identity).
 fn exited(child: &Child) -> io::Result<bool> {
     loop {
@@ -202,6 +216,7 @@ fn exited(child: &Child) -> io::Result<bool> {
     }
 }
 
+#[cfg(unix)]
 pub(super) fn supervise(alerts: &Alerts) -> io::Result<()> {
     let signals = Signals::watch()?;
     let state = alerts.state_dir();
@@ -245,6 +260,7 @@ pub(super) fn supervise(alerts: &Alerts) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 extern "C" fn end_worker(_: libc::c_int) {
     // SAFETY: PID zero targets only this process group, verified private before installing this handler.
     unsafe { libc::kill(0, libc::SIGKILL) };
@@ -254,10 +270,12 @@ extern "C" fn end_worker(_: libc::c_int) {
 /// as it comes back.
 static REX_STARTED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(unix)]
 extern "C" fn rex_started(_: libc::c_int) {
     REX_STARTED.store(true, Ordering::Relaxed);
 }
 
+#[cfg(unix)]
 pub(super) fn run(alerts: &Alerts, parent: libc::pid_t, mut recovery: Recovery) -> io::Result<()> {
     // SAFETY: getppid reads this process's parent without taking any pointers.
     let actual_parent = unsafe { libc::getppid() };
@@ -307,6 +325,21 @@ pub(super) fn run(alerts: &Alerts, parent: libc::pid_t, mut recovery: Recovery) 
             Ended::Stream => return Err(io::Error::other("Rex event stream did not close")),
         }
     }
+}
+
+#[cfg(windows)]
+fn exited(_: &Child) -> io::Result<bool> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+#[cfg(windows)]
+pub(super) fn supervise(_: &Alerts) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+#[cfg(windows)]
+pub(super) fn run(_: &Alerts, _: u32, _: Recovery) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
 }
 
 type Revisions = [Option<u64>; 2];
@@ -1039,7 +1072,7 @@ pub(super) fn health(state: &Path, settings: &Settings, set_up: bool) -> (Health
     let (status, notes) = snapshot(state);
     let live = lock::alerts_worker(state).ok().flatten();
     if let Some(status) = &status
-        && live == Some(status.pid as libc::pid_t)
+        && live == Some(status.pid.cast_signed())
     {
         return (status.health, notes);
     }

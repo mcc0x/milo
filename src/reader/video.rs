@@ -251,13 +251,13 @@ fn check_preparation(cancel: &AtomicBool, deadline: Instant) -> Result<(), &'sta
 }
 
 pub(super) fn snapshot(source: &mut File, cancel: &AtomicBool) -> Result<Snapshot, &'static str> {
+    #[cfg(unix)]
+    return snapshot_unix(source, cancel);
     #[cfg(windows)]
     {
         let _ = (source, cancel);
-        return Err(UNSUPPORTED);
+        Err(UNSUPPORTED)
     }
-    #[cfg(unix)]
-    snapshot_unix(source, cancel)
 }
 
 #[cfg(windows)]

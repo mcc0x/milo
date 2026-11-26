@@ -8,6 +8,7 @@
 use std::borrow::Cow;
 use std::fs;
 use std::io::{self, ErrorKind, Read as _, Write as _};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -168,7 +169,7 @@ fn read_file(path: &Path) -> io::Result<Vec<(String, String)>> {
         Err(error) => return Err(error),
     };
     let info = file.metadata()?;
-    if !info.is_file() || info.permissions().mode() & 0o077 != 0 {
+    if !private(&info) {
         return Err(ErrorKind::PermissionDenied.into());
     }
     let mut text = String::new();
@@ -180,13 +181,30 @@ fn read_file(path: &Path) -> io::Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// Whether only the user can read the file. Windows access lists are not checked yet, so no file qualifies there.
+fn private(info: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        info.is_file() && info.permissions().mode() & 0o077 == 0
+    }
+    #[cfg(windows)]
+    {
+        let _ = info;
+        false
+    }
+}
+
 /// Replaces the file with one made private before anything is written to it.
 fn write_file(path: &Path, secrets: &[(String, String)]) -> io::Result<()> {
+    if cfg!(windows) {
+        return Err(ErrorKind::Unsupported.into());
+    }
     // AlertsEdit already holds the transaction lock, even if config and state share a directory.
     let dir = path.parent().ok_or(ErrorKind::InvalidInput)?;
     fs::create_dir_all(dir)?;
     let _directory = fs_ops::open_dir(dir)?;
     let (temp, mut file) = fs_ops::Temp::create(dir.join(format!(".milo-alerts-{}", std::process::id())))?;
+    #[cfg(unix)]
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
     for (name, secret) in secrets {
         writeln!(file, "{name} = {secret}")?;

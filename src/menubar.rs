@@ -167,6 +167,8 @@ pub(crate) fn installed() -> Option<bool> {
 pub(crate) fn run(_: Action) -> Result<String, String> {
     Err(if cfg!(target_os = "macos") {
         "This Milo build has no menu app. From a checkout, run sh macos/build-menu.sh and use target/local-menu/milo."
+    } else if cfg!(windows) {
+        "The menu bar app is not supported on Windows."
     } else {
         "Milo requires macOS 13 or later."
     }
