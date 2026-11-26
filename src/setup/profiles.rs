@@ -53,11 +53,11 @@ impl Location {
         check_config_dir(config)?;
         check_config_dir(&directory)?;
         let (name, owner) = if let Some(root) = root {
-            let bytes = root.as_os_str().as_encoded_bytes();
+            let bytes = crate::preferences::worktree_bytes(root);
             let hash = bytes
                 .iter()
                 .fold(0xcbf2_9ce4_8422_2325, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
-            (format!("worktree-{hash:016x}"), hex(bytes))
+            (format!("worktree-{hash:016x}"), hex(&bytes))
         } else {
             ("global".into(), "global".into())
         };

@@ -609,10 +609,19 @@ pub(crate) fn layers(dir: &Path, worktree: &Path) -> [PathBuf; 2] {
 
 /// A stable identifier for the checkout path, not the common git directory.
 fn worktree_key(root: &Path) -> u64 {
-    root.as_os_str()
-        .as_encoded_bytes()
+    worktree_bytes(root)
         .iter()
         .fold(0xcbf2_9ce4_8422_2325, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// The checkout path as settings files name it. Git writes a Windows path with forward slashes and
+/// Windows itself with backslashes, so both spellings of one folder are named the way Git writes it.
+pub(crate) fn worktree_bytes(root: &Path) -> std::borrow::Cow<'_, [u8]> {
+    let bytes = root.as_os_str().as_encoded_bytes();
+    if cfg!(windows) && bytes.contains(&b'\\') {
+        return bytes.iter().map(|&byte| if byte == b'\\' { b'/' } else { byte }).collect();
+    }
+    bytes.into()
 }
 
 pub(crate) fn read(path: &Path, limit: u64) -> io::Result<Option<String>> {
