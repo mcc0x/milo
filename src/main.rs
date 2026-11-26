@@ -35,6 +35,7 @@ mod setup;
 mod ssh;
 mod syntax;
 mod task;
+mod telemetry;
 mod term;
 mod titles;
 mod tree;
@@ -808,7 +809,20 @@ fn main() {
     let second = args.next();
     let rest: Vec<_> = args.collect();
     let command = command(first.as_deref(), second.as_deref(), &rest).unwrap_or_else(|why| fail(&why));
-    let result = dispatch(command, pane::run);
+    let count_launch = match command {
+        Command::Home | Command::Setup => true,
+        // Restored Rex rails and floating readers can use the same argv as a typed command.
+        Command::Outline(_)
+        | Command::Path(_)
+        | Command::History(_)
+        | Command::Usage
+        | Command::View { .. }
+        | Command::Edit(_)
+        | Command::Tabs { .. }
+        | Command::Review { float: false, .. } => !rex::inside(),
+        _ => false,
+    };
+    let result = dispatch(command, |start, open| pane::run(start, open, count_launch));
     if term::TERMINATED.load(std::sync::atomic::Ordering::Relaxed) {
         exit(1);
     }

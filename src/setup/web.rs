@@ -9,6 +9,7 @@ use crate::host::Host;
 use crate::json::{self, Value};
 use crate::menubar::{self, Indicator};
 use crate::preferences::{Show, UsageAccount};
+use crate::telemetry;
 
 const BAD_ACTION: &str = "Unknown or invalid Settings action.";
 const UNAVAILABLE: &str = "That choice is unavailable in this Settings session.";
@@ -371,7 +372,8 @@ impl Editor {
         }
         // Whether an import is kept that the page can offer to take back.
         let undo = setup.store.as_ref().is_some_and(|store| transfer::undo_available(&store.state));
-        write!(out, ",\"transfer\":{{\"undo\":{undo}}}}}").expect("writing to a string");
+        write!(out, ",\"transfer\":{{\"undo\":{undo}}},\"telemetry\":{}}}", Optional(telemetry_state()))
+            .expect("writing to a string");
         out
     }
 
@@ -482,6 +484,12 @@ impl Editor {
                 self.setup.refresh_alerts();
                 // The page shows what is sent beside the controls; the notice says what happened.
                 return result.map(|text| text.lines().next().map(|line| Ok(line.to_owned().into())));
+            }
+            Action::Telemetry(enabled) => {
+                let config = crate::paths::config_dir().ok_or(UNAVAILABLE)?;
+                telemetry::set_enabled(&config, enabled)
+                    .map_err(|_| "Could not save your anonymous usage counts preference.")?;
+                Some(Ok("Anonymous usage counts preference saved.".into()))
             }
             _ => return Err(UNAVAILABLE.into()),
         };
@@ -667,6 +675,25 @@ impl Editor {
     }
 }
 
+fn telemetry_state() -> Option<String> {
+    let config = crate::paths::config_dir()?;
+    let enabled = telemetry::enabled(&config).ok()?;
+    let status = if telemetry::suppressed() {
+        "suppressed"
+    } else if !enabled {
+        "off"
+    } else if !telemetry::configured() {
+        "unconfigured"
+    } else {
+        match crate::paths::state_dir().and_then(|state| telemetry::notice_shown(&state).ok()) {
+            Some(true) => "on",
+            Some(false) => "awaiting_notice",
+            None => "unreadable",
+        }
+    };
+    Some(format!("{{\"enabled\":{enabled},\"status\":\"{status}\"}}"))
+}
+
 fn account_at(store: Option<&Store>) -> (Claude, Option<ClaudeSnapshot>) {
     store
         .and_then(|store| store.claude_snapshot().ok())
@@ -701,6 +728,7 @@ enum Action {
     Alerts(AlertChange),
     /// Change Discord presence, or with `None` turn it off.
     Presence(Option<presence::Change>),
+    Telemetry(bool),
 }
 
 impl Action {
@@ -747,6 +775,7 @@ impl Action {
             [Some(field), Some(value), None, None] if action.is("alerts") => {
                 Self::Alerts(AlertChange::parse(field, value)?)
             }
+            [None, Some(value), None, None] if action.is("telemetry") => Self::Telemetry(value.boolean()?),
             [None, Some(value), None, None] if action.is("presence") => {
                 Self::Presence(match value.string(3)?.as_ref() {
                     "on" => Some(presence::Change::Enable),

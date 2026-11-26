@@ -36,6 +36,8 @@ Run `milo web` in your project to open the [settings dashboard](docs/setup.md#br
 
 Choose a pane layout for one worktree or set a global default. Under **Integrations**, you can have Rex arrange new shell tabs, forward alerts to Discord or Telegram, or show Discord presence. To configure [another Rex host](docs/setup.md#several-rex-hosts), run `milo web --host HOST`.
 
+**[Anonymous usage counts](docs/setup.md#anonymous-usage-counts)** estimate active installations, not people or agent usage. Standard builds have no reporting endpoint. A build configured to report shows a terminal notice before it can send anything. Turn counts off there, in **Integrations → Anonymous usage counts**, or with `MILO_TELEMETRY=0`.
+
 [Alert forwarding](docs/setup.md#mirror-rex-alerts) reconnects when Rex returns, but an explicit pause stays paused. Lifecycle notices are optional for each destination. A separate opt-in adds a verified Rex session label to ordinary alerts. Both choices are off by default.
 
 <p align="center"><img src="docs/img/web-settings.webp" width="760" alt="Milo settings for the tidebook worktree. The Integrations page shows Rex automation, Discord presence and alert forwarding, all off."></p>
