@@ -685,11 +685,7 @@ fn telemetry_state() -> Option<String> {
     } else if !telemetry::configured() {
         "unconfigured"
     } else {
-        match crate::paths::state_dir().and_then(|state| telemetry::notice_shown(&state).ok()) {
-            Some(true) => "on",
-            Some(false) => "awaiting_notice",
-            None => "unreadable",
-        }
+        "on"
     };
     Some(format!("{{\"enabled\":{enabled},\"status\":\"{status}\"}}"))
 }

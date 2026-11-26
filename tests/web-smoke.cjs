@@ -24,6 +24,11 @@ const section = (page, name) => page.getByRole('navigation').getByRole('button',
 const usageTools = ['Codex', 'Claude Code', 'OpenCode'];
 const usageChoice = (page, name) => page.getByRole('combobox', {name, exact: true});
 const usageAccounts = ['DeepSeek balance', 'OpenRouter spend', 'Devin ACUs', 'Copilot AI credits'];
+const countsAvailability = {
+  suppressed: /environment disables sending/,
+  unconfigured: /no reporting server configured/,
+  on: /first eligible launch sends nothing/,
+};
 
 async function withMilo(binary, cwd, env, run) {
   const server = spawn(binary, ['web', '--no-open', '--port', '0'], {
@@ -63,7 +68,8 @@ async function manageAnonymousCounts(page, url, managed) {
   const headers = {Authorization: `Bearer ${new URL(url).hash.slice(1)}`};
   const initial = await (await page.request.get(new URL('/api/state', url).href, {headers})).json();
   assert.equal(initial.telemetry.enabled, true);
-  assert((managed ? ['suppressed'] : ['unconfigured', 'awaiting_notice']).includes(initial.telemetry.status), 'a fresh user is not sending');
+  assert((managed ? ['suppressed'] : ['unconfigured', 'on']).includes(initial.telemetry.status),
+    'availability follows the environment and build without changing the saved preference');
   const invalid = await page.request.post(api, {
     headers: {...headers, Origin: new URL(url).origin},
     data: {version: initial.version, action: 'telemetry', scope: 'worktree', value: false},
@@ -74,7 +80,7 @@ async function manageAnonymousCounts(page, url, managed) {
   await button(page, 'Anonymous usage counts').click();
   const control = page.getByRole('switch', {name: 'Allow anonymous counts', exact: true});
   assert.equal(await control.getAttribute('aria-checked'), 'true');
-  assert.match(await page.locator('#telemetry-status').textContent(), managed ? /environment disables sending/ : /reporting server configured|first-launch notice/);
+  assert.match(await page.locator('#telemetry-status').textContent(), countsAvailability[initial.telemetry.status]);
   await control.press('Space');
   await page.getByRole('switch', {name: 'Allow anonymous counts', checked: false}).waitFor();
   assert(await control.evaluate(element => element === document.activeElement), 'saving keeps keyboard focus');
@@ -83,6 +89,7 @@ async function manageAnonymousCounts(page, url, managed) {
   await button(page, 'Back to integrations').press('Enter');
   assert(await button(page, 'Anonymous usage counts').evaluate(element => element === document.activeElement));
   await section(page, 'Layout').click();
+  return initial.telemetry.status;
 }
 
 async function checkAnonymousCountsAcrossProjects(page, suppressed, enable) {
@@ -1333,9 +1340,10 @@ async function main() {
     browser = await chromium.launch({executablePath: process.env.CHROME_BIN, env});
     const desktop = await browser.newContext();
     desktop.setDefaultTimeout(timeout);
+    let countsStatus;
     await withMilo(binary, cwd, env, async url => {
       const page = await openEditor(desktop, url);
-      await manageAnonymousCounts(page, url, managed);
+      countsStatus = await manageAnonymousCounts(page, url, managed);
       await assert.rejects(readFile(join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf')), {code: 'ENOENT'});
       await checkAlerts(page);
       await page.clock.install();
@@ -1364,8 +1372,7 @@ async function main() {
       await button(page, 'Anonymous usage counts').click();
       const counts = page.getByRole('switch', {name: 'Allow anonymous counts', exact: true});
       assert.equal(await counts.getAttribute('aria-checked'), 'true', 'the restored preference persists');
-      assert.match(await page.locator('#telemetry-status').textContent(), managed ? /environment disables sending/ : /reporting server configured|first-launch notice/,
-        'a Settings change does not acknowledge the first-launch notice');
+      assert.match(await page.locator('#telemetry-status').textContent(), countsAvailability[countsStatus]);
       await section(page, 'Layout').click();
       for (const [name, value] of edits) {
         assert.equal(await number(page, name).inputValue(), value, `${name} persisted across a server restart`);

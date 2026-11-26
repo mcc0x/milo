@@ -49,6 +49,8 @@ jobs:
     if: needs.source.outputs.native == 'true'
     runs-on: windows-2025
     timeout-minutes: 30
+    env:
+      MILO_TELEMETRY: '0'
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

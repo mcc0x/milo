@@ -56,9 +56,7 @@ const telemetryStatus: Record<TelemetryStatus, string> = {
   off: 'Your saved preference is off.',
   suppressed: 'This environment disables sending, regardless of your saved preference.',
   unconfigured: 'This build has no reporting server configured.',
-  awaiting_notice: 'Milo won’t send counts until after you acknowledge the first-launch notice.',
-  unreadable: 'Milo can’t read whether the first-launch notice was acknowledged.',
-  on: 'Milo can send anonymous usage counts.',
+  on: 'The first eligible launch sends nothing. Later launches may send counts.',
 };
 
 function AnonymousCounts() {
@@ -77,7 +75,8 @@ function AnonymousCounts() {
         </button>
       </SettingRow>
       <p className="setting-detail" role="status" id="telemetry-status">{telemetryStatus[telemetry.status]}</p>
-      <p className="setting-detail">Counts estimate how many installations open Milo each day and month. Each report sends only the UTC date and two yes/no fields: first report from this installation and first report this month.</p>
+      <p className="setting-detail">Reports send only the UTC date and two yes/no fields: first report from this installation and first report this month.</p>
+      <p className="setting-detail">The receiving app stores totals only. Network infrastructure may log IP addresses.</p>
     </section>
   );
 }

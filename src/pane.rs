@@ -562,16 +562,8 @@ pub fn run(start: Start<'_>, open: &Open<'_>, count_launch: bool) -> Result<(), 
             return Err(format!("cannot use this terminal: {e}{}", without_a_terminal()));
         }
     };
-    let first = count_launch.then(crate::telemetry::First::start).flatten().map(std::rc::Rc::new);
-    let result = (|| {
-        if let Some(first) = &first {
-            run_entered(Start::Loaded, &|| Ok(Box::new(crate::telemetry::Notice::new(first.clone()))), &mut terminal)?;
-            if !first.proceed.get() {
-                return Ok(());
-            }
-        }
-        run_entered(start, open, &mut terminal)
-    })();
+    let _first_session = count_launch.then(crate::telemetry::start).flatten();
+    let result = run_entered(start, open, &mut terminal);
     terminal.restore();
     // The terminal is the shell's again, so this line stays on screen. It
     // holds a file's name, and it must not wait for a terminal that has stopped reading.

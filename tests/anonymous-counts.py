@@ -133,25 +133,20 @@ def run(tmp, cleanup):
     browse(HOME=str(lab), MILO_TELEMETRY='0')
     assert not list(lab.rglob('anonymous-counts*')), 'Managed first launch created counting state'
     with pane() as first:
-        first.frame(b'Anonymous usage counts')
-        first.send(b'\r')
         first.frame(b'sample.txt')
+        assert not any('Anonymous usage counts' in ''.join(row) for row in first.grid)
         browse()
         first.send(b'q')
         assert first.await_exit(3)
     browse(CI='true')
     browse(MILO_TELEMETRY='0')
-    assert (home / '.local/state/milo/anonymous-counts.state').read_bytes() == b'noticed\n'
+    assert (home / '.local/state/milo/anonymous-counts.state').read_bytes() == b'first-seen\n'
     subprocess.run([binary, '--version'], cwd=repo, env=env, capture_output=True, check=True)
     subprocess.run([binary, 'outline'], cwd=repo, env=env, stdin=subprocess.DEVNULL, capture_output=True)
     off = tmp / 'off'
-    off.mkdir()
-    with pane(HOME=str(off)) as first:
-        first.frame(b'Anonymous usage counts')
-        first.send(b'o')
-        first.frame(b'sample.txt')
-        first.send(b'q')
-        assert first.await_exit(3)
+    config = off / '.config/milo'
+    config.mkdir(parents=True)
+    (config / 'anonymous-counts.conf').write_bytes(b'off\n')
     browse(HOME=str(off))
     assert attempts == 0, "Unexpected request before an eligible later launch"
 
