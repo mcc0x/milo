@@ -139,7 +139,7 @@ fn only_the_end_of_long_output_is_looked_at_and_its_text_is_made_plain() {
 #[test]
 fn a_place_goes_to_the_first_reader_that_takes_it_or_to_a_new_one() {
     let (f, tree) = project();
-    let root = f.root.canonicalize().unwrap();
+    let root = crate::sys::canonicalize(&f.root).unwrap();
     let blocks: Vec<OsString> =
         ["block:11111111-1111-1111-1111-111111111111", "reader", "block:22222222-2222-2222-2222-222222222222"]
             .into_iter()
