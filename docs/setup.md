@@ -41,6 +41,16 @@ From the directory you want to browse, run `milo outline`, `milo history` or `mi
 
 Choose **Terminal settings** for local preferences; you do not need to arrange a layout to save them. To use the browser editor without launching anything externally, run `milo web --no-open` and open its private link yourself. See the [command and feature matrix](../README.md#what-works-in-each-terminal).
 
+## Anonymous usage counts
+
+Standard builds have no reporting endpoint. In a reporting-enabled build, counts are on by default. The first eligible interactive launch records only that Milo has opened on this installation and sends nothing. A later launch can report. To opt out before opening Milo, set `MILO_TELEMETRY=0` in your environment. To save a choice for all your projects, run `milo web` and open **Integrations → Anonymous usage counts**. Neither a worktree preference nor a settings import can change this choice.
+
+An active installation is a user-level Milo installation that opens an eligible interactive pane. Standalone pane launches count; in Rex only opening Home or terminal Settings counts, so automatically started sidebars don't. Milo can report once per UTC day; the report contains the date and two yes/no values: first reporting install, and first active day this calendar month. It contains no identifier, version, OS, repository, account, prompt or agent usage. CI, background helpers and noninteractive commands don't report. Leaving a pane open overnight doesn't count another day. The receiver keeps daily new and active totals and calendar-month active totals. Monthly active is **not** the sum of daily active.
+
+Milo remembers the last day it attempted locally and marks it *before* sending. Offline launches, crashes and lost requests can undercount; Milo doesn't queue missed days or retry an uncertain delivery. If the clock goes back, or a launch had its clock set far into the future, counting waits for a day later than the saved day. Turning counts off stops new attempts without forgetting an earlier one; a request already started cannot be recalled. Replacing the binary does not start a new install if you keep your Milo state. Deleting that state can count the install again; copying it to another account can undercount. Cumulative new installs are not the number still installed.
+
+The receiving application stores aggregate counters, not individual requests. Like other HTTPS connections, a report exposes network metadata to infrastructure along its route. Railway's public edge logs source IP and request time independently of Milo; these are not used to calculate counts. See the [operator's pre-deployment privacy checks](../hosted/counts/README.md) for the distinction between application data and hosting logs.
+
 ## In Rex
 
 In a Rex shell run `milo setup`. Pick **Just the tree**, **Project sidebar**, or start from the tab you already arranged. Adjust the individual panes and appearance if needed. Trying the layout does not change your saved default; undo the trial before saving if it isn't what you want.

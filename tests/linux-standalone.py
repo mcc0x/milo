@@ -146,7 +146,7 @@ if __name__ == "__main__":
         home = Path(root)
         (home / "run").mkdir(mode=0o700)
         repo = home / "checkout"
-        env = {"PATH": path, "HOME": str(home), "SHELL": "/bin/sh", "TERM": "xterm-256color",
+        env = {"PATH": path, "HOME": str(home), "SHELL": "/bin/sh", "TERM": "xterm-256color", "MILO_TELEMETRY": "0",
                "LC_ALL": "C.UTF-8", "XDG_CONFIG_HOME": str(home / "config"), "XDG_STATE_HOME": str(home / "state"),
                "XDG_RUNTIME_DIR": str(home / "run"), "TMPDIR": str(home), "TMUX_TMPDIR": str(home / "run"),
                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}

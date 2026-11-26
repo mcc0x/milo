@@ -7,7 +7,7 @@ umask 077
 lab=$(mktemp -d)
 trap 'rm -rf -- "$lab"' EXIT
 trap 'exit 1' HUP INT TERM
-export HOME="$lab/home" PATH=/usr/bin:/bin
+export HOME="$lab/home" PATH=/usr/bin:/bin MILO_TELEMETRY=0
 unset MILO_BIN_DIR
 mkdir -p "$HOME"
 cd "$lab"

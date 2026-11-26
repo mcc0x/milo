@@ -24,6 +24,11 @@ const section = (page, name) => page.getByRole('navigation').getByRole('button',
 const usageTools = ['Codex', 'Claude Code', 'OpenCode'];
 const usageChoice = (page, name) => page.getByRole('combobox', {name, exact: true});
 const usageAccounts = ['DeepSeek balance', 'OpenRouter spend', 'Devin ACUs', 'Copilot AI credits'];
+const countsAvailability = {
+  suppressed: /environment disables sending/,
+  unconfigured: /no reporting server configured/,
+  on: /first eligible launch sends nothing/,
+};
 
 async function withMilo(binary, cwd, env, run) {
   const server = spawn(binary, ['web', '--no-open', '--port', '0'], {
@@ -56,6 +61,48 @@ async function openEditor(context, url) {
   await page.goto(url);
   await page.getByRole('heading', {name: 'Pane layout', exact: true}).waitFor();
   return page;
+}
+
+async function manageAnonymousCounts(page, url, managed) {
+  const api = new URL('/api/action', url).href;
+  const headers = {Authorization: `Bearer ${new URL(url).hash.slice(1)}`};
+  const initial = await (await page.request.get(new URL('/api/state', url).href, {headers})).json();
+  assert.equal(initial.telemetry.enabled, true);
+  assert((managed ? ['suppressed'] : ['unconfigured', 'on']).includes(initial.telemetry.status),
+    'availability follows the environment and build without changing the saved preference');
+  const invalid = await page.request.post(api, {
+    headers: {...headers, Origin: new URL(url).origin},
+    data: {version: initial.version, action: 'telemetry', scope: 'worktree', value: false},
+  });
+  assert.equal(invalid.status(), 400, 'a telemetry change cannot name a worktree scope');
+
+  await section(page, 'Integrations').click();
+  await button(page, 'Anonymous usage counts').click();
+  const control = page.getByRole('switch', {name: 'Allow anonymous counts', exact: true});
+  assert.equal(await control.getAttribute('aria-checked'), 'true');
+  assert.match(await page.locator('#telemetry-status').textContent(), countsAvailability[initial.telemetry.status]);
+  await control.press('Space');
+  await page.getByRole('switch', {name: 'Allow anonymous counts', checked: false}).waitFor();
+  assert(await control.evaluate(element => element === document.activeElement), 'saving keeps keyboard focus');
+  await status(page, 'Anonymous usage counts preference saved.').waitFor();
+  await status(page, clean).waitFor({state: 'attached'});
+  await button(page, 'Back to integrations').press('Enter');
+  assert(await button(page, 'Anonymous usage counts').evaluate(element => element === document.activeElement));
+  await section(page, 'Layout').click();
+  return initial.telemetry.status;
+}
+
+async function checkAnonymousCountsAcrossProjects(page, suppressed, enable) {
+  await section(page, 'Integrations').click();
+  await button(page, 'Anonymous usage counts').click();
+  const control = page.getByRole('switch', {name: 'Allow anonymous counts', exact: true});
+  assert.equal(await control.getAttribute('aria-checked'), 'false', 'the saved choice follows the user');
+  await status(page, suppressed ? 'This environment disables sending' : 'Your saved preference is off.').waitFor();
+  if (enable) {
+    await control.click();
+    await page.getByRole('switch', {name: 'Allow anonymous counts', checked: true}).waitFor();
+    await status(page, 'This environment disables sending').waitFor();
+  }
 }
 
 async function saveNumbers(page, cwd) {
@@ -1263,12 +1310,15 @@ async function main() {
   const binary = resolve(process.argv[2]);
   const fixture = await mkdtemp(join(tmpdir(), 'milo-web-smoke-'));
   const cwd = join(fixture, 'a-worktree-with-a-name-long-enough-to-overflow-a-phone-footer');
+  const otherProject = join(fixture, 'another-project');
   const home = join(fixture, 'home');
+  const managed = process.env.MILO_TELEMETRY === '0';
   // Do not inherit REX_*, GIT_* or settings overrides from the developer's shell.
   const env = {
     // A stand-in for rex comes first, so the presence helper hears that an app has a session open.
     PATH: `${join(fixture, 'bin')}:${process.env.PATH}`,
     HOME: home,
+    ...(managed ? {MILO_TELEMETRY: '0'} : {}),
     XDG_CONFIG_HOME: join(home, '.config'),
     XDG_STATE_HOME: join(home, '.local', 'state'),
     GIT_CONFIG_NOSYSTEM: '1',
@@ -1278,7 +1328,7 @@ async function main() {
   let browser;
   let discord;
   try {
-    await Promise.all([mkdir(cwd), mkdir(home), mkdir(join(fixture, 'bin'))]);
+    await Promise.all([mkdir(cwd), mkdir(otherProject), mkdir(home), mkdir(join(fixture, 'bin'))]);
     const rex = join(fixture, 'bin', 'rex');
     // It reports a session called "smoke session" in front, working in /tmp.
     const front = 'milo-rex active 736d6f6b652073657373696f6e 2f746d70';
@@ -1286,11 +1336,15 @@ async function main() {
     await chmod(rex, 0o700);
     discord = await standInForDiscord(env.XDG_RUNTIME_DIR);
     execFileSync('git', ['init', '-q', '--template='], {cwd, env});
+    execFileSync('git', ['init', '-q', '--template='], {cwd: otherProject, env});
     browser = await chromium.launch({executablePath: process.env.CHROME_BIN, env});
     const desktop = await browser.newContext();
     desktop.setDefaultTimeout(timeout);
+    let countsStatus;
     await withMilo(binary, cwd, env, async url => {
       const page = await openEditor(desktop, url);
+      countsStatus = await manageAnonymousCounts(page, url, managed);
+      await assert.rejects(readFile(join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf')), {code: 'ENOENT'});
       await checkAlerts(page);
       await page.clock.install();
       await saveNumbers(page, cwd);
@@ -1302,8 +1356,24 @@ async function main() {
       await pressAfterNumberEdit(page);
       await page.close();
     });
+    await withMilo(binary, otherProject, env, async url => {
+      const page = await openEditor(desktop, url);
+      await checkAnonymousCountsAcrossProjects(page, managed, false);
+      await page.close();
+    });
+    await withMilo(binary, otherProject, {...env, MILO_TELEMETRY: '0'}, async url => {
+      const page = await openEditor(desktop, url);
+      await checkAnonymousCountsAcrossProjects(page, true, true);
+      await page.close();
+    });
     await withMilo(binary, cwd, env, async (url, exited) => {
       const page = await openEditor(desktop, url);
+      await section(page, 'Integrations').click();
+      await button(page, 'Anonymous usage counts').click();
+      const counts = page.getByRole('switch', {name: 'Allow anonymous counts', exact: true});
+      assert.equal(await counts.getAttribute('aria-checked'), 'true', 'the restored preference persists');
+      assert.match(await page.locator('#telemetry-status').textContent(), countsAvailability[countsStatus]);
+      await section(page, 'Layout').click();
       for (const [name, value] of edits) {
         assert.equal(await number(page, name).inputValue(), value, `${name} persisted across a server restart`);
       }

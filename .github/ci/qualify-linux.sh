@@ -36,7 +36,7 @@ name=milo-x86_64-unknown-linux-gnu
 cmp "$w/first/out/$name" "$w/second-build/out/$name"
 sh "$w/first/src/.github/ci/stage-linux.sh" "$w/first/out"
 run --network none -v "$w/first/out:/candidate:ro" -w /candidate "$runtime" \
-    env -i HOME=/tmp/home PATH=/usr/bin:/bin LC_ALL=C sh -ec '
+    env -i HOME=/tmp/home PATH=/usr/bin:/bin LC_ALL=C MILO_TELEMETRY=0 sh -ec '
         mkdir -m 700 "$HOME"
         for tool in cc gcc rustc cargo rex; do
             if command -v "$tool"; then exit 1; fi
