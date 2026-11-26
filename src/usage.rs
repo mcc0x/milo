@@ -1181,14 +1181,15 @@ impl Usage {
 /// turned on is described from its settings and last saved answer; doctor
 /// does not ask its provider.
 pub fn doctor(tools: UsageTools, chosen: UsageAccounts) -> Vec<String> {
-    if cfg!(windows) {
-        return vec!["Usage: not supported on Windows yet".into()];
-    }
     let home = paths::home();
     let now = when::now();
     let usage = Usage::for_home(home.as_deref(), now, tools);
     let mut lines =
         usage.doctor(omp::database(home.as_deref()), opencode::database(home.as_deref()), sqlite::QUERY_WAIT);
+    if cfg!(windows) {
+        lines.extend(chosen.any().then(|| "Usage accounts: not supported on Windows yet".to_owned()));
+        return lines;
+    }
     let accounts = accounts::doctor(chosen, now);
     // With an account to describe, there is something to say besides that no tool was found.
     if !accounts.is_empty() {
@@ -1198,10 +1199,23 @@ pub fn doctor(tools: UsageTools, chosen: UsageAccounts) -> Vec<String> {
     lines
 }
 
+/// Why Windows leaves a tool's database unread, from its files' names and size alone.
+#[cfg(windows)]
+fn database_note(tool: &str, path: &Path) -> Option<String> {
+    if sqlite::too_large(path) {
+        return Some(format!("{tool} database: over 64 MiB, so it is not read on Windows yet ({path:?})"));
+    }
+    sqlite::in_use(path)
+        .then(|| format!("{tool} database: in use, so it is read only while {tool} is closed ({path:?})"))
+}
+
 impl Usage {
     fn doctor(mut self, omp: Option<PathBuf>, opencode: Option<PathBuf>, wait: Duration) -> Vec<String> {
         let (now, clock) = (self.now(), Instant::now());
-        let saved = omp.filter(|_| self.reads_omp()).and_then(|path| omp::read(&path, now, wait));
+        let omp = omp.filter(|_| self.reads_omp());
+        #[cfg(windows)]
+        let omp_note = omp.as_deref().and_then(|path| database_note("OMP", path));
+        let saved = omp.and_then(|path| omp::read(&path, now, wait));
         if let Some(reports) = saved {
             self.keep(reports);
         }
@@ -1211,9 +1225,14 @@ impl Usage {
         self.claude.check(self.claude_dir.as_deref(), cutoff, clock, true, &mut Budget::new(0));
         let codex = self.codex.reported(now);
         let claude = self.claude.reported(now);
+        let claude_step = if cfg!(windows) {
+            "Claude Code's status line is not supported on Windows yet"
+        } else {
+            "turn on Show Claude Code limits in milo setup"
+        };
         let limits = [
             (UsageTool::Codex, self.codex.presence(codex), codex, "run Codex to save one"),
-            (UsageTool::Claude, self.claude.presence(claude), claude, "turn on Show Claude Code limits in milo setup"),
+            (UsageTool::Claude, self.claude.presence(claude), claude, claude_step),
         ];
         let mut lines = Vec::new();
         for (tool, presence, reported, step) in limits {
@@ -1225,11 +1244,15 @@ impl Usage {
                 });
             }
         }
+        #[cfg(windows)]
+        lines.extend(omp_note);
         let show = self.tools[UsageTool::OpenCode];
         if show != Show::Hide {
             let report = opencode.as_deref().map_or(opencode::Report::Missing, |path| opencode::read(path, now, wait));
             if show == Show::Always || report != opencode::Report::Missing {
                 lines.extend(report.describe(opencode.as_deref(), now));
+                #[cfg(windows)]
+                lines.extend(opencode.as_deref().and_then(|path| database_note("OpenCode", path)));
             }
         }
         if lines.is_empty() && UsageTool::ALL.into_iter().any(|tool| self.tools[tool] != Show::Hide) {

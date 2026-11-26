@@ -81,8 +81,8 @@ export default function Integrations() {
   const listedAlerts = forwarding ? activeAlerts : alertDestinations.filter(([key]) => alerts?.[key].saved);
   const summaries = {
     automation: rules ? `${rules} ${rules === 1 ? 'rule' : 'rules'} on` : 'Off',
-    presence: presence ? (presence.enabled ? 'On' : 'Off') : unavailable,
-    alerts: alerts?.health ?? unavailable,
+    presence: presence ? (presence.enabled ? 'On' : 'Off') : state.unsupported?.presence ?? unavailable,
+    alerts: alerts?.health ?? state.unsupported?.alerts ?? unavailable,
   };
   const descriptions = {
     automation: 'Tab titles and new shell layouts',
@@ -132,7 +132,7 @@ export default function Integrations() {
           ))}
         </ul>
       ) : !available[detail] ? (
-        <p className="setting-detail">{unavailable}</p>
+        <p className="setting-detail">{summaries[detail]}</p>
       ) : detail === 'automation' ? (
         <RexAutomation />
       ) : detail === 'presence' ? <Presence /> : <Alerts />}

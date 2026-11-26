@@ -12,6 +12,7 @@ use crate::preferences::{Show, UsageAccount};
 
 const BAD_ACTION: &str = "Unknown or invalid Settings action.";
 const UNAVAILABLE: &str = "That choice is unavailable in this Settings session.";
+const NOT_ON_WINDOWS: &str = "Not supported on Windows yet";
 const LOST_TAB: &str = "The original Rex tab is no longer available. Reopen Settings in the tab you want to change.";
 
 impl Display for doctor::Health {
@@ -369,6 +370,10 @@ impl Editor {
                 out.push_str("}}");
             }
             None => out.push_str("null"),
+        }
+        if cfg!(windows) {
+            write!(out, ",\"unsupported\":{{\"alerts\":{0},\"presence\":{0}}}", Quoted(NOT_ON_WINDOWS))
+                .expect("writing to a string");
         }
         // Whether an import is kept that the page can offer to take back.
         let undo = setup.store.as_ref().is_some_and(|store| transfer::undo_available(&store.state));
@@ -2300,6 +2305,43 @@ mod windows_tests {
         assert_eq!(why, "Moving settings between computers is not supported on Windows yet.");
         assert!(crate::alerts::Alerts::real().is_none());
         assert!(editor.state().contains(r#""alerts":null"#));
+    }
+
+    #[test]
+    fn the_page_is_told_why_alerts_presence_and_rex_are_missing() {
+        let f = Fixture::folder();
+        let mut editor = outside(fixture_store(&f), Some(&f.root));
+        editor.host = Host::probe(false, || None);
+        let state = editor.state();
+        let page = Value::parse(state.as_bytes()).unwrap_or_else(|| panic!("{state}"));
+        let [alerts, presence, unsupported, host] = page.fields(["alerts", "presence", "unsupported", "host"]);
+        assert!(alerts.unwrap().null() && presence.unwrap().null(), "{state}");
+        let [alerts, presence] = unsupported.unwrap().fields(["alerts", "presence"]);
+        for reason in [alerts, presence] {
+            assert_eq!(reason.unwrap().string(64).as_deref(), Some("Not supported on Windows yet"), "{state}");
+        }
+        let [rex, reason] = host.unwrap().fields(["rex", "rex_unsupported"]);
+        assert!(rex.unwrap().null(), "{state}");
+        let expected = "Rex integration is not supported on Windows yet. The panes work without it.";
+        assert_eq!(reason.unwrap().string(128).as_deref(), Some(expected), "{state}");
+    }
+
+    #[test]
+    fn doctor_reads_the_layout_saved_in_the_browser_and_says_the_rest_is_not_supported() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut editor = outside(store.clone(), Some(&f.root));
+        action(&mut editor, r#""action":"set","field":"layout.side","value":"left""#).unwrap();
+        action(&mut editor, r#""action":"set","field":"layout.width","value":0.41"#).unwrap();
+        action(&mut editor, r#""action":"save","group":"layout","scope":"worktree""#).unwrap();
+        let report = doctor::report_for(&store, Some(&f.root)).unwrap();
+        assert!(report.contains("\nSaved sidebar: 41.0% wide, left (worktree override)\n"), "{report}");
+        assert!(
+            report.contains("\nLive sidebar: not observed (Rex integration is not supported on Windows yet)\n"),
+            "{report}"
+        );
+        assert!(report.ends_with("\nClaude status line: not supported on Windows yet"), "{report}");
+        assert!(!store.init.exists(), "doctor wrote Rex's settings");
     }
 
     #[test]

@@ -226,13 +226,38 @@ fn a_transcript_replaced_by_a_link_after_discovery_is_no_longer_read() {
 
 #[test]
 fn what_needs_setup_the_status_line_or_a_network_stays_unsupported() {
-    let lines = doctor(UsageTools::default(), UsageAccounts::default());
-    assert_eq!(lines, ["Usage: not supported on Windows yet"]);
+    let mut hidden = UsageTools::default();
+    for tool in UsageTool::ALL {
+        hidden[tool] = Show::Hide;
+    }
+    assert!(doctor(hidden, UsageAccounts::default()).is_empty());
+    let mut accounts = UsageAccounts::default();
+    accounts[crate::preferences::UsageAccount::DeepSeek] = Show::Always;
+    assert_eq!(doctor(hidden, accounts), ["Usage accounts: not supported on Windows yet"]);
     let error = menu_stream().unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     assert!(error.to_string().contains("not supported on Windows yet"));
     assert_eq!(claude_status(), 0);
     assert!(SystemTime::now() > UNIX_EPOCH);
+}
+
+#[test]
+fn doctor_reads_codex_and_claude_files_and_says_the_status_line_is_not_supported() {
+    let f = Fixture::folder();
+    let now = local_noon();
+    write(&f, CODEX, &codex(now - MINUTE, 23, now + DAY), now - MINUTE);
+    write(&f, CLAUDE, &assistant(now - HOUR, 21_000, 25_000, 2000), now);
+    let usage =
+        Usage::from_dirs(Some(f.root.join("codex")), Some(f.root.join("claude")), Some(f.root.join("state")), now);
+    let lines = usage.doctor(None, None, Duration::from_secs(30));
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].starts_with("Codex limits: ") && !lines[0].contains("no local report"), "{lines:?}");
+    assert_eq!(
+        lines[1], "Claude limits: no local report; Claude Code's status line is not supported on Windows yet",
+        "{lines:?}"
+    );
+    assert!(lines.iter().all(|line| !line.contains("milo setup")), "{lines:?}");
+    assert!(!f.root.join("state").exists(), "doctor wrote into the state folder");
 }
 
 /// OMP's and OpenCode's databases, made by Windows' own SQLite as those tools make them, and read only
@@ -310,6 +335,57 @@ mod databases {
         finish(&mut usage);
         assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 35% left", "Claude no saved limits"]);
         assert_eq!(usage.notice(), None);
+    }
+
+    fn opencode_shown() -> UsageTools {
+        let mut tools = UsageTools::default();
+        tools[UsageTool::OpenCode] = Show::Always;
+        tools
+    }
+
+    #[test]
+    fn doctor_says_when_a_database_is_read_only_while_its_tool_is_closed() {
+        let f = Fixture::folder();
+        let omp = f.root.join("agent.db");
+        let omp_writer = Writer::open(&omp);
+        omp_writer.exec(&format!("PRAGMA journal_mode=WAL;{OMP_SCHEMA}"));
+        omp_report(&omp_writer, "0.25");
+        let opencode = f.root.join("opencode.db");
+        let opencode_writer = Writer::open(&opencode);
+        let schema = include_str!("tests/opencode/v2.3.2.sql");
+        opencode_writer.exec(&format!("PRAGMA journal_mode=WAL;BEGIN;\n{schema}\nCOMMIT;"));
+
+        let look = || {
+            let usage = Usage::from_dirs(None, None, None, NOW).showing(opencode_shown());
+            usage.doctor(Some(omp.clone()), Some(opencode.clone()), WAIT)
+        };
+        let lines = look();
+        for (tool, path) in [("OMP", &omp), ("OpenCode", &opencode)] {
+            let note = format!("{tool} database: in use, so it is read only while {tool} is closed ({path:?})");
+            assert_eq!(lines.iter().filter(|line| **line == note).count(), 1, "{lines:?}");
+        }
+        assert!(lines.iter().all(|line| !line.contains("not read on Windows")), "{lines:?}");
+
+        drop(omp_writer);
+        drop(opencode_writer);
+        let lines = look();
+        assert!(lines.iter().all(|line| !line.contains("database:")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.starts_with("OpenCode activity: ")), "{lines:?}");
+    }
+
+    #[test]
+    fn doctor_says_a_database_over_64_mib_is_not_read_on_windows_yet() {
+        let f = Fixture::folder();
+        let path = f.root.join("opencode.db");
+        let writer = Writer::open(&path);
+        writer.exec("CREATE TABLE t(x);");
+        drop(writer);
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len((64 << 20) + 1).unwrap();
+        let usage = Usage::from_dirs(None, None, None, NOW).showing(opencode_shown());
+        let lines = usage.doctor(None, Some(path.clone()), WAIT);
+        let note = format!("OpenCode database: over 64 MiB, so it is not read on Windows yet ({path:?})");
+        assert_eq!(lines.iter().filter(|line| **line == note).count(), 1, "{lines:?}");
+        assert!(lines.iter().any(|line| line.starts_with("OpenCode activity: unknown")), "{lines:?}");
     }
 
     #[test]

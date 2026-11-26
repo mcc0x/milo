@@ -128,9 +128,6 @@ fn store() -> Result<Store, String> {
 }
 
 pub(crate) fn report() -> Result<String, String> {
-    if cfg!(windows) {
-        return Err("milo doctor is not supported on Windows yet.".into());
-    }
     full_report(&store()?, None)
 }
 
@@ -242,13 +239,20 @@ fn report_with_worktree(
                 writeln!(out, "  Usage accounts: {}", usage_accounts(p.usage_accounts)).unwrap();
             }
             tools = (p.usage_tools, p.usage_accounts);
-            writeln!(out, "  Rex tab titles: {}", on(p.tab_titles)).unwrap();
+            if !cfg!(windows) {
+                writeln!(out, "  Rex tab titles: {}", on(p.tab_titles)).unwrap();
+            }
         }
         Err(e) => {
             health.issue("Milo could not read your pane preferences.");
             writeln!(out, "Preferences: unreadable ({:?}). Correct the settings file before saving.", e.to_string())
                 .unwrap()
         }
+    }
+    if cfg!(windows) {
+        write_windows_integrations(&mut out, &mut health, store, root);
+        out.pop();
+        return Ok((out, health, tools));
     }
     let layout = store.inspect_layout(root);
     match &layout {
@@ -273,17 +277,7 @@ fn report_with_worktree(
             store.init
         )
         .unwrap(),
-        Err(LayoutError::Rex(why)) => {
-            writeln!(out, "Rex: {why} Check the managed loader and run milo setup --repair.").unwrap()
-        }
-        Err(LayoutError::ProfileDirectory(why)) => {
-            writeln!(out, "Rex layout profiles: {why} Check the directory {:?}.", store.config.join("layouts")).unwrap()
-        }
-        Err(LayoutError::Profile { path, reason }) => writeln!(
-            out,
-            "Saved layout profile {path:?}: {reason} Restore a known-good copy, or back up and move this file aside, then reopen Milo Settings to save a layout."
-        )
-        .unwrap(),
+        Err(error) => write_profile_error(&mut out, store, error),
     }
     if layout.is_err() {
         health.issue("Milo could not load the Rex configuration. Run milo doctor for details.");
@@ -381,7 +375,49 @@ fn report_with_worktree(
     Ok((out, health, tools))
 }
 
+/// What this computer can still show about the layout while Milo's Rex integration is not ported:
+/// a layout saved in the browser editor, read from its own file without looking at Rex's.
+fn write_windows_integrations(out: &mut String, health: &mut Health, store: &Store, root: Option<&Path>) {
+    match store.saved_profile(root) {
+        Ok(Some((layout, scope))) => {
+            let live = LiveSidebar::NotObserved("Rex integration is not supported on Windows yet");
+            write_sidebar(out, &layout, scope, live);
+        }
+        Ok(None) => out.push_str("Saved sidebar: none saved\n"),
+        Err(error) => {
+            health.issue("Milo could not read your saved layout. Run milo doctor for details.");
+            write_profile_error(out, store, &error);
+        }
+    }
+    out.push_str(
+        "Rex integration: not supported on Windows yet; the panes work on their own.\n\
+         Layout listener: not supported on Windows yet\n\
+         Discord presence: not supported on Windows yet\n\
+         Claude status line: not supported on Windows yet\n",
+    );
+}
+
+fn write_profile_error(out: &mut String, store: &Store, error: &LayoutError) {
+    match error {
+        LayoutError::ProfileDirectory(why) => {
+            writeln!(out, "Rex layout profiles: {why} Check the directory {:?}.", store.config.join("layouts")).unwrap()
+        }
+        LayoutError::Profile { path, reason } => writeln!(
+            out,
+            "Saved layout profile {path:?}: {reason} Restore a known-good copy, or back up and move this file aside, then reopen Milo Settings to save a layout."
+        )
+        .unwrap(),
+        LayoutError::Rex(why) => {
+            writeln!(out, "Rex: {why} Check the managed loader and run milo setup --repair.").unwrap()
+        }
+    }
+}
+
 fn write_markdown_preview(out: &mut String, tool: Result<Option<&Path>, &'static str>, in_rex: bool) {
+    if cfg!(windows) {
+        out.push_str("Markdown preview: not supported on Windows yet.\n");
+        return;
+    }
     match tool {
         Ok(Some(tool)) => writeln!(out, "Markdown preview: optional tkmp found at {tool:?}.").unwrap(),
         Ok(None) => {
@@ -1165,5 +1201,72 @@ mod tests {
         let report = sidebar(&saved, Scope::Global, "ok l 0.2 40 - ok");
         assert!(report.contains("Saved Usage: fills the sidebar"));
         assert!(!report.contains("Autobalance"));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use crate::fixture::Fixture;
+
+    fn fixture_store(fixture: &Fixture) -> Store {
+        Store {
+            init: fixture.root.join("init.lua"),
+            config: fixture.root.join("config"),
+            state: fixture.root.join("state"),
+            claude: fixture.root.join("claude.json"),
+            claude_state: None,
+        }
+    }
+
+    #[test]
+    fn doctor_names_what_is_not_supported_and_reports_no_missing_rex_piece_as_a_problem() {
+        let fixture = Fixture::folder();
+        let store = fixture_store(&fixture);
+        std::fs::write(&store.init, "-- Rex settings Milo does not manage\n").unwrap();
+        let host = Host { name: "studio".into(), rex: None, forwarded: false };
+        let (report, health, _) = report_with_worktree(&store, Ok(Some(&fixture.root)), None, Some(&host)).unwrap();
+        assert!(
+            report.starts_with(
+                "Milo doctor\nHost: studio\nRex server: not supported on Windows yet; the panes work without it\nWorktree: "
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains("\nMarkdown preview: not supported on Windows yet.\nPreferences: built-in defaults\n"),
+            "{report}"
+        );
+        assert!(
+            report.ends_with(
+                "\nSaved sidebar: none saved\n\
+                 Rex integration: not supported on Windows yet; the panes work on their own.\n\
+                 Layout listener: not supported on Windows yet\n\
+                 Discord presence: not supported on Windows yet\n\
+                 Claude status line: not supported on Windows yet"
+            ),
+            "{report}"
+        );
+        for fragment in ["tkmp", "milo setup", "Rex launcher", "Rex actions", "Server actions", "Rex tab titles"] {
+            assert!(!report.contains(fragment), "{fragment}: {report}");
+        }
+        assert!(matches!(health, Health::Good));
+        assert!(!store.config.exists() && !store.state.exists(), "doctor wrote into Milo's folders");
+    }
+
+    #[test]
+    fn doctor_does_not_hide_a_saved_layout_that_cannot_be_read() {
+        let fixture = Fixture::folder();
+        let store = fixture_store(&fixture);
+        std::fs::create_dir(&store.config).unwrap();
+        let path = store.config.join("layouts");
+        std::fs::write(&path, "Keep this").unwrap();
+        let (report, health, _) = report_with_worktree(&store, Ok(Some(&fixture.root)), None, None).unwrap();
+        assert!(report.contains(&format!("Check the directory {path:?}.")), "{report}");
+        assert!(
+            report.contains("Rex integration: not supported on Windows yet; the panes work on their own."),
+            "{report}"
+        );
+        assert!(matches!(health, Health::Issue("Milo could not read your saved layout. Run milo doctor for details.")));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "Keep this");
     }
 }

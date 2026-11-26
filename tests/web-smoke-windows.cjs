@@ -89,9 +89,11 @@ async function unsupportedIntegrations(page) {
   for (const name of ['Alert forwarding', 'Discord presence']) {
     assert(await button(page, name).isDisabled(), `${name} is not offered on Windows`);
   }
-  await page.getByText('Not available in this session').first().waitFor();
+  for (const key of ['alerts', 'presence']) {
+    assert.equal(await page.locator(`#integration-${key}-summary`).innerText(), 'Not supported on Windows yet');
+  }
   await section(page, 'Layout').click();
-  console.log('Alerts and presence: shown as unavailable');
+  console.log('Alerts and presence: shown as not supported on Windows yet');
 }
 
 async function main() {

@@ -13,6 +13,7 @@ use crate::rex::{self, CommandVersion, Server, Viewers};
 pub(crate) const CHECKED_API: u64 = 19;
 
 const OLDER: &str = "This Rex server is older than the Rex Milo was checked with. Update Rex on this host.";
+const REX_UNSUPPORTED: &str = "Rex integration is not supported on Windows yet. The panes work without it.";
 const COMMAND_DIFFERS: &str =
     "The rex command and the Rex server are different versions. Restart or update Rex before saving a layout.";
 
@@ -147,7 +148,11 @@ impl Host {
     pub(crate) fn json(&self, out: &mut String) {
         write!(out, "{{\"name\":{},\"forwarded\":{},\"rex\":", rex::json(&self.name), self.forwarded).unwrap();
         let Some(rex) = &self.rex else {
-            out.push_str("null}");
+            if cfg!(windows) {
+                write!(out, "null,\"rex_unsupported\":{}}}", rex::json(REX_UNSUPPORTED)).unwrap();
+            } else {
+                out.push_str("null}");
+            }
             return;
         };
         let compatibility = rex.compatibility();
@@ -270,6 +275,20 @@ mod tests {
         let mut out = String::new();
         host.report(&mut out);
         assert!(out.ends_with("Rex server: not supported on Windows yet; the panes work without it\n"), "{out}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_page_is_told_when_windows_has_no_rex_integration() {
+        let mut out = String::new();
+        Host::probe(false, || None).unwrap().json(&mut out);
+        assert!(crate::json::Value::parse(out.as_bytes()).is_some(), "{out}");
+        assert!(
+            out.ends_with(
+                r#""rex":null,"rex_unsupported":"Rex integration is not supported on Windows yet. The panes work without it."}"#
+            ),
+            "{out}"
+        );
     }
 
     #[test]

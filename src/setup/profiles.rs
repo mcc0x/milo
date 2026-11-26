@@ -162,6 +162,11 @@ impl Store {
         self.inspect_layout(root).map_err(LayoutError::message)
     }
 
+    /// The layout saved for this worktree or as the global default, if any. Rex's files are not looked at.
+    pub(super) fn saved_profile(&self, root: Option<&Path>) -> Result<Option<(Layout, Scope)>, LayoutError> {
+        selected(&self.config, root)
+    }
+
     pub(super) fn inspect_layout(&self, root: Option<&Path>) -> Result<(Layout, bool, Scope), LayoutError> {
         let (legacy, active) = self.layout().map_err(LayoutError::Rex)?;
         let new_tabs = legacy.new_tabs;
