@@ -183,7 +183,7 @@ impl Worktree {
             }
         }
         let spot = place.spot.map_or_else(|| "-".to_owned(), |spot| spot.to_string());
-        Some(format!("view\t{root}\t{root}/{}\t{spot}\t{label}\n", place.file))
+        Some(format!("view\t{root}\t{}\t{spot}\t{label}\n", file.display()))
     }
 }
 
