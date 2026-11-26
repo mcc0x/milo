@@ -9,7 +9,6 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::fixture::Fixture;
-use crate::fs_ops;
 use crate::width::str_width;
 
 use super::*;
@@ -232,27 +231,4 @@ fn what_needs_setup_the_status_line_or_a_network_stays_unsupported() {
     assert!(error.to_string().contains("not supported on Windows yet"));
     assert_eq!(claude_status(), 0);
     assert!(SystemTime::now() > UNIX_EPOCH);
-}
-
-#[test]
-fn zz_probe() {
-    use std::time::Instant;
-    let f = Fixture::folder();
-    write(&f, CODEX, &codex(NOW, 23, NOW + DAY), NOW);
-    let mut sessions = files::Sessions::<()>::default();
-    let result = sessions.refresh(Some(&f.root.join("codex")), files::Tree::Codex, Instant::now(), true);
-    let mut report = format!("refresh err={:?} entries={}", result.as_ref().err(), sessions.entries.len());
-    if let Ok((root, _)) = &result {
-        for entry in &sessions.entries {
-            report += &format!(
-                " [{} len={} open={}]",
-                entry.path.display(),
-                entry.version.len,
-                root.open(&entry.path).is_some()
-            );
-        }
-    }
-    let root = fs_ops::open_dir(&f.root.join("codex")).unwrap();
-    report += &format!(" list={:?} {}", files::probe_list(&root), files::probe_open(&root));
-    panic!("{report}");
 }

@@ -111,7 +111,8 @@ fn open_at(dir: &File, name: &OsStr, directory: bool) -> io::Result<File> {
         security_quality_of_service: ptr::null(),
     };
     let kind = if directory { FILE_DIRECTORY_FILE } else { FILE_NON_DIRECTORY_FILE };
-    let options = kind | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT | FILE_OPEN_NO_RECALL;
+    let no_recall = if directory { 0 } else { FILE_OPEN_NO_RECALL };
+    let options = kind | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT | no_recall;
     let mut handle = ptr::null_mut();
     let mut block = IoStatusBlock::default();
     // SAFETY: The folder handle, the name and the attributes all outlive the call, and the
@@ -157,17 +158,6 @@ fn walk(
         folder = Some(open_at(dir, name, true).ok()?);
     }
     None
-}
-
-pub(super) fn probe_open(root: &File) -> String {
-    match open_at(root, OsStr::new("2026"), true) {
-        Ok(child) => format!("opened; list={:?}", list(&child).map(|l| l.len())),
-        Err(error) => format!("open failed: {error:?}"),
-    }
-}
-
-pub(super) fn probe_list(root: &File) -> String {
-    format!("{:?}", list(root).map(|l| l.into_iter().map(|e| (e.name, e.attributes)).collect::<Vec<_>>()))
 }
 
 pub(super) fn version(root: &File, path: &Path) -> Option<FileVersion> {
