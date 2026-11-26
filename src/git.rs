@@ -1585,6 +1585,27 @@ mod tests {
     }
 
     #[test]
+    fn a_working_file_diff_names_exactly_one_file_whatever_its_characters() {
+        let f = Fixture::new();
+        let names = ["docs/日本語", "日本/語", "docs/notes.md", "docs/notes.md.bak", "a[b].txt"];
+        for name in names {
+            f.write(name, "before\n");
+        }
+        f.commit("add files");
+        for name in names {
+            f.write(name, &format!("after {name}\n"));
+        }
+
+        let repo = read_repo(&f);
+        for name in names {
+            let patch = repo.file_diff(name, None).unwrap();
+            let text = String::from_utf8_lossy(&patch);
+            assert!(text.contains(&format!("+after {name}\n")), "{name}: {text}");
+            assert_eq!(text.matches("+after ").count(), 1, "{name} also matched another file: {text}");
+        }
+    }
+
+    #[test]
     fn filters_with_equals_in_their_name_are_disabled_even_if_added_later() {
         let f = Fixture::new();
         f.write(".gitattributes", "*.txt filter=plain=text\n");

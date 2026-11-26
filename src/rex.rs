@@ -622,7 +622,7 @@ fn review_command(exe: &Path, patch: &Path, from: Option<&str>) -> String {
 pub struct ShellObserver {
     child: Child,
     output: ChildStdout,
-    frame: Frame<ShellChange>,
+    frame: Frame<ShellNews>,
 }
 
 pub enum ShellChange {
@@ -630,6 +630,13 @@ pub enum ShellChange {
     Directory(PathBuf),
     Unreported,
     Closed,
+}
+
+/// What an observer learned since it was last read: the shell's folder and,
+/// when it changed, the processes in front of the shell, nearest first.
+pub struct ShellNews {
+    pub change: ShellChange,
+    pub foreground: Option<Vec<i32>>,
 }
 
 impl ShellObserver {
@@ -657,7 +664,7 @@ impl ShellObserver {
         self.output.as_raw_fd()
     }
 
-    pub fn read(&mut self) -> ShellChange {
+    pub fn read(&mut self) -> ShellNews {
         self.frame.drain(&mut self.output)
     }
 }
@@ -785,19 +792,46 @@ trait Report: Sized {
     const CLOSED: Self;
     fn decode(line: &[u8]) -> Option<Self>;
     fn unchanged(&self) -> bool;
+
+    /// Takes in a later update.
+    fn merge(&mut self, newer: Self) {
+        *self = newer;
+    }
 }
 
-impl Report for ShellChange {
-    const UNCHANGED: Self = Self::Unchanged;
-    const CLOSED: Self = Self::Closed;
+impl Report for ShellNews {
+    const UNCHANGED: Self = Self { change: ShellChange::Unchanged, foreground: None };
+    const CLOSED: Self = Self { change: ShellChange::Closed, foreground: None };
 
     fn decode(line: &[u8]) -> Option<Self> {
-        decode_change(line)
+        if let Some(pids) = line.strip_prefix(b"milo-fg ") {
+            return Some(Self { change: ShellChange::Unchanged, foreground: Some(decode_foreground(pids)?) });
+        }
+        Some(Self { change: decode_change(line)?, foreground: None })
     }
 
     fn unchanged(&self) -> bool {
-        matches!(self, Self::Unchanged)
+        matches!(self.change, ShellChange::Unchanged) && self.foreground.is_none()
     }
+
+    /// A folder and the processes in front are separate news; neither hides the other.
+    fn merge(&mut self, newer: Self) {
+        if !matches!(newer.change, ShellChange::Unchanged) {
+            self.change = newer.change;
+        }
+        if newer.foreground.is_some() {
+            self.foreground = newer.foreground;
+        }
+    }
+}
+
+fn decode_foreground(pids: &[u8]) -> Option<Vec<i32>> {
+    if pids == b"-" {
+        return Some(Vec::new());
+    }
+    let words = std::str::from_utf8(pids).ok()?.split(' ');
+    let pids: Option<Vec<i32>> = words.take(64).map(|word| word.parse().ok().filter(|&pid: &i32| pid > 0)).collect();
+    pids.filter(|pids| !pids.is_empty())
 }
 
 impl Report for AppActivity {
@@ -849,7 +883,7 @@ impl<T: Report> Frame<T> {
                 Ok(n) => {
                     let update = self.read(&bytes[..n]);
                     if !update.unchanged() {
-                        latest = update;
+                        latest.merge(update);
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -874,7 +908,7 @@ impl<T: Report> Frame<T> {
             if !self.oversized
                 && let Some(update) = T::decode(&self.line)
             {
-                latest = update;
+                latest.merge(update);
             }
             self.line.clear();
             self.oversized = false;
@@ -919,7 +953,7 @@ fn unhex(code: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Frame, ShellChange, Target, exact_block, finished, inside_with, json, layout_catalog, probe_output,
+        Frame, ShellChange, ShellNews, Target, exact_block, finished, inside_with, json, layout_catalog, probe_output,
         reader_command, reader_label, review_command, scripted,
     };
     use crate::term::Host;
@@ -988,34 +1022,48 @@ mod tests {
 
     #[test]
     fn shell_frames_keep_paths_verbatim_and_ignore_non_protocol_output() {
-        let mut decoder = Frame::default();
-        assert!(matches!(decoder.read(b"listening: Rex\nmilo-cwd 2f6"), ShellChange::Unchanged));
+        let mut decoder = Frame::<ShellNews>::default();
+        assert!(matches!(decoder.read(b"listening: Rex\nmilo-cwd 2f6").change, ShellChange::Unchanged));
         assert!(matches!(
-            decoder.read(b"10a62\nunrelated output\n"),
+            decoder.read(b"10a62\nunrelated output\n").change,
             ShellChange::Directory(path) if path == Path::new("/a\nb"),
         ));
-        assert!(matches!(decoder.read(b"milo-cwd -\n"), ShellChange::Unreported));
+        assert!(matches!(decoder.read(b"milo-cwd -\n").change, ShellChange::Unreported));
     }
 
     #[test]
     fn an_oversized_observer_line_cannot_hide_the_next_valid_frame() {
-        let mut decoder = Frame::default();
+        let mut decoder = Frame::<ShellNews>::default();
         let data = [b'x'; 8192];
         for _ in 0..8 {
-            assert!(matches!(decoder.read(&data), ShellChange::Unchanged));
+            assert!(matches!(decoder.read(&data).change, ShellChange::Unchanged));
         }
-        assert!(matches!(decoder.read(b"\nmilo-cwd -\n"), ShellChange::Unreported));
+        assert!(matches!(decoder.read(b"\nmilo-cwd -\n").change, ShellChange::Unreported));
     }
 
     #[test]
     fn queued_shell_frames_across_reads_only_apply_the_latest_directory() {
-        let mut decoder = Frame::default();
+        let mut decoder = Frame::<ShellNews>::default();
         let mut bytes = b"milo-cwd 2f61\n".to_vec();
         bytes.resize(8190, b'x');
         bytes.extend_from_slice(b"\nmilo-cwd 2f62\n");
         let mut input = Cursor::new(bytes);
-        assert!(matches!(decoder.drain(&mut input), ShellChange::Directory(path) if path == Path::new("/b")));
-        assert!(matches!(decoder.drain(&mut input), ShellChange::Closed));
+        assert!(matches!(decoder.drain(&mut input).change, ShellChange::Directory(path) if path == Path::new("/b")));
+        assert!(matches!(decoder.drain(&mut input).change, ShellChange::Closed));
+    }
+
+    #[test]
+    fn the_processes_in_front_and_the_folder_arrive_together_without_hiding_each_other() {
+        let mut decoder = Frame::<ShellNews>::default();
+        let news = decoder.read(b"milo-fg 41 40 7\nmilo-cwd 2f61\n");
+        assert!(matches!(news.change, ShellChange::Directory(path) if path == Path::new("/a")));
+        assert_eq!(news.foreground, Some(vec![41, 40, 7]));
+        let news = decoder.read(b"milo-cwd 2f62\nmilo-fg -\n");
+        assert!(matches!(news.change, ShellChange::Directory(path) if path == Path::new("/b")));
+        assert_eq!(news.foreground, Some(Vec::new()));
+        for line in [&b"milo-fg 0\n"[..], b"milo-fg -3\n", b"milo-fg x\n", b"milo-fg \n", b"milo-fg 1  2\n"] {
+            assert!(decoder.read(line).foreground.is_none(), "{}", String::from_utf8_lossy(line));
+        }
     }
 
     #[test]

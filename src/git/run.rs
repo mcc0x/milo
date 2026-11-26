@@ -189,11 +189,14 @@ fn exact_pathspec(path: &str) -> String {
         spec.push(ch);
     }
     // Git for Windows reads a backslash in a pathspec as a folder separator, so a
-    // bracket escapes each character instead. A bracket holds one byte, so the last
-    // ASCII character stands in for the final one.
+    // bracket escapes each character instead. A bracket holds one byte and never
+    // matches a separator, so the last ASCII character other than a slash stands in
+    // for the final one.
     #[cfg(windows)]
     {
-        let Some(last) = path.rfind(|ch: char| ch.is_ascii()) else { return format!(":(literal){path}") };
+        let Some(last) = path.rfind(|ch: char| ch.is_ascii() && ch != '/') else {
+            return format!(":(literal){path}");
+        };
         for (i, ch) in path.char_indices() {
             if matches!(ch, '*' | '?' | '[') || i == last {
                 spec.extend(['[', ch, ']']);

@@ -20,7 +20,7 @@ jobs:
   native:
     name: Native Windows x86-64 tests
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: never
     steps:
@@ -53,10 +53,16 @@ jobs:
         run: |
           $env:MILO_TEST_CHROMIUM = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
           cargo +1.91.0 test --locked --bin milo web::launch::tests::headless_browser_authenticates_through_the_handoff -- --ignored --exact
-      - name: Record the tested executable
+      # The optimised build is what a release would ship, so it runs every test again.
+      - name: Test the release build
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: cargo +1.91.0 test --release --locked
+      - name: Record the tested executables
         run: |
           git rev-parse HEAD
-          (Get-FileHash target\debug\milo.exe -Algorithm SHA256).Hash
+          (Get-FileHash target\debug\milo.exe, target\release\milo.exe -Algorithm SHA256 | Format-Table Hash, Path -AutoSize | Out-String -Width 200).Trim()
       # Only its recipient can open the copy kept: a public artifact would publish a binary.
       - name: Seal the tested executable for its recipient
         if: github.event_name == 'workflow_dispatch' && inputs.recipient != ''
@@ -66,25 +72,22 @@ jobs:
           $openssl = "$env:ProgramFiles\Git\usr\bin\openssl.exe"
           & $openssl version
           [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\recipient.pem", [Convert]::FromBase64String($env:RECIPIENT))
-          & $openssl smime -encrypt -aes256 -binary -outform DER -in target\debug\milo.exe -out "$env:RUNNER_TEMP\milo.exe.p7m" "$env:RUNNER_TEMP\recipient.pem"
+          & $openssl smime -encrypt -aes256 -binary -outform DER -in target\release\milo.exe -out "$env:RUNNER_TEMP\milo.exe.p7m" "$env:RUNNER_TEMP\recipient.pem"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           (Get-FileHash "$env:RUNNER_TEMP\milo.exe.p7m" -Algorithm SHA256).Hash
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: github.event_name == 'workflow_dispatch' && inputs.recipient != ''
         with:
-          name: milo-windows-x86_64-debug-${{ github.sha }}
+          name: milo-windows-x86_64-release-${{ github.sha }}
           path: ${{ runner.temp }}/milo.exe.p7m
           if-no-files-found: error
           retention-days: 1
-      # Last, and with nothing uploaded: the release build is only driven here, never kept.
+      # Last, and uploading nothing: it drives the release build tested and recorded above.
       - name: Smoke-test packaged settings in Chromium
         env:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
         run: |
-          cargo +1.91.0 build --locked --release
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          (Get-FileHash target\release\milo.exe -Algorithm SHA256).Hash
           $smoke = "$env:RUNNER_TEMP\milo-web-smoke"
           npm install --prefix $smoke --no-save --no-audit --no-fund --ignore-scripts playwright-core@1.65.1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

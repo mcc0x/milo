@@ -4,7 +4,7 @@ Merge the version and packaging changes first. Keep the hosted installer, tap an
 
 ## Retain the bytes the Mac job tested
 
-The usual **Release tests** runs retain no installer. To qualify a release from `main`, dispatch that workflow with a one-time **public** recipient certificate. This repository is public, so the job uploads only an encrypted copy of its tested CLI, never a plaintext candidate. It creates no tag or release.
+The usual **Release tests** runs retain no installer. To qualify a release from `main`, dispatch that workflow with a one-time **public** recipient certificate. This repository is public, so the jobs upload only encrypted candidates. The workflow creates no tag or release.
 
 In a private directory **outside the checkout**, on a Mac with OpenSSL and GitHub CLI:
 
@@ -53,7 +53,18 @@ sh tests/linux-candidate.sh "$assets"  # needs tmux, Git and Python 3 for the te
 
 The first command after creating the directory builds twice in digest-pinned Jammy builders with Rust 1.91.0, a locked dependency and different source and target directories. It requires identical ELF bytes, checks the loader, library dependencies, symbol versions and build paths, and binds the offline installer to the executable's SHA-256. A separate read-only Jammy runtime, with no network, compiler or repository, verifies the sums and exercises the installed executable. The last command drives the installed file, not a Cargo target: Home → Outline → Reader save and conflict, History, terminal restoration, headless settings save/reopen and missing usage providers. Use that same directory unchanged on each proposed target; record the source SHA, plaintext checksums and runtime results.
 
-**User steps for a future authorized release:** obtain `install-linux.sh` and `milo-x86_64-unknown-linux-gnu` from the **same trusted release** and put them together. With Git available for History, open a terminal and run:
+**User steps for a future authorized release:** use an empty directory. Save `SHA256SUMS`, `install-linux.sh` and `milo-x86_64-unknown-linux-gnu` from the **same trusted release**. With GitHub CLI, set `tag` to the published Linux release tag and download just those files:
+
+```sh
+gh release download "${tag:?set the published Linux tag}" --repo mcc0x/milo \
+  --pattern SHA256SUMS --pattern install-linux.sh --pattern milo-x86_64-unknown-linux-gnu
+test -f install-linux.sh && test -f milo-x86_64-unknown-linux-gnu &&
+  grep -Eq '^[0-9a-f]{64}  install-linux\.sh$' SHA256SUMS &&
+  grep -Eq '^[0-9a-f]{64}  milo-x86_64-unknown-linux-gnu$' SHA256SUMS &&
+  sha256sum --check --ignore-missing SHA256SUMS
+```
+
+Both the installer and the Linux binary must report `OK` before you run the script. The combined manifest also lists Mac files you didn't download. With Git available for History, run:
 
 ```sh
 sh install-linux.sh                # verifies the adjacent ELF before replacing anything
@@ -63,6 +74,21 @@ sh install-linux.sh --uninstall    # optional: removes only a matching binary an
 
 Repeat the install from a new release directory to upgrade. Existing preferences and adjacent files stay in place. The installer refuses a changed binary, an unmanaged installation, or an old or unknown libc. To choose another directory, set `MILO_BIN_DIR` for both install and removal. The checksum detects damaged or mismatched bytes; it does not authenticate a script from an untrusted source.
 
-For promotion, the existing **Release tests** dispatch on the approved `main` SHA can seal both targets to the same one-time public certificate. Require the non-skipped Apple Silicon job **and** the Linux candidate job, record the run/attempt and plaintext hashes, and decrypt the separate `milo-linux-x86_64-$source_sha` artifact (`milo-linux.p7m`) as above. Recreate the Linux installer with `stage-linux.sh` using the recorded one-entry ELF checksum file named `SHA256SUMS`; compare **both** hashes against the job log. Combine the Mac and Linux entries into a single release manifest. Qualify those exact bytes, then seek approval for a **new** tag and release; never retrofit an old tag. No PR or ordinary push uploads a candidate.
+**Retain and promote:** use the same dispatch and private key as for Mac. Require both the non-skipped Apple Silicon job and the Linux candidate job on the intended version commit. Record the run ID, attempt, artifact IDs, and the Linux job's plaintext hashes for the tar, ELF and installer. Before the 14-day expiry, download into a fresh private directory. Set `linux_tar_sha256` from the job log, not from the downloaded archive:
 
-This slice covers standalone text terminals and local, headless settings. It does not qualify a graphical desktop or browser, tray, SSH, Linux-hosted Rex, live providers, arm64, 32-bit Linux, musl, WSL or Windows.
+```sh
+gh run download "$run_id" --repo mcc0x/milo --name "milo-linux-x86_64-$source_sha" --dir linux
+(
+  cd linux || exit 1
+  set -e
+  openssl smime -decrypt -binary -inform DER -in milo-linux.tar.p7m \
+    -inkey ../recipient.key -out milo-linux.tar
+  printf '%s  milo-linux.tar\n' "$linux_tar_sha256" | shasum -a 256 -c -
+  tar -xf milo-linux.tar
+  shasum -a 256 -c SHA256SUMS
+)
+```
+
+Compare the two entries in `linux/SHA256SUMS` to the job log. Keep those three extracted files privately; there is no installer to regenerate. Smoke-test the downloaded bytes on Ubuntu. Combine the verified Linux entries with the Mac entries in a **separate** release `SHA256SUMS` and check it against all four staged assets. Seek approval for the exact source SHA and these five files. Publish only to a **new** tag, compare fresh release downloads to staging, then update public links. No PR or ordinary push uploads a candidate.
+
+This slice covers standalone text terminals and local, headless settings. Repeat the install and terminal smoke on a fresh Ubuntu amd64 guest, using a non-root user and a local candidate mirror. A plain SSH terminal can exercise standalone panes; it does not qualify a remote Rex desktop. This procedure does not qualify a graphical desktop or browser, tray, Linux-hosted Rex, live providers, arm64, 32-bit Linux, musl, WSL or Windows.
