@@ -588,6 +588,17 @@ fn usage_reads_local_codex_sessions_and_quits() {
 #[test]
 fn claude_status_line_runs_through_git_bash_and_the_usage_pane_shows_its_limits() {
     let scratch = Scratch::new("claude-status");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let transcripts = scratch.0.join("profile").join(".claude").join("projects").join("project");
+    fs::create_dir_all(&transcripts).unwrap();
+    fs::write(
+        transcripts.join("session.jsonl"),
+        format!(
+            "{{\"timestamp\":\"{}\",\"type\":\"assistant\",\"message\":{{\"usage\":{{\"input_tokens\":21000,\"output_tokens\":25000,\"cache_creation_input_tokens\":2000,\"cache_read_input_tokens\":0}},\"model\":\"Claude Test\"}}}}\n",
+            utc(now)
+        ),
+    )
+    .unwrap();
     let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|dir| dir.join("git.exe"))
         .find(|git| git.is_file())
