@@ -629,8 +629,10 @@ fn claude_status_line_runs_through_git_bash_and_the_usage_pane_shows_its_limits(
     assert!(report.contains("Claude Code limits: Milo Claude status line"), "{report}");
 
     let (mut console, at) = open_pane(&scratch, "usage");
+    // The saved week is drawn as a large figure beside its name, and without a reset time.
+    console.see("week", at);
     let at = console.see("Claude", at);
-    console.see("39%", at);
+    console.see("Reset time unknown", at);
     let mark = console.text().len();
     console.keys(b"q");
     finish(&console, mark);
