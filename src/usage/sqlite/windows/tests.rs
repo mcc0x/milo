@@ -201,4 +201,11 @@ fn time_output_and_size_are_bounded() {
     writer.exec("INSERT INTO t(b) VALUES (randomblob(100000));");
     assert!(snapshot(&path, 50_000, Instant::now() + WAIT).is_none());
     assert!(snapshot(&path, MAX_SNAPSHOT, Instant::now() + WAIT).is_some());
+    assert!(!too_large(&path));
+
+    let large = f.root.join("large.db");
+    fs::write(&large, fs::read(&path).unwrap()).unwrap();
+    fs::OpenOptions::new().write(true).open(&large).unwrap().set_len(MAX_SNAPSHOT + 1).unwrap();
+    assert!(too_large(&large));
+    assert!(direct(&large, "SELECT 1", MAX_OUTPUT).is_none());
 }

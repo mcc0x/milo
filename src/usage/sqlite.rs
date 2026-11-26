@@ -20,6 +20,8 @@ use super::signature::Signature;
 mod windows;
 #[cfg(all(test, windows))]
 pub(super) use windows::Writer;
+#[cfg(windows)]
+pub(super) use windows::too_large;
 
 const INTERVAL: Duration = Duration::from_secs(20);
 /// A database whose files have not changed is still read again this often,

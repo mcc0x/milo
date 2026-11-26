@@ -997,10 +997,19 @@ impl Usage {
         let usage = Self::for_home(home.as_deref(), when::now(), prefs.usage_tools)
             .with_large_figures(prefs.usage_large_figures);
         let (omp, opencode) = (omp::database(home.as_deref()), opencode::database(home.as_deref()));
+        #[cfg(windows)]
+        let large = [&omp, &opencode].into_iter().flatten().any(|path| sqlite::too_large(path));
+        #[cfg(unix)]
+        let large = false;
         let mut usage = usage.with_databases(omp, opencode, sqlite::QUERY_WAIT);
         if cfg!(windows) {
-            let accounts = prefs.usage_accounts.any().then_some("Usage accounts are not supported on Windows yet.");
-            usage.preference_note = accounts.or(note);
+            usage.preference_note = if prefs.usage_accounts.any() {
+                Some("Usage accounts are not supported on Windows yet.")
+            } else if large {
+                Some("OMP and OpenCode databases over 64 MiB are not read on Windows yet.")
+            } else {
+                note
+            };
             return usage;
         }
         usage.preference_note = note;

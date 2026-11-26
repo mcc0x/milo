@@ -410,6 +410,14 @@ pub(super) fn snapshot(path: &Path, limit: u64, deadline: Instant) -> Option<Vec
     None
 }
 
+/// Whether a database and its log hold more than a query on Windows copies.
+pub(in crate::usage) fn too_large(path: &Path) -> bool {
+    let size = |path: &Path| std::fs::symlink_metadata(path).map_or(0, |metadata| metadata.len());
+    let mut log = path.as_os_str().to_owned();
+    log.push("-wal");
+    size(path).saturating_add(size(Path::new(&log))) > MAX_SNAPSHOT
+}
+
 /// Bound memory, output and wall time; the database's own files are only ever read.
 pub(super) fn query(path: &Path, sql: &str, deadline: Instant, max: usize) -> Option<Vec<u8>> {
     let sql = CString::new(sql).ok()?;
