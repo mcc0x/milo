@@ -47,6 +47,9 @@ use std::time::{Duration, Instant};
 
 use crate::{fs_ops, term};
 
+/// Milo's Rex integration is not ported to Windows, where a bare `rex` is also looked for beside
+/// milo.exe, so no Rex command is run there.
+const ASKS_REX: bool = cfg!(unix);
 const PROBE_WAIT: Duration = Duration::from_secs(3);
 /// How long a script or a settings command may take before it is ended. Rex allows each
 /// request three seconds; a script makes several.
@@ -56,6 +59,9 @@ const PIPE_GRACE: Duration = Duration::from_millis(200);
 
 /// Inspect the server catalog, not the foreground app. Doctor must not start a server.
 pub(crate) fn layout_available() -> Option<bool> {
+    if !ASKS_REX {
+        return None;
+    }
     let mut command = Command::new("rex");
     command.args(["--autostart=false", "--timeout", "3s", "actions", "--json"]).env_remove("REX_CLIENT");
     let output = probe_output(&mut command, PROBE_WAIT)?;
@@ -125,6 +131,9 @@ pub(crate) fn script(
     lua: &str,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
 ) -> Option<String> {
+    if !ASKS_REX {
+        return None;
+    }
     let mut command = Command::new("rex");
     command.args(["--autostart=false", "--timeout", "3s", "do", "-", "-s"]).arg(session);
     if let Some(target) = target {
@@ -143,6 +152,9 @@ fn scripted(command: &mut Command, lua: &str, wait: Duration) -> Option<String> 
 /// Doctor's read-only script has a local deadline as well as Rex's request
 /// timeout. Passing Lua as an argument keeps stdin from blocking the probe.
 pub(crate) fn diagnostic_script(target: &Target, lua: &str, caller: &str) -> Option<String> {
+    if !ASKS_REX {
+        return None;
+    }
     let mut command = Command::new("rex");
     command
         .args(["--autostart=false", "--timeout", "3s", "do", "-e", lua, "-s"])
@@ -217,6 +229,9 @@ fn output_within(command: &mut Command, input: Option<&str>, wait: Duration) -> 
 
 /// Setup reports its own messages, not process output that can contain paths or settings.
 pub fn run(args: &[&OsStr]) -> bool {
+    if !ASKS_REX {
+        return false;
+    }
     let mut command = Command::new("rex");
     command.stdout(Stdio::null()).stderr(Stdio::null());
     if let [config, check, path] = args
@@ -286,6 +301,9 @@ pub(crate) struct AlertServer {
 
 impl AlertServer {
     fn local(selected: &str) -> Option<Self> {
+        if !ASKS_REX {
+            return None;
+        }
         let socket = if selected == "localhost" { None } else { Some(socket_identity(selected)?) };
         let reply = probe_output(
             alert_command(Some(selected)).args(["--timeout", "400ms", "whoami", "--json"]),
@@ -424,6 +442,9 @@ impl AlertSource {
     /// Starts the event stream without starting Rex. An explicitly selected
     /// local socket must not fall back to another server when it disappears.
     pub(crate) fn events(&self) -> io::Result<Child> {
+        if !ASKS_REX {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
         if !self.is_current() {
             return Err(io::ErrorKind::NotConnected.into());
         }
@@ -641,6 +662,9 @@ pub struct ShellNews {
 
 impl ShellObserver {
     pub fn start(anchor: &OsStr) -> Option<Self> {
+        if !ASKS_REX {
+            return None;
+        }
         let target = Target::current()?;
         let anchor = exact_block(anchor)?;
         let pane = exact_block(&target.block)?;
@@ -716,6 +740,9 @@ impl AppObserver {
     /// `rex` is the program to run, since the Rex server's own path leaves it out.
     /// With no `parts`, the script asks Rex for nothing but its connected apps.
     pub fn start(rex: &OsStr, parts: FrontParts) -> Option<Self> {
+        if !ASKS_REX {
+            return None;
+        }
         let args = format!(r#"{{"session":{},"directory":{}}}"#, parts.session, parts.directory);
         let mut child = Command::new(rex)
             .args(["--autostart=false", "do", "--all", "--fail-fast", "--args", &args, "-e"])

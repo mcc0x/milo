@@ -1,9 +1,9 @@
 //! Windows forms of the facilities in [`super`]: handle values, readiness checks and file identity.
 
-use std::ffi::c_void;
+use std::ffi::{OsString, c_void};
 use std::fs::File;
 use std::io;
-use std::os::windows::ffi::OsStrExt as _;
+use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::windows::fs::MetadataExt as _;
 use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle as _, OwnedHandle};
 use std::path::{Path, PathBuf};
@@ -444,6 +444,68 @@ unsafe extern "system" {
         template: *mut c_void,
     ) -> *mut c_void;
     fn CreateDirectoryW(name: *const u16, security: *const SecurityAttributes) -> i32;
+    fn GetFinalPathNameByHandleW(file: *mut c_void, path: *mut u16, len: u32, flags: u32) -> u32;
+}
+
+#[repr(C)]
+struct Guid {
+    data1: u32,
+    data2: u16,
+    data3: u16,
+    data4: [u8; 8],
+}
+
+/// FOLDERID_LocalAppData.
+static LOCAL_APP_DATA: Guid =
+    Guid { data1: 0xF1B3_2785, data2: 0x6FBA, data3: 0x4FCF, data4: [0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91] };
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn SHGetKnownFolderPath(id: *const Guid, flags: u32, token: *mut c_void, path: *mut *mut u16) -> i32;
+}
+
+#[link(name = "ole32")]
+unsafe extern "system" {
+    fn CoTaskMemFree(memory: *mut c_void);
+}
+
+/// The user's local application data folder as the system records it for this account, not as the
+/// environment names it, so nothing another program set can move it.
+pub(crate) fn local_app_data() -> io::Result<PathBuf> {
+    let mut path = std::ptr::null_mut();
+    // SAFETY: The id is a valid GUID, no token is passed, and the path output is writable.
+    let result = unsafe { SHGetKnownFolderPath(&raw const LOCAL_APP_DATA, 0, std::ptr::null_mut(), &raw mut path) };
+    let text = (result >= 0 && !path.is_null()).then(|| {
+        let mut length = 0;
+        // SAFETY: The system wrote a NUL-terminated path here, and every unit up to the NUL is read.
+        while unsafe { path.wrapping_add(length).read() } != 0 {
+            length += 1;
+        }
+        // SAFETY: The `length` units before the NUL were just read from this allocation.
+        PathBuf::from(OsString::from_wide(unsafe { std::slice::from_raw_parts(path, length) }))
+    });
+    // SAFETY: The memory, or null, came from SHGetKnownFolderPath and is freed only here.
+    unsafe { CoTaskMemFree(path.cast()) };
+    text.ok_or_else(|| io::Error::other(format!("the local application data folder is unknown ({result:#x})")))
+}
+
+/// The path the system resolves an open file or folder to now, through any link or junction.
+pub(crate) fn final_path(file: &File) -> io::Result<PathBuf> {
+    let mut buffer = vec![0u16; 32_768];
+    let len = u32::try_from(buffer.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
+    // SAFETY: The handle is open, and the buffer holds `len` units.
+    let written = unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), buffer.as_mut_ptr(), len, 0) };
+    let written = usize::try_from(written).map_err(|_| io::ErrorKind::InvalidData)?;
+    if written == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let units = buffer.get(..written).ok_or(io::ErrorKind::InvalidData)?;
+    Ok(PathBuf::from(OsString::from_wide(units)))
+}
+
+/// Whether an open file is directly inside an open folder, as both are resolved now.
+pub(crate) fn inside(file: &File, folder: &File) -> io::Result<bool> {
+    Ok(final_path(file)?.parent() == Some(final_path(folder)?.as_path()))
 }
 
 /// Memory the system allocated for a result, freed with this value.

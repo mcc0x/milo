@@ -17,7 +17,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::fs_ops;
-use crate::sys::{Existing, private_dir, private_file};
+use crate::sys::{Existing, inside, private_dir, private_file};
 
 /// The private folder, inside the folder a caller names, that holds the lock files.
 const FOLDER: &str = "locks";
@@ -68,8 +68,13 @@ fn path(dir: &Path, name: &CStr) -> io::Result<PathBuf> {
 fn create(dir: &Path, name: &CStr) -> io::Result<File> {
     fs::create_dir_all(dir)?;
     fs_ops::open_dir(dir)?;
-    private_dir(&dir.join(FOLDER))?;
-    private_file(&path(dir, name)?, Existing::Open)
+    let folder = private_dir(&dir.join(FOLDER))?;
+    let lock = private_file(&path(dir, name)?, Existing::Open)?;
+    // The folder is held, so it cannot move while the file found by name is checked to be in it.
+    if !inside(&lock, &folder)? {
+        return Err(io::Error::new(ErrorKind::PermissionDenied, "the lock file is not in Milo's lock folder"));
+    }
+    Ok(lock)
 }
 
 fn existing(dir: &Path, name: &CStr) -> io::Result<Option<File>> {

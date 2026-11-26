@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use super::{PROBE_WAIT, exact_id, probe_output};
+use super::{ASKS_REX, PROBE_WAIT, exact_id, probe_output};
 use crate::json::Value;
 
 /// A host over SSH or a tailnet can take longer to answer than the server of this terminal.
@@ -88,6 +88,9 @@ fn parse_server(output: &[u8]) -> Option<Server> {
 
 /// The server of this terminal, or the one a host names. `None` when it does not answer.
 pub(crate) fn server(host: Option<&OsStr>) -> Option<Server> {
+    if !ASKS_REX {
+        return None;
+    }
     let (wait, deadline) = if host.is_some() { ("10s", HOST_WAIT) } else { ("3s", PROBE_WAIT) };
     parse_server(&probe_output(rex(host, wait).args(["whoami", "--json"]), deadline)?)
 }
@@ -99,6 +102,9 @@ fn parse_command_version(output: &[u8]) -> Option<CommandVersion> {
 
 /// The `rex` command on the search path. It asks no server.
 pub(crate) fn command_version() -> Option<CommandVersion> {
+    if !ASKS_REX {
+        return None;
+    }
     parse_command_version(&probe_output(Command::new("rex").args(["version", "--json"]), PROBE_WAIT)?)
 }
 
@@ -122,6 +128,9 @@ fn parse_viewers(output: &[u8]) -> Option<Viewers> {
 
 /// Whether a Rex app on this computer is connected to the server of this terminal.
 pub(crate) fn viewers() -> Option<Viewers> {
+    if !ASKS_REX {
+        return None;
+    }
     parse_viewers(&probe_output(rex(None, "3s").args(["client", "ls", "--json"]), PROBE_WAIT)?)
 }
 
@@ -279,6 +288,9 @@ impl RemoteEditor {
     /// address on this computer its page will be opened at. `project` is a
     /// folder on the host. The host finds `milo` on its own search path.
     pub(crate) fn start(host: &OsStr, project: Option<&OsStr>, forwarded_port: u16) -> Option<Self> {
+        if !ASKS_REX {
+            return None;
+        }
         let mut command = rex(Some(host), "10s");
         command.args(["new", "milo-settings", "--json"]);
         if let Some(project) = project {

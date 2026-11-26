@@ -27,11 +27,14 @@ pub(super) struct Launch {
 }
 
 impl Launch {
+    /// Like Unix, which keeps the page in the system's own temporary folder whatever TMPDIR says, the
+    /// page goes under the local application data folder the system records for this user, not one
+    /// the environment names, so its folder's parents are the user's own.
     pub(super) fn start(url: &str) -> io::Result<Self> {
-        let state = crate::paths::state_dir().ok_or(io::ErrorKind::NotFound)?;
-        fs::create_dir_all(&state)?;
-        crate::fs_ops::open_dir(&state)?;
-        Self::spawn(&state.join("web"), open_with_shell, url)
+        let milo = crate::sys::local_app_data()?.join("milo");
+        fs::create_dir_all(&milo)?;
+        crate::fs_ops::open_dir(&milo)?;
+        Self::spawn(&milo.join("web"), open_with_shell, url)
     }
 
     /// Writes the page into the private folder `root`, made if it is missing, and asks `open`, on
@@ -52,9 +55,14 @@ impl Launch {
              <meta http-equiv=refresh content=\"0;url={url}\"><title>Opening Milo</title>\
              <p>If Milo does not open, use the private URL printed in your terminal.</p>"
         )?;
+        // The folder is held, so it cannot move while the page found by name is checked to be in it,
+        // and the browser is given the page's resolved path rather than the name it was made by.
+        if !crate::sys::inside(&file, &folder)? {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the page is not in Milo's private folder"));
+        }
+        let page = crate::sys::plain_path(crate::sys::final_path(&file)?);
         drop(file);
         let expires = Instant::now() + LIFETIME;
-        let page = handoff.path().to_path_buf();
         let opener = std::thread::Builder::new().name("browser opener".into()).spawn(move || open(&page))?;
         Ok(Self { opener: Some(opener), handoff: Some((handoff, expires)), _folder: folder })
     }
@@ -197,8 +205,10 @@ mod tests {
         let (page, text) = receive.recv_timeout(Duration::from_secs(10)).unwrap();
         let (handoff, expires) = launch.handoff.as_ref().unwrap();
         let expires = *expires;
-        assert_eq!(page, handoff.path());
-        assert_eq!(page.parent(), Some(web.as_path()));
+        let opened = fs::File::open(&page).unwrap();
+        assert!(crate::sys::inside(&opened, &launch._folder).unwrap());
+        assert_eq!(page.file_name(), handoff.path().file_name());
+        drop(opened);
         assert!(fs::rename(&web, folder.root.join("moved")).is_err(), "the page's folder was renamed");
         let opened = crate::fs_ops::open_dir(&web).unwrap();
         assert_eq!(crate::sys::file_security(&opened).unwrap(), crate::sys::private_security().unwrap());

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::{exact_id, finished, probe_output};
+use super::{ASKS_REX, exact_id, finished, probe_output};
 use crate::json::Value;
 
 const TERMINAL: &str = "com.superlogical.terminal";
@@ -58,6 +58,9 @@ pub(crate) struct AttentionWatch {
 impl AttentionWatch {
     /// `NotFound` when there is no `rex` command to run.
     pub(crate) fn start() -> io::Result<Self> {
+        if !ASKS_REX {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
         let mut child = Command::new(program())
             .args(["--autostart=false", "do", "--all", "--fail-fast", "-e", include_str!("../rex_attention.lua")])
             .env_remove("REX_SESSION")
@@ -214,12 +217,15 @@ pub(crate) fn jump(host: &str, block: &str) -> Jump {
     if exact_id(OsStr::new(host), "").is_none() || exact_id(OsStr::new(block), "block:").is_none() {
         return Jump::Unavailable(PANE_GONE);
     }
+    if !ASKS_REX {
+        return Jump::Unavailable(NO_REX);
+    }
     let deadline = Instant::now() + JUMP_WAIT;
     let ask = |args: &[&str]| probe_output(rex("1s").args(args), deadline.checked_duration_since(Instant::now())?);
     // SAFETY: Getting the current effective user ID touches no memory.
     #[cfg(unix)]
     let uid = u64::from(unsafe { libc::geteuid() });
-    // Rex does not run on Windows, and no peer's Unix user ID can match this.
+    // Milo asks no Rex on Windows, and no peer's Unix user ID can match this.
     #[cfg(windows)]
     let uid = u64::MAX;
     let Some(who) = ask(&["whoami", "--json"]) else { return Jump::Unavailable(NO_REX) };
