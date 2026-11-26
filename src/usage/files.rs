@@ -1,13 +1,11 @@
 //! Walks the session trees without following links and reads within a refresh budget.
 //!
-//! The walk is built on directory descriptors, which Windows lacks, so there it reports that
-//! usage is not supported.
-#![cfg_attr(windows, allow(dead_code))]
 
 #[cfg(unix)]
 use crate::sys::RawFd;
+use std::ffi::OsStr;
 #[cfg(unix)]
-use std::ffi::{CStr, CString, OsStr};
+use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, Read};
 #[cfg(unix)]
@@ -381,6 +379,9 @@ struct Scan {
     inaccessible: bool,
 }
 
+#[cfg(windows)]
+mod windows;
+
 #[cfg(unix)]
 impl Scan {
     fn directory(&mut self, mut dir: Dir, tree: &Tree, path: &mut PathBuf, depth: usize) {
@@ -406,7 +407,7 @@ impl Scan {
                 if !self.admit() {
                     break;
                 }
-                self.keep(tree.limit(), path, bytes, version);
+                self.keep(tree.limit(), path, OsStr::from_bytes(bytes), version);
             }
             if entry.may_be(libc::DT_DIR)
                 && tree.directory(bytes, depth)
@@ -435,7 +436,9 @@ impl Scan {
         }
         true
     }
+}
 
+impl Scan {
     /// Report a partial result only when another qualifying entry would exceed the budget.
     fn admit(&mut self) -> bool {
         if self.remaining == 0 {
@@ -447,7 +450,7 @@ impl Scan {
     }
 
     /// Keep the newest transcripts, with empty files as possible append targets only.
-    fn keep(&mut self, limit: usize, dir: &Path, name: &[u8], version: FileVersion) {
+    fn keep(&mut self, limit: usize, dir: &Path, name: &OsStr, version: FileVersion) {
         let rank = version.discovery_rank();
         if self.files.len() == limit {
             self.partial |= version.len != 0 && self.files.last().is_some_and(|old| old.version.len != 0);
@@ -455,7 +458,7 @@ impl Scan {
                 return;
             }
         }
-        let path = dir.join(OsStr::from_bytes(name));
+        let path = dir.join(name);
         let at = self.files.partition_point(|old| {
             let prior = old.version.discovery_rank();
             prior > rank || (prior == rank && old.path < path)
@@ -609,16 +612,18 @@ pub(super) struct SessionRoot(File);
 
 #[cfg(windows)]
 impl SessionRoot {
-    fn scan(&self, _tree: Tree, _remaining: usize) -> io::Result<Scan> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "Usage is not supported on Windows yet"))
+    fn scan(&self, tree: Tree, remaining: usize) -> io::Result<Scan> {
+        let mut scan = Scan { remaining, files: Vec::new(), partial: false, inaccessible: false };
+        scan.directory(&self.0, &tree, &mut PathBuf::new(), 0);
+        Ok(scan)
     }
 
-    fn version(&self, _path: &Path) -> Option<FileVersion> {
-        None
+    fn version(&self, path: &Path) -> Option<FileVersion> {
+        windows::version(&self.0, path)
     }
 
-    pub(super) fn open(&self, _path: &Path) -> Option<(File, FileVersion)> {
-        None
+    pub(super) fn open(&self, path: &Path) -> Option<(File, FileVersion)> {
+        windows::open(&self.0, path)
     }
 }
 

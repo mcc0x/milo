@@ -991,16 +991,20 @@ pub struct Usage {
 
 impl Usage {
     pub fn open() -> Self {
-        if cfg!(windows) {
-            let mut usage = Self::from_dirs(None, None, None, when::now());
-            usage.preference_note = Some("Usage is not supported on Windows yet.");
-            return usage;
-        }
         let root = preferences::worktree(Path::new("."));
         let (prefs, note) = preferences::Preferences::for_pane(root.as_deref());
         let home = paths::home();
         let usage = Self::for_home(home.as_deref(), when::now(), prefs.usage_tools)
             .with_large_figures(prefs.usage_large_figures);
+        if cfg!(windows) {
+            let mut usage = usage;
+            usage.preference_note = if prefs.usage_accounts.any() {
+                Some("Usage accounts are not supported on Windows yet.")
+            } else {
+                note
+            };
+            return usage;
+        }
         let (omp, opencode) = (omp::database(home.as_deref()), opencode::database(home.as_deref()));
         let mut usage = usage.with_databases(omp, opencode, sqlite::QUERY_WAIT);
         usage.preference_note = note;
@@ -1390,3 +1394,5 @@ pub fn claude_status() -> i32 {
 
 #[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, windows))]
+mod windows_tests;
