@@ -26,6 +26,8 @@
 //! place of one that did not. Besides the tabs it opens one at a time, the
 //! test opens several back to back, with no pause between them, more than once.
 
+#![cfg(unix)]
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs::{self, File};

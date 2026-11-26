@@ -12,7 +12,12 @@ pub fn now() -> i64 {
 
 /// A day number for the local time zone, used to separate days in the timeline.
 pub fn local_day(ts: i64) -> i64 {
-    let Ok(t) = libc::time_t::try_from(i128::from(ts)) else { return ts.div_euclid(DAY) };
+    (ts + local_offset(ts)).div_euclid(DAY)
+}
+
+#[cfg(unix)]
+fn local_offset(ts: i64) -> i64 {
+    let Ok(t) = libc::time_t::try_from(i128::from(ts)) else { return 0 };
     // SAFETY: Zero is valid for the integer fields and null is valid for the raw zone pointer.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     // SAFETY: `t` is readable and `tm` is writable for the call.
@@ -21,7 +26,57 @@ pub fn local_day(ts: i64) -> i64 {
     let offset: libc::c_long = if local.is_null() { 0 } else { tm.tm_gmtoff };
     #[cfg(not(target_pointer_width = "64"))]
     let offset = i64::from(offset);
-    (ts + offset).div_euclid(DAY)
+    offset
+}
+
+#[cfg(windows)]
+mod win {
+    #[repr(C)]
+    pub struct SystemTime {
+        fields: [u16; 8],
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        pub fn FileTimeToSystemTime(file_time: *const u64, system_time: *mut SystemTime) -> i32;
+        pub fn SystemTimeToFileTime(system_time: *const SystemTime, file_time: *mut u64) -> i32;
+        pub fn SystemTimeToTzSpecificLocalTime(zone: *const u8, utc: *const SystemTime, local: *mut SystemTime) -> i32;
+    }
+
+    pub const fn zero() -> SystemTime {
+        SystemTime { fields: [0; 8] }
+    }
+}
+
+/// Seconds the local zone is ahead of UTC at `ts`, or zero when Windows cannot say.
+#[cfg(windows)]
+fn local_offset(ts: i64) -> i64 {
+    const UNIX_TO_FILETIME: i64 = 11_644_473_600;
+    const TICKS_PER_SECOND: i64 = 10_000_000;
+    let Some(ticks) = ts.checked_add(UNIX_TO_FILETIME).and_then(|secs| secs.checked_mul(TICKS_PER_SECOND)) else {
+        return 0;
+    };
+    let Ok(ticks) = u64::try_from(ticks) else { return 0 };
+    let (mut utc, mut local) = (win::zero(), win::zero());
+    let (mut utc_ticks, mut local_ticks) = (0u64, 0u64);
+    // SAFETY: `ticks` is readable and `utc` is writable for the call.
+    if unsafe { win::FileTimeToSystemTime(&ticks, &mut utc) } == 0 {
+        return 0;
+    }
+    // SAFETY: A null zone means the current one, and `utc` and `local` are valid for the call.
+    if unsafe { win::SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) } == 0 {
+        return 0;
+    }
+    // SAFETY: `utc` is readable and `utc_ticks` is writable for the call.
+    if unsafe { win::SystemTimeToFileTime(&utc, &mut utc_ticks) } == 0 {
+        return 0;
+    }
+    // SAFETY: `local` is readable and `local_ticks` is writable for the call.
+    if unsafe { win::SystemTimeToFileTime(&local, &mut local_ticks) } == 0 {
+        return 0;
+    }
+    let (Ok(local_ticks), Ok(utc_ticks)) = (i64::try_from(local_ticks), i64::try_from(utc_ticks)) else { return 0 };
+    (local_ticks - utc_ticks) / TICKS_PER_SECOND
 }
 
 /// Age to fit next to a commit subject. Uses the largest whole unit.

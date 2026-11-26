@@ -455,10 +455,7 @@ mod imp {
         }
         let (reader, writer) = io::pipe().ok()?;
         for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
-            // SAFETY: each fd is an open pipe end; F_SETFL accepts an integer flag.
-            if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
-                return None;
-            }
+            crate::sys::set_nonblocking(fd).ok()?;
         }
         let callback = Arc::new(CallbackState {
             signal: writer,
@@ -585,7 +582,9 @@ mod filter_tests {
     use super::*;
     use crate::fixture::Fixture;
     use crate::git::Repo;
+    #[cfg(unix)]
     use std::ffi::OsStr;
+    #[cfg(unix)]
     use std::os::unix::ffi::OsStrExt;
 
     #[test]
@@ -661,6 +660,7 @@ mod filter_tests {
         assert!(!reader.allows(&common.join("worktrees/linked-other/index"), false));
     }
 
+    #[cfg(unix)]
     #[test]
     fn worktree_filter_has_component_boundaries_and_preserves_raw_path_bytes() {
         let common = Path::new("/project/.git");
@@ -797,6 +797,7 @@ mod tests {
         assert!(screen.text()[0].contains("2 to commit"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn reader_wakes_for_its_file_rules_git_and_ancestor_but_not_other_work() {
         let f = Fixture::folder();

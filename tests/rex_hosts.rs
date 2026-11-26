@@ -14,6 +14,8 @@
 //! the two sockets below the throwaway folder. Set `MILO_TEST_REX` if `rex`
 //! is not on your path, and `MILO_TEST_BINARY` to check another build of Milo.
 
+#![cfg(unix)]
+
 use std::fs::{self, File};
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::TcpStream;

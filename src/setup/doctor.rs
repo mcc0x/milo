@@ -128,6 +128,9 @@ fn store() -> Result<Store, String> {
 }
 
 pub(crate) fn report() -> Result<String, String> {
+    if cfg!(windows) {
+        return Err("milo doctor is not supported on Windows yet.".into());
+    }
     full_report(&store()?, None)
 }
 
@@ -675,6 +678,9 @@ fn on(value: bool) -> &'static str {
 }
 
 pub(crate) fn repair() -> Result<String, String> {
+    if cfg!(windows) {
+        return Err("milo doctor --repair is not supported on Windows yet.".into());
+    }
     let store = store()?;
     let active = store.has_layout()?;
     if !store.listener_state_matches()? {
@@ -719,6 +725,9 @@ pub(crate) fn repair() -> Result<String, String> {
 }
 
 pub(crate) fn remove() -> Result<String, String> {
+    if cfg!(windows) {
+        return Err("milo setup --remove is not supported on Windows yet.".into());
+    }
     crate::alerts::remove()?;
     remove_from(&store()?, &rex::run)
 }

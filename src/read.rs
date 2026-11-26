@@ -37,7 +37,7 @@ pub fn file(path: &Path, limit: u64) -> Content {
     }
     let file = match fs_ops::open_read(path) {
         Ok(file) => file,
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+        Err(e) if e.raw_os_error() == Some(fs_ops::LINK_REFUSED) => {
             return fs::read_link(path).map_or_else(unavailable, Content::Link);
         }
         Err(e) => return unavailable(e),

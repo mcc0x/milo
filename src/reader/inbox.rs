@@ -6,16 +6,26 @@
 //! a line if it is to be shown there. Nothing comes back. A pipe that no
 //! reader holds open refuses the request, and that is how a reader that has
 //! gone is told from one that is there.
+//!
+//! Rex blocks exist only on Unix hosts, so on Windows no reader listens and none is found.
 
 use crate::sys::{AsRawFd as _, RawFd};
+#[cfg(unix)]
 use std::ffi::{CString, OsStr};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read as _, Write as _};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::{self, OpenOptions};
+#[cfg(unix)]
+use std::io::Write as _;
+use std::io::{self, Read as _};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt as _;
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
 use super::Spot;
+#[cfg(unix)]
 use super::rescue::{hashed, private_dir};
 
 /// More than a path and a commit ID can take. A longer request is dropped whole.
@@ -50,11 +60,13 @@ pub(super) struct Request {
     pub(super) spot: Option<Spot>,
 }
 
+#[cfg(unix)]
 fn pipe_path(state: &Path, block: &str) -> PathBuf {
     state.join("readers").join(hashed(block.as_bytes()))
 }
 
 /// Where the reader in `block` notes the project it was opened for.
+#[cfg(unix)]
 fn project_path(state: &Path, block: &str) -> PathBuf {
     state.join("readers").join(format!("{}.project", hashed(block.as_bytes())))
 }
@@ -62,6 +74,12 @@ fn project_path(state: &Path, block: &str) -> PathBuf {
 /// The project the reader in `block` noted, for a pane that did not open that
 /// reader to tell whether a file belongs in it. A reader that noted none is
 /// offered nothing by such a pane.
+#[cfg(windows)]
+pub(super) fn project(_: &Path, _: &str) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(unix)]
 pub(super) fn project(state: &Path, block: &str) -> Option<PathBuf> {
     let mut note =
         OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(project_path(state, block)).ok()?;
@@ -74,6 +92,7 @@ pub(super) fn project(state: &Path, block: &str) -> Option<PathBuf> {
 }
 
 /// Opens one end of the pipe at `path` without waiting for the other, and only if it is a pipe.
+#[cfg(unix)]
 fn open_end(path: &Path, options: &mut OpenOptions) -> io::Result<File> {
     let end = options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(path)?;
     if end.metadata()?.file_type().is_fifo() { Ok(end) } else { Err(io::ErrorKind::InvalidInput.into()) }
@@ -81,6 +100,12 @@ fn open_end(path: &Path, options: &mut OpenOptions) -> io::Result<File> {
 
 /// Asks the reader running in `block` to show `file`. False if no reader took the request.
 /// A reader from before places were sent says that the place is not a commit ID.
+#[cfg(windows)]
+pub(super) fn send(_: &Path, _: &str, _: &Path, _: At<'_>) -> bool {
+    false
+}
+
+#[cfg(unix)]
 pub(super) fn send(state: &Path, block: &str, file: &Path, at: At<'_>) -> bool {
     let path = pipe_path(state, block);
     let mut pipe = match open_end(&path, OpenOptions::new().write(true)) {
@@ -118,6 +143,13 @@ pub(super) struct Inbox {
 
 impl Inbox {
     /// Starts listening in `block`, and notes the project the reader keeps to, if it has one.
+    #[cfg(windows)]
+    pub(super) fn open(_: &Path, _: &str, _: Option<&Path>) -> Option<Self> {
+        None
+    }
+
+    /// Starts listening in `block`, and notes the project the reader keeps to, if it has one.
+    #[cfg(unix)]
     pub(super) fn open(state: &Path, block: &str, project: Option<&Path>) -> Option<Self> {
         private_dir(state, "readers").ok()?;
         let (path, note) = (pipe_path(state, block), project_path(state, block));
@@ -172,7 +204,7 @@ impl Inbox {
             if !file.is_empty()
                 && let Ok(at) = std::str::from_utf8(at)
             {
-                let file = OsStr::from_bytes(file).into();
+                let Some(file) = crate::sys::os_string(file.to_vec()).map(PathBuf::from) else { continue };
                 match at.strip_prefix(SPOT) {
                     // A place that cannot be read is no reason to refuse the file.
                     Some(spot) => requests.push(Request { file, commit: None, spot: Spot::parse(spot) }),
@@ -202,12 +234,12 @@ fn split(bytes: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
 
 impl Drop for Inbox {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-        let _ = fs::remove_file(&self.project);
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(&self.project);
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::fixture::Fixture;

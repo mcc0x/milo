@@ -1036,7 +1036,7 @@ fn an_oversized_subject_can_be_paged_without_moving_the_commit_cursor() {
 }
 
 /// The descriptor of the read that is running, if one is.
-fn reading(history: &History) -> Option<i32> {
+fn reading(history: &History) -> Option<crate::sys::RawFd> {
     history.listing.as_ref().map(listing::Listing::fd)
 }
 

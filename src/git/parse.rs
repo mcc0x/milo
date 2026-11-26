@@ -1,8 +1,6 @@
 //! Turns git's status, diff and log output into the repository's data.
 
 use std::collections::HashSet;
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use super::{Commit, CommitId, CommitVersion, DiffFiles, Kind, PendingFile, UNBORN};
@@ -56,11 +54,11 @@ pub(super) fn parse_status(raw: Vec<u8>) -> Status {
     while let Some(bytes) = entries.next() {
         if let Some(path) = bytes.strip_prefix(b"! ") {
             // Don't accidentally exclude a different path with a replacement character.
-            let decode = |bytes: &[u8]| PathBuf::from(OsStr::from_bytes(bytes));
+            let decode = |bytes: &[u8]| crate::sys::os_str(bytes).map(PathBuf::from);
             if let Some(dir) = path.strip_suffix(b"/") {
-                st.ignored_dirs.push(decode(dir));
+                st.ignored_dirs.extend(decode(dir));
             } else {
-                st.ignored_files.push(decode(path));
+                st.ignored_files.extend(decode(path));
             }
             continue;
         }
@@ -269,8 +267,19 @@ mod tests {
         assert_eq!(st.untracked, ["a b.txt", "nested"]);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn status_skips_ignored_paths_it_cannot_name_exactly() {
+        let st = parse_status(b"! cache with spaces/\0! raw-\xff/\0! build log\0! raw-\xfe.log\0".to_vec());
+        assert_eq!(st.ignored_dirs, [PathBuf::from("cache with spaces")]);
+        assert_eq!(st.ignored_files, [PathBuf::from("build log")]);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn status_separates_ignored_paths_from_uncommitted_files() {
+        use std::os::unix::ffi::OsStrExt as _;
+
         let st = parse_status(
             b"! cache with spaces/\0! raw-\xff/\0! build log\0! raw-\xfe.log\0? scratch.txt\0\
               1 .M N... 100644 100644 100644 h1 h2 source.rs\0"

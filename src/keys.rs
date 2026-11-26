@@ -2,11 +2,10 @@
 
 use crate::sys::AsRawFd;
 use std::collections::VecDeque;
-use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::time::{Duration, Instant};
 
-use crate::term::{milliseconds, wait_ready};
+use crate::term::{Keyboard, milliseconds, wait_ready};
 
 /// Allow split terminal sequences and multibyte keys one short wait to finish.
 const SEQUENCE_WAIT: Duration = Duration::from_millis(25);
@@ -182,7 +181,7 @@ impl Input {
 
     /// Reads and drops input until the terminal's last answer or `until`. An
     /// answer left unread would be the shell's to read once the keyboard is its again.
-    pub fn drain_answers(&mut self, keyboard: &mut File, until: Instant) {
+    pub fn drain_answers(&mut self, keyboard: &mut Keyboard, until: Instant) {
         let mut keys = Vec::new();
         while !self.answered && wait_for_sequence(keyboard, until) {
             self.receive(keyboard, &mut keys);
@@ -193,7 +192,7 @@ impl Input {
         }
     }
 
-    pub fn receive(&mut self, keyboard: &mut File, keys: &mut Vec<Key>) {
+    pub fn receive(&mut self, keyboard: &mut Keyboard, keys: &mut Vec<Key>) {
         let mut buf = [0u8; READ_SIZE];
         let mut read_input = false;
         let mut deadline = None;
@@ -261,7 +260,7 @@ impl Input {
     }
 }
 
-fn wait_for_sequence(keyboard: &File, until: Instant) -> bool {
+fn wait_for_sequence(keyboard: &Keyboard, until: Instant) -> bool {
     let mut fds = [crate::sys::pollfd { fd: keyboard.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 }];
     loop {
         let wait = until.saturating_duration_since(Instant::now());

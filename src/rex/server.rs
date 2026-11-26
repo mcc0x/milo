@@ -337,12 +337,18 @@ impl RemoteEditor {
 mod tests {
     use super::{
         CommandVersion, NATIVE_REMOTE, NATIVE_UNKNOWN, Server, Viewers, native_clients, native_identity,
-        native_program, parse_command_version, parse_created, parse_server, parse_viewers,
+        parse_command_version, parse_created, parse_server, parse_viewers,
     };
+    #[cfg(unix)]
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt as _, symlink};
+    #[cfg(unix)]
     use std::path::Path;
 
+    #[cfg(unix)]
+    use super::native_program;
+    #[cfg(unix)]
     use crate::fixture::Fixture;
 
     const HOST: &str = "d4744373-81e8-4cdb-a5be-9a5be80c2c4a";
@@ -351,6 +357,7 @@ mod tests {
     const PEER: &str = r#"{"kind":"peer","transport":"unix","uid":501}"#;
     const REMOTE: &str = r#"{"kind":"tailscale","transport":"tailscale"}"#;
 
+    #[cfg(unix)]
     #[test]
     fn native_probe_skips_checkout_paths_links_and_non_executables() {
         let fixture = Fixture::folder();

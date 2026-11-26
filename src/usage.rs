@@ -991,6 +991,11 @@ pub struct Usage {
 
 impl Usage {
     pub fn open() -> Self {
+        if cfg!(windows) {
+            let mut usage = Self::from_dirs(None, None, None, when::now());
+            usage.preference_note = Some("Usage is not supported on Windows yet.");
+            return usage;
+        }
         let root = preferences::worktree(Path::new("."));
         let (prefs, note) = preferences::Preferences::for_pane(root.as_deref());
         let home = paths::home();
@@ -1159,6 +1164,9 @@ impl Usage {
 /// turned on is described from its settings and last saved answer; doctor
 /// does not ask its provider.
 pub fn doctor(tools: UsageTools, chosen: UsageAccounts) -> Vec<String> {
+    if cfg!(windows) {
+        return vec!["Usage: not supported on Windows yet".into()];
+    }
     let home = paths::home();
     let now = when::now();
     let usage = Usage::for_home(home.as_deref(), now, tools);
@@ -1369,6 +1377,10 @@ fn help_rows(claude: bool, opencode: bool, accounts: bool) -> Vec<help::HelpRow>
 
 /// Claude Code must get a line and a successful exit even if it sent bad data.
 pub fn claude_status() -> i32 {
+    if cfg!(windows) {
+        println!("Milo usage is not supported on Windows yet");
+        return 0;
+    }
     let claude = paths::claude();
     let config = claude.as_ref().map(paths::ClaudePaths::config);
     let path = claude_state(claude.as_ref()).map(|dir| dir.join(SAVED_LIMITS));
@@ -1376,5 +1388,5 @@ pub fn claude_status() -> i32 {
     status::run_fd(io::stdin(), io::stdout().lock(), target, when::now(), status::INPUT_WAIT)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

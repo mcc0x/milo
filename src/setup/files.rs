@@ -2,8 +2,11 @@
 
 use std::borrow::Cow;
 use std::env;
-use std::fs::{self, File, Metadata, Permissions};
+#[cfg(unix)]
+use std::fs::Permissions;
+use std::fs::{self, File, Metadata};
 use std::io::{self, ErrorKind, Read, Seek, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -61,7 +64,12 @@ impl Image {
         if bytes.len() > SNAPSHOT_LIMIT {
             return Err(ErrorKind::FileTooLarge.into());
         }
-        Ok(Self { bytes, mode: info.permissions().mode() & 0o7777 })
+        #[cfg(unix)]
+        let mode = info.permissions().mode() & 0o7777;
+        // Windows files carry no mode bits here; access comes from the folder's inherited list.
+        #[cfg(windows)]
+        let mode = 0o600;
+        Ok(Self { bytes, mode })
     }
 }
 
@@ -84,6 +92,7 @@ pub(super) fn staged(bytes: &[u8]) -> io::Result<File> {
     let (scratch, mut file) = temp(&env::temp_dir(), Temp::create_read_write)?;
     scratch.unlink()?;
     file.write_all(bytes)?;
+    #[cfg(unix)]
     file.set_permissions(Permissions::from_mode(0o600))?;
     file.rewind()?;
     Ok(file)
@@ -91,7 +100,11 @@ pub(super) fn staged(bytes: &[u8]) -> io::Result<File> {
 
 /// Only the explicitly owned directory is private; missing ancestors use normal permissions.
 fn create_private_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
     let mut builder = fs::DirBuilder::new();
+    #[cfg(windows)]
+    let builder = fs::DirBuilder::new();
+    #[cfg(unix)]
     builder.mode(0o700);
     let result = match builder.create(dir) {
         Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -139,6 +152,7 @@ impl Change {
             }
             let (staged, mut file) = temp(dir, Temp::create)?;
             file.write_all(&image.bytes)?;
+            #[cfg(unix)]
             file.set_permissions(Permissions::from_mode(image.mode))?;
             Some(staged)
         } else {
@@ -222,8 +236,10 @@ pub(super) fn install(changes: &[Change], accept: impl FnOnce() -> bool) -> Resu
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt as _;
 
+    #[cfg(unix)]
     #[test]
     fn staged_lua_is_unlinked_and_readable_from_the_start() {
         let lua = b"return true\n";

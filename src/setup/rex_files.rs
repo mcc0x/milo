@@ -283,7 +283,7 @@ fn insert_loader(bytes: &[u8], start: usize, load: &str, created: bool) -> Resul
     Ok([&bytes[..start], comment, newline, load.as_bytes(), newline, &bytes[start..]].concat())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::files;
     use super::*;

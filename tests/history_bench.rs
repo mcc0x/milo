@@ -19,6 +19,8 @@
 //! half a millisecond for a frame that waits for Git and twenty microseconds
 //! for Down alone.
 
+#![cfg(unix)]
+
 #[path = "bench/report.rs"]
 mod report;
 #[path = "bench/terminal.rs"]

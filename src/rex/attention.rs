@@ -69,10 +69,7 @@ impl AttentionWatch {
             .spawn()?;
         let output = child.stdout.take().expect("watch stdout was piped");
         let watch = Self { child, output, line: Vec::new(), oversized: false };
-        // SAFETY: The file descriptor is an open, privately owned pipe read end.
-        if unsafe { libc::fcntl(watch.fd(), libc::F_SETFL, libc::O_NONBLOCK) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        crate::sys::set_nonblocking(watch.fd())?;
         Ok(watch)
     }
 
@@ -220,7 +217,11 @@ pub(crate) fn jump(host: &str, block: &str) -> Jump {
     let deadline = Instant::now() + JUMP_WAIT;
     let ask = |args: &[&str]| probe_output(rex("1s").args(args), deadline.checked_duration_since(Instant::now())?);
     // SAFETY: Getting the current effective user ID touches no memory.
+    #[cfg(unix)]
     let uid = u64::from(unsafe { libc::geteuid() });
+    // Rex does not run on Windows, and no peer's Unix user ID can match this.
+    #[cfg(windows)]
+    let uid = u64::MAX;
     let Some(who) = ask(&["whoami", "--json"]) else { return Jump::Unavailable(NO_REX) };
     let [principal, server] = Value::parse(&who).map_or([None; 2], |who| who.fields(["principal", "host_id"]));
     let [kind, transport] = principal.map_or([None; 2], |principal| principal.fields(["kind", "transport"]));

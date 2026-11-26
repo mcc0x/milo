@@ -7,6 +7,8 @@
 //! real Discord would receive. No test can reach the Discord app of whoever
 //! runs it: every variable Discord's socket is found by names the test's folder.
 
+#![cfg(unix)]
+
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;

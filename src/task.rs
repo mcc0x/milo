@@ -213,6 +213,11 @@ fn plan(root: &Path, place: &Place<'_>) -> Result<Plan, String> {
 
 /// Starts the task and gives the lines to print, or says why not and what exists.
 pub(crate) fn command(request: &Request<'_>) -> Result<String, String> {
+    if cfg!(windows) {
+        return Err(
+            "milo task is not supported on Windows yet; it needs Rex, which does not run natively there".to_owned()
+        );
+    }
     match request.host {
         Some(host) => on_host(host, request),
         None => launch(request, &SearchPath::new()),
@@ -309,6 +314,10 @@ fn carried_result(screen: &str, succeeded: bool) -> Result<String, String> {
 /// here and the worktrees of the project holding the shell's folder, a line
 /// each. Names that can hold any byte are written as lowercase hex.
 pub(crate) fn options(args: &[OsString]) -> i32 {
+    if cfg!(windows) {
+        eprintln!("milo task is not supported on Windows yet.");
+        return 1;
+    }
     let [cwd] = args else {
         eprintln!("Invalid task-options arguments.");
         return 1;

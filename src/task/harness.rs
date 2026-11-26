@@ -6,12 +6,11 @@
 //! the agent's full screen in the session and be able to answer it.
 
 use std::cell::OnceCell;
-use std::ffi::{CStr, OsString};
-use std::io::Read as _;
-use std::os::unix::ffi::OsStringExt as _;
-use std::os::unix::process::CommandExt as _;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use crate::format;
@@ -72,8 +71,10 @@ impl Harness {
 }
 
 /// How long the login shell may take to say its search path.
+#[cfg(unix)]
 const SHELL_WAIT: Duration = Duration::from_secs(8);
 /// A search path is a line of folders, never this long.
+#[cfg(unix)]
 const PATH_LIMIT: u64 = 1 << 16;
 
 /// Where harnesses are looked for: this process's search path, then the one
@@ -107,11 +108,24 @@ impl SearchPath {
 /// The search path of the person's login shell with its interactive startup
 /// files read, which is where installers of these agents add their folders.
 /// The shell runs apart from this terminal, so it cannot take the terminal over.
+#[cfg(unix)]
 fn shell_path() -> Option<OsString> {
     path_from(&login_shell()?, SHELL_WAIT)
 }
 
+/// There is no login shell to ask on Windows, so only this process's own path is searched.
+#[cfg(windows)]
+fn shell_path() -> Option<OsString> {
+    None
+}
+
+#[cfg(unix)]
 fn path_from(shell: &Path, wait: Duration) -> Option<OsString> {
+    use std::io::Read as _;
+    use std::os::unix::ffi::OsStringExt as _;
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Command, Stdio};
+
     let mut command = Command::new(shell);
     command.args(["-lic", "/usr/bin/printenv PATH"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     let leave_session = || {
@@ -149,12 +163,17 @@ fn path_from(shell: &Path, wait: Duration) -> Option<OsString> {
 }
 
 /// The shell named by `SHELL`, or else the one the account was given.
+#[cfg(unix)]
 fn login_shell() -> Option<PathBuf> {
     let named = std::env::var_os("SHELL").map(PathBuf::from).filter(|shell| shell.is_absolute());
     named.or_else(account_shell).filter(|shell| shell.is_file())
 }
 
+#[cfg(unix)]
 fn account_shell() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStringExt as _;
+
     let mut buffer = vec![0; 4096];
     // SAFETY: A zeroed passwd is a valid value for getpwuid_r to fill in.
     let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
@@ -227,6 +246,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_harness_is_found_only_by_its_own_name_in_a_folder_named_in_full() {
         let f = crate::fixture::Fixture::folder();
@@ -246,6 +266,7 @@ mod tests {
         assert_eq!(shell.find(Harness::named("claude").unwrap()), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_shells_search_path_is_its_last_line_and_a_shell_that_stalls_is_given_up_on() {
         let f = crate::fixture::Fixture::folder();

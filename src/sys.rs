@@ -13,12 +13,12 @@ use std::io;
 #[cfg(unix)]
 pub(crate) use libc::{POLLHUP, POLLIN, POLLOUT, pollfd};
 #[cfg(unix)]
-pub(crate) use std::os::fd::{AsRawFd, RawFd};
+pub(crate) use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub(crate) use windows::{AsRawFd, POLLHUP, POLLIN, POLLOUT, RawFd, pollfd};
+pub(crate) use windows::{AsFd, AsRawFd, BorrowedFd, Job, POLLHUP, POLLIN, POLLOUT, RawFd, pollfd};
 
 /// Waits up to `timeout_ms` for any of `fds` to be ready, or forever when it is negative.
 /// Returns how many are ready, zero on timeout, or a negative result on failure or interruption.
@@ -60,8 +60,8 @@ where
         windows::Available::Closed => return Ok(0),
         windows::Available::Bytes(0) => return Err(io::ErrorKind::WouldBlock.into()),
         windows::Available::Bytes(n) => {
-            let n = usize::try_from(n).unwrap_or(usize::MAX);
-            &mut buf[..n.min(buf.len())]
+            let n = usize::try_from(n).unwrap_or(usize::MAX).min(buf.len());
+            &mut buf[..n]
         }
         windows::Available::Unknown => buf,
     };
@@ -111,6 +111,49 @@ pub(crate) fn os_string(bytes: Vec<u8>) -> Option<OsString> {
     }
     #[cfg(windows)]
     String::from_utf8(bytes).ok().map(OsString::from)
+}
+
+/// Whether a process with this ID is running. A process this user may not signal still counts.
+/// An ID can be reused once its process has ended, so this is a hint, not proof.
+pub(crate) fn process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+        // SAFETY: Signal 0 only asks whether the process exists; nothing is sent.
+        unsafe { libc::kill(pid, 0) == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+    }
+    #[cfg(windows)]
+    windows::process_alive(pid)
+}
+
+/// Reads at `offset` without depending on, or (on Unix) moving, the file position.
+pub(crate) fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    #[cfg(unix)]
+    return std::os::unix::fs::FileExt::read_at(file, buf, offset);
+    #[cfg(windows)]
+    std::os::windows::fs::FileExt::seek_read(file, buf, offset)
+}
+
+/// Writes all of `bytes` at `offset`, like [`read_at`].
+pub(crate) fn write_all_at(file: &File, bytes: &[u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    return std::os::unix::fs::FileExt::write_all_at(file, bytes, offset);
+    #[cfg(windows)]
+    {
+        let (mut bytes, mut offset) = (bytes, offset);
+        while !bytes.is_empty() {
+            match std::os::windows::fs::FileExt::seek_write(file, bytes, offset) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(n) => {
+                    bytes = &bytes[n..];
+                    offset += n as u64;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Which file an open handle refers to, stable while the file exists, across renames and

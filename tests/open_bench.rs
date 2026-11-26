@@ -18,6 +18,8 @@
 //! runs and the report. The noise allowed before a ratio fails the test is
 //! twenty microseconds for a search key and half a millisecond for the rest.
 
+#![cfg(unix)]
+
 #[path = "bench/report.rs"]
 mod report;
 #[path = "bench/terminal.rs"]

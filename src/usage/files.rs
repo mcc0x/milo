@@ -1,19 +1,33 @@
 //! Walks the session trees without following links and reads within a refresh budget.
+//!
+//! The walk is built on directory descriptors, which Windows lacks, so there it reports that
+//! usage is not supported.
+#![cfg_attr(windows, allow(dead_code))]
 
-use crate::sys::{AsRawFd, RawFd};
+#[cfg(unix)]
+use crate::sys::RawFd;
+#[cfg(unix)]
 use std::ffi::{CStr, CString, OsStr};
 use std::fs::File;
 use std::io::{self, Read};
+#[cfg(unix)]
 use std::mem::MaybeUninit;
 use std::ops::ControlFlow;
-use std::os::fd::{AsFd, FromRawFd, IntoRawFd};
+#[cfg(unix)]
+use std::os::fd::{FromRawFd, IntoRawFd};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileExt, MetadataExt as _};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::ptr::NonNull;
 use std::time::{Duration, Instant};
 
-use crate::fs_ops::{self, READ_FLAGS};
+use crate::fs_ops;
+#[cfg(unix)]
+use crate::fs_ops::READ_FLAGS;
+use crate::sys::AsRawFd;
 
 pub(super) const CODEX_FILES: usize = 4;
 const CLAUDE_FILES: usize = 128;
@@ -36,6 +50,7 @@ pub(super) struct FileVersion {
 
 impl FileVersion {
     /// Other filesystem objects are not session data.
+    #[cfg(unix)]
     fn new(stat: &libc::stat) -> Option<Self> {
         if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
             return None;
@@ -50,12 +65,25 @@ impl FileVersion {
     }
 
     /// Check the actual descriptor in case the directory entry changed during open.
+    #[cfg(unix)]
     pub(super) fn opened(file: &File) -> Option<Self> {
         let mut stat = MaybeUninit::uninit();
         // SAFETY: The descriptor is live and stat points to writable memory.
         (unsafe { libc::fstat(file.as_raw_fd(), stat.as_mut_ptr()) } == 0).then_some(())?;
         // SAFETY: A successful fstat initialized stat.
         Self::new(&unsafe { stat.assume_init() })
+    }
+
+    #[cfg(windows)]
+    pub(super) fn opened(file: &File) -> Option<Self> {
+        let metadata = file.metadata().ok()?;
+        let (volume, index) = crate::sys::identity(file).ok()?;
+        metadata.is_file().then(|| Self {
+            device: i128::from(volume),
+            inode: u128::from(index),
+            modified: modified(&metadata),
+            len: metadata.len(),
+        })
     }
 
     /// Appends keep their identity even when the timestamp and size change.
@@ -72,11 +100,20 @@ impl FileVersion {
     }
 }
 
+/// When the file was last written, as whole seconds and nanoseconds since the Unix epoch.
+#[cfg(windows)]
+fn modified(metadata: &std::fs::Metadata) -> (i128, i128) {
+    let Ok(since) = metadata.modified().map(|time| time.duration_since(std::time::UNIX_EPOCH)) else { return (0, 0) };
+    since.map_or((0, 0), |since| (i128::from(since.as_secs()), i128::from(since.subsec_nanos())))
+}
+
 /// Whole-file snapshots also detect in-place rewrites that preserve size and mtime.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct SnapshotVersion {
     file: FileVersion,
+    #[cfg(unix)]
     changed: (i64, i64),
+    #[cfg(unix)]
     mode: u32,
 }
 
@@ -86,6 +123,7 @@ impl SnapshotVersion {
         self.file.len
     }
 
+    #[cfg(unix)]
     fn regular(metadata: &std::fs::Metadata) -> Option<Self> {
         metadata.is_file().then(|| Self {
             file: FileVersion {
@@ -96,6 +134,15 @@ impl SnapshotVersion {
             },
             changed: (metadata.ctime(), metadata.ctime_nsec()),
             mode: metadata.mode(),
+        })
+    }
+
+    /// The file's identity is known only from an open handle here, so a path alone gives a length
+    /// and a modification time.
+    #[cfg(windows)]
+    fn regular(metadata: &std::fs::Metadata) -> Option<Self> {
+        metadata.is_file().then(|| Self {
+            file: FileVersion { device: 0, inode: 0, modified: modified(metadata), len: metadata.len() },
         })
     }
 }
@@ -162,9 +209,10 @@ pub(super) fn read_cached<T>(
 }
 
 /// Bounds pipe capture even if its writer stops producing output without closing it.
-pub(super) fn read_pipe(input: impl AsFd, max: usize, deadline: Instant) -> Option<Vec<u8>> {
-    let fd = input.as_fd();
-    let mut poll = crate::sys::pollfd { fd: fd.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 };
+#[cfg(unix)]
+pub(super) fn read_pipe(input: impl AsRawFd, max: usize, deadline: Instant) -> Option<Vec<u8>> {
+    let fd = input.as_raw_fd();
+    let mut poll = crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 };
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 8192];
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {
@@ -177,8 +225,8 @@ pub(super) fn read_pipe(input: impl AsFd, max: usize, deadline: Instant) -> Opti
         }
         let cap = (max + 1 - bytes.len()).min(buffer.len());
         // SAFETY: This process is the only reader and poll reported readiness.
-        // `buffer` is writable for `cap` bytes and `fd` remains borrowed above.
-        let read = unsafe { libc::read(fd.as_raw_fd(), buffer.as_mut_ptr().cast(), cap) };
+        // `buffer` is writable for `cap` bytes and `input` keeps `fd` open.
+        let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), cap) };
         match read {
             -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => {}
             n if n < 0 => return None,
@@ -192,6 +240,12 @@ pub(super) fn read_pipe(input: impl AsFd, max: usize, deadline: Instant) -> Opti
             }
         }
     }
+    None
+}
+
+/// Pipes are read only where the providers that need them run, which is not yet Windows.
+#[cfg(windows)]
+pub(super) fn read_pipe(_input: impl AsRawFd, _max: usize, _deadline: Instant) -> Option<Vec<u8>> {
     None
 }
 
@@ -238,11 +292,13 @@ impl Tree {
     }
 }
 
+#[cfg(unix)]
 struct Entry<'a> {
     name: &'a CStr,
     kind: u8,
 }
 
+#[cfg(unix)]
 impl Entry<'_> {
     /// A directory's hint can spare a syscall but cannot replace a guarded open.
     fn may_be(&self, kind: u8) -> bool {
@@ -251,8 +307,10 @@ impl Entry<'_> {
 }
 
 /// Own the stream so borrowed entries cannot outlive their directory buffer.
+#[cfg(unix)]
 struct Dir(NonNull<libc::DIR>);
 
+#[cfg(unix)]
 impl Dir {
     fn new(file: File) -> io::Result<Self> {
         let fd = file.as_raw_fd();
@@ -279,6 +337,7 @@ impl Dir {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Dir {
     fn drop(&mut self) {
         // SAFETY: This stream is owned by self and is closed exactly once.
@@ -287,6 +346,7 @@ impl Drop for Dir {
 }
 
 /// Resolve components relative to an already open directory, never following links.
+#[cfg(unix)]
 fn open_at(dir: RawFd, path: &CStr, flags: libc::c_int) -> io::Result<File> {
     // SAFETY: dir is a live directory descriptor, path is nul-terminated and no mode is needed.
     let fd = unsafe { libc::openat(dir, path.as_ptr(), READ_FLAGS | libc::O_RDONLY | flags) };
@@ -298,6 +358,7 @@ fn open_at(dir: RawFd, path: &CStr, flags: libc::c_int) -> io::Result<File> {
 }
 
 /// Compare entries before opening files, without trusting a link's target.
+#[cfg(unix)]
 fn version_at(dir: RawFd, path: &CStr) -> Option<FileVersion> {
     let mut stat = MaybeUninit::uninit();
     // SAFETY: dir is live, path is nul-terminated and stat points to writable memory.
@@ -320,6 +381,7 @@ struct Scan {
     inaccessible: bool,
 }
 
+#[cfg(unix)]
 impl Scan {
     fn directory(&mut self, mut dir: Dir, tree: &Tree, path: &mut PathBuf, depth: usize) {
         let fd = dir.fd();
@@ -408,6 +470,7 @@ impl Scan {
 }
 
 /// Visits newer days first, so a full walk's budget runs out in older folders.
+#[cfg(unix)]
 fn codex_folders(dir: &mut Dir, tree: &Tree, depth: usize) -> Vec<CString> {
     let mut names = Vec::new();
     while let Some(entry) = dir.next() {
@@ -486,8 +549,7 @@ impl<T> Sessions<T> {
         force: bool,
     ) -> io::Result<(SessionRoot, bool)> {
         let root = SessionRoot(fs_ops::open_dir(path.ok_or(io::ErrorKind::NotFound)?)?);
-        let metadata = root.0.metadata()?;
-        let identity = (metadata.dev(), metadata.ino());
+        let identity = crate::sys::identity(&root.0)?;
         let discover = force
             || self.last.as_ref().is_none_or(|last| {
                 let elapsed = clock.saturating_duration_since(last.at);
@@ -545,6 +607,22 @@ impl<T> Sessions<T> {
 /// Anchor all checks and reads to the same root, refusing links in every component.
 pub(super) struct SessionRoot(File);
 
+#[cfg(windows)]
+impl SessionRoot {
+    fn scan(&self, _tree: Tree, _remaining: usize) -> io::Result<Scan> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "Usage is not supported on Windows yet"))
+    }
+
+    fn version(&self, _path: &Path) -> Option<FileVersion> {
+        None
+    }
+
+    pub(super) fn open(&self, _path: &Path) -> Option<(File, FileVersion)> {
+        None
+    }
+}
+
+#[cfg(unix)]
 impl SessionRoot {
     fn scan(&self, tree: Tree, remaining: usize) -> io::Result<Scan> {
         let dir = open_at(self.0.as_raw_fd(), c".", libc::O_DIRECTORY).and_then(Dir::new)?;
@@ -614,7 +692,11 @@ impl Budget {
     fn read_at(&mut self, file: &File, data: &mut [u8], offset: u64) -> io::Result<usize> {
         let cap = data.len().min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
         loop {
-            match file.read_at(&mut data[..cap], offset) {
+            #[cfg(unix)]
+            let read = std::os::unix::fs::FileExt::read_at(file, &mut data[..cap], offset);
+            #[cfg(windows)]
+            let read = std::os::windows::fs::FileExt::seek_read(file, &mut data[..cap], offset);
+            match read {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 result => {
                     let read = result?;
@@ -829,11 +911,12 @@ pub(super) fn has_marker(line: &[u8], marker: &[u8]) -> bool {
     line.split(|b| *b == b'"').skip(1).any(|part| part == marker)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
 
+    #[cfg(unix)]
     #[test]
     fn a_snapshot_distinguishes_permission_changes_with_the_same_change_time() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -851,6 +934,7 @@ mod tests {
         assert!(before != after);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_cache_reloads_a_same_size_rewrite_with_a_restored_mtime() {
         use std::time::{Duration, UNIX_EPOCH};
@@ -886,6 +970,7 @@ mod tests {
         assert_eq!(snapshot.as_deref(), Some(b"true ".as_slice()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_walk_budget_is_spent_in_the_newest_year_month_and_day_first() {
         let f = Fixture::folder();
@@ -904,6 +989,7 @@ mod tests {
         assert_eq!(sessions.files[0].path, Path::new(newest));
     }
 
+    #[cfg(unix)]
     #[test]
     fn compressed_and_irrelevant_paths_do_not_spend_the_walk_budget() {
         let f = Fixture::folder();

@@ -2,7 +2,6 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 use super::files::{self, Change, Image};
@@ -547,11 +546,15 @@ fn unhex(text: &str) -> Option<OsString> {
     for i in (0..text.len()).step_by(2) {
         bytes.push(u8::from_str_radix(&text[i..i + 2], 16).ok()?);
     }
-    Some(OsString::from_vec(bytes))
+    crate::sys::os_string(bytes)
 }
 
 /// Internal, noninteractive entry point for the installed Rex actions. Paths are arguments, never Lua.
 pub fn layout_profile(args: &[OsString]) -> i32 {
+    if cfg!(windows) {
+        eprintln!("milo layout profiles are not supported on Windows yet.");
+        return 1;
+    }
     fn run(args: &[OsString]) -> Result<(), &'static str> {
         let [action, rest @ ..] = args else { return Err("Missing layout-profile operation.") };
         match (action.to_str(), rest) {

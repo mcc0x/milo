@@ -14,6 +14,8 @@
 //! runs and the report. The noise allowed before a ratio fails the test is
 //! two milliseconds: each sample starts a process.
 
+#![cfg(unix)]
+
 #[path = "bench/report.rs"]
 mod report;
 

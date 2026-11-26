@@ -2,13 +2,13 @@
 
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
-use std::os::fd::AsFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::fs_ops::{self, Temp};
 use crate::json::Value;
+use crate::sys::AsRawFd;
 use crate::when::MINUTE;
 use crate::width::char_width;
 
@@ -145,7 +145,7 @@ fn native_reading(cache: Value<'_>, current: Option<AccountId>) -> Option<Readin
 
 /// A stalled stdin must not leave Claude waiting for its status line.
 pub(super) fn run_fd(
-    input: impl AsFd,
+    input: impl AsRawFd,
     output: impl Write,
     target: Option<SaveTo<'_>>,
     now: i64,

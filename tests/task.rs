@@ -5,6 +5,8 @@
 //! against Git, and what it reports when a step fails. No Rex server is
 //! asked and no agent runs. `tests/rex_lab.rs` starts tasks on a real server.
 
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

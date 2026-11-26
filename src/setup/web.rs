@@ -1863,6 +1863,7 @@ mod tests {
         assert_eq!(field(field(alerts, "telegram"), "active").boolean(), Some(false));
     }
 
+    #[cfg(unix)]
     #[test]
     fn browser_telegram_reconnect_reports_an_incompatible_binding_and_accepts_local_forget() {
         use std::os::unix::fs::PermissionsExt as _;

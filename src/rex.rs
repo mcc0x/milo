@@ -1,23 +1,45 @@
 //! Calls Rex for floating readers, Markdown previews, setup, and the new-tab listener.
 
 mod attention;
+#[cfg(unix)]
 mod preview;
 mod server;
 pub(crate) mod task;
 
+#[cfg_attr(windows, allow(unused_imports))]
 pub(crate) use attention::{AttentionWatch, jump};
+#[cfg(unix)]
+use preview::anchor_argument;
+#[cfg(unix)]
 pub(crate) use preview::{available as preview_available, launch as preview, preview_anchor};
+
+/// Markdown preview needs a Rex pane, and Rex does not run natively on Windows.
+#[cfg(windows)]
+pub(crate) fn preview_available(_root: &Path) -> bool {
+    false
+}
+
+#[cfg(windows)]
+pub(crate) fn preview(_root: &Path, _tool: &Path, _file: &Path) -> Result<(), &'static str> {
+    Err("Markdown preview needs Rex, which is not available on Windows")
+}
+
+#[cfg(windows)]
+pub(crate) fn preview_anchor(_anchor: &OsStr) {}
+
+#[cfg(windows)]
+fn anchor_argument() -> Option<&'static str> {
+    None
+}
 
 #[cfg(target_os = "macos")]
 pub(crate) use server::native_app;
+#[cfg_attr(windows, allow(unused_imports))]
 pub(crate) use server::{CommandVersion, RemoteEditor, Server, Viewers, command_version, server, viewers};
 
 use crate::sys::{AsRawFd, RawFd};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal as _, Read as _, Write as _};
-use std::os::unix::ffi::OsStringExt as _;
-use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc;
@@ -232,7 +254,10 @@ fn finished(command: &mut Command, wait: Duration) -> bool {
 ///
 /// The Rex server starts the listener with a short system path that leaves
 /// `rex` out, so when it is not found by name, the server's own program is used.
+#[cfg(unix)]
 pub fn exec_listener(script: &Path) -> io::Error {
+    use std::os::unix::process::CommandExt as _;
+
     let listen = |rex: &OsStr| {
         Command::new(rex).arg("do").arg(script).arg("--all").stdin(Stdio::null()).stdout(Stdio::null()).exec()
     };
@@ -243,6 +268,12 @@ pub fn exec_listener(script: &Path) -> io::Error {
         }
         _ => error,
     }
+}
+
+/// Windows cannot replace a process, and Rex does not run there.
+#[cfg(windows)]
+pub fn exec_listener(_script: &Path) -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "The Rex listener is not supported on Windows")
 }
 
 /// The local endpoint and host of one alert subscription. A socket replaced
@@ -295,9 +326,17 @@ fn socket_path(endpoint: &str) -> Option<&Path> {
     (path.starts_with('/') && !path.bytes().any(|byte| byte.is_ascii_control())).then(|| Path::new(path))
 }
 
+#[cfg(unix)]
 fn socket_identity(endpoint: &str) -> Option<(u64, u64)> {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+
     let meta = std::fs::metadata(socket_path(endpoint)?).ok()?;
     meta.file_type().is_socket().then(|| (meta.dev(), meta.ino()))
+}
+
+#[cfg(windows)]
+fn socket_identity(_endpoint: &str) -> Option<(u64, u64)> {
+    None
 }
 
 fn alert_command(endpoint: Option<&str>) -> Command {
@@ -429,11 +468,16 @@ fn parent_program() -> Option<std::path::PathBuf> {
 }
 
 /// The program that started milo, if the system will say.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn parent_program() -> Option<std::path::PathBuf> {
     // SAFETY: Asking for the parent's ID touches no memory.
     let parent = unsafe { libc::getppid() };
     std::fs::read_link(format!("/proc/{parent}/exe")).ok()
+}
+
+#[cfg(windows)]
+fn parent_program() -> Option<std::path::PathBuf> {
+    None
 }
 
 /// A string as a JSON literal.
@@ -495,7 +539,7 @@ pub fn open(root: &Path, file: &Path, commit: Option<&str>, previous: Option<&st
     let target = Target::current().ok_or("Reading a file needs a Rex pane.")?;
     let exe = std::env::current_exe().map_err(|_| "Rex did not open the file.")?;
     let name = file.file_name().unwrap_or_default().to_string_lossy();
-    let origin = preview::anchor_argument().unwrap_or_default();
+    let origin = anchor_argument().unwrap_or_default();
     float(&target, root, &name, &reader_command(&exe, file, commit), previous, Some(origin))
         .ok_or("Rex did not open the file.")
 }
@@ -605,9 +649,8 @@ impl ShellObserver {
             .ok()?;
         let output = child.stdout.take().expect("observer stdout was piped");
         let observer = Self { child, output, frame: Frame::default() };
-        // SAFETY: The file descriptor is an open, privately owned pipe read end.
-        let nonblocking = unsafe { libc::fcntl(observer.fd(), libc::F_SETFL, libc::O_NONBLOCK) };
-        (nonblocking == 0).then_some(observer)
+        crate::sys::set_nonblocking(observer.fd()).ok()?;
+        Some(observer)
     }
 
     pub fn fd(&self) -> RawFd {
@@ -681,9 +724,8 @@ impl AppObserver {
             .ok()?;
         let output = child.stdout.take().expect("observer stdout was piped");
         let observer = Self { child, output, frame: Frame::default() };
-        // SAFETY: The file descriptor is an open, privately owned pipe read end.
-        let nonblocking = unsafe { libc::fcntl(observer.fd(), libc::F_SETFL, libc::O_NONBLOCK) };
-        (nonblocking == 0).then_some(observer)
+        crate::sys::set_nonblocking(observer.fd()).ok()?;
+        Some(observer)
     }
 
     pub fn fd(&self) -> RawFd {
@@ -774,7 +816,7 @@ impl Report for AppActivity {
         // A name or folder the script left out, or wrote in a way that cannot be read, is not known.
         let mut field = || words.next().filter(|word| *word != b"-").and_then(unhex);
         let session = field().and_then(|label| String::from_utf8(label).ok());
-        let directory = field().map(|path| PathBuf::from(OsString::from_vec(path))).filter(|path| path.is_absolute());
+        let directory = field().and_then(crate::sys::os_string).map(PathBuf::from).filter(|path| path.is_absolute());
         Some(Self::Active(Front { session, directory }))
     }
 
@@ -850,7 +892,7 @@ fn decode_change(line: &[u8]) -> Option<ShellChange> {
     if !code.starts_with(b"2f") {
         return None;
     }
-    Some(ShellChange::Directory(PathBuf::from(OsString::from_vec(unhex(code)?))))
+    Some(ShellChange::Directory(PathBuf::from(crate::sys::os_string(unhex(code)?)?)))
 }
 
 /// The bytes a script wrote as lowercase hex, which may hold anything but a NUL.

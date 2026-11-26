@@ -66,11 +66,13 @@ pub fn list(root: &Path, open: impl Fn(&str) -> bool) -> Listing {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     use super::*;
     use crate::fixture::Fixture;
 
+    #[cfg(unix)]
     #[test]
     fn an_expanded_tree_does_not_descend_into_directory_links() {
         let f = Fixture::folder();

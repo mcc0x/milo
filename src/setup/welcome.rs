@@ -3,6 +3,7 @@
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::ops::Range;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -27,6 +28,9 @@ const NO_CONFIG: &str = "Could not find Milo's settings folder.";
 
 /// Checking whether to show the guide does not create anything.
 pub fn needs_welcome() -> Result<bool, String> {
+    if cfg!(windows) {
+        return Err("milo setup is not supported on Windows yet.".into());
+    }
     let state = paths::state_dir().ok_or(NO_STATE)?;
     let config = paths::config_dir().ok_or(NO_CONFIG)?;
     let claude_state = paths::claude().and_then(|paths| paths.state_override(&state));
@@ -81,6 +85,9 @@ fn present(path: &Path) -> io::Result<bool> {
 
 /// Skip without opening a terminal or changing any user preferences.
 pub fn skip_welcome() -> Result<(), String> {
+    if cfg!(windows) {
+        return Err("milo setup is not supported on Windows yet.".into());
+    }
     mark_complete(&paths::state_dir().ok_or(NO_STATE)?)
 }
 
@@ -89,7 +96,11 @@ fn mark_complete(state: &Path) -> Result<(), String> {
         fs::create_dir_all(state)?;
         fs_ops::open_dir(state)?;
         let path = state.join(COMPLETE);
-        match OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&path) {
             Ok(_) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists && fs::symlink_metadata(path)?.is_file() => {
                 Ok(())
@@ -720,6 +731,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn skip_does_not_follow_a_symlinked_state_directory() {
         let fixture = Fixture::folder();

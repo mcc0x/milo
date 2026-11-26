@@ -1,28 +1,69 @@
 //! The only path from an explicit working-Markdown selection to tkmp.
 
+#[cfg(unix)]
 use std::ffi::OsStr;
+#[cfg(unix)]
 use std::io::Read as _;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
+#[cfg(unix)]
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(unix)]
 use crate::native::trusted::{find, safe_path_text};
+#[cfg(unix)]
 use crate::{fs_ops, native, rex};
 
+#[cfg(unix)]
 const MAX_BYTES: u64 = 512 * 1024;
+#[cfg(unix)]
 const TOO_LARGE: &str = "Preview needs Markdown no larger than 512 KiB";
+#[cfg(unix)]
 const NOT_REGULAR: &str = "Preview needs a regular working file, not a link";
+#[cfg(unix)]
 const NOT_TEXT: &str = "Preview needs UTF-8 Markdown without terminal controls";
+#[cfg(unix)]
 const UNREADABLE: &str = "Can't read the selected Markdown file";
+#[cfg(unix)]
 const CHANGED: &str = "The selected Markdown file changed; try Preview again";
 pub(crate) const MISSING_TOOL: &str =
     "Install tkmp outside the checkout and current directory, then add its absolute directory to PATH";
 
+#[cfg(windows)]
+const WINDOWS_UNAVAILABLE: &str = "Markdown preview needs Rex, which is not available on Windows";
+
+#[cfg(windows)]
+pub(crate) fn eligible(_root: &std::path::Path, _root_id: Option<(u64, u64)>, _relative: &std::path::Path) -> bool {
+    false
+}
+
+#[cfg(windows)]
+pub(crate) fn availability(_root: &std::path::Path) -> Result<(), &'static str> {
+    Err(WINDOWS_UNAVAILABLE)
+}
+
+#[cfg(windows)]
+pub(crate) fn open(
+    _root: &std::path::Path,
+    _root_id: Option<(u64, u64)>,
+    _relative: &std::path::Path,
+) -> Result<(), &'static str> {
+    Err(WINDOWS_UNAVAILABLE)
+}
+
+#[cfg(windows)]
+pub(crate) fn installed(_root: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Menu eligibility is metadata-only. Availability and contents are checked on explicit input.
+#[cfg(unix)]
 pub(crate) fn eligible(root: &Path, root_id: Option<(u64, u64)>, relative: &Path) -> bool {
     markdown_entry(root, root_id, relative).is_ok()
 }
 
 /// Availability is a cheap preflight for an explicit menu open, not a Rex probe.
+#[cfg(unix)]
 pub(crate) fn availability(root: &Path) -> Result<(), &'static str> {
     available_tool(root).map(|_| ()).map_err(|reason| match reason {
         Unavailable::Rex => "tkmp needs local Rex",
@@ -30,11 +71,13 @@ pub(crate) fn availability(root: &Path) -> Result<(), &'static str> {
     })
 }
 
+#[cfg(unix)]
 enum Unavailable {
     Rex,
     Tool,
 }
 
+#[cfg(unix)]
 fn available_tool(root: &Path) -> Result<PathBuf, Unavailable> {
     if !rex::preview_available(root) {
         return Err(Unavailable::Rex);
@@ -42,6 +85,7 @@ fn available_tool(root: &Path) -> Result<PathBuf, Unavailable> {
     installed(Some(root)).ok_or(Unavailable::Tool)
 }
 
+#[cfg(unix)]
 pub(crate) fn open(root: &Path, root_id: Option<(u64, u64)>, relative: &Path) -> Result<(), &'static str> {
     let entry = markdown_entry(root, root_id, relative)?;
     let tool = available_tool(root).map_err(|reason| match reason {
@@ -58,11 +102,13 @@ pub(crate) fn open(root: &Path, root_id: Option<(u64, u64)>, relative: &Path) ->
     rex::preview(root, &tool, &root.join(relative))
 }
 
+#[cfg(unix)]
 fn entry_key(entry: &native::WorkingEntry) -> (libc::dev_t, libc::ino_t, i128, i128) {
     let stat = &entry.stat;
     (stat.st_dev, stat.st_ino, stat.st_ctime.into(), stat.st_ctime_nsec.into())
 }
 
+#[cfg(unix)]
 fn markdown_entry(
     root: &Path,
     root_id: Option<(u64, u64)>,
@@ -92,6 +138,7 @@ fn markdown_entry(
     Ok(entry)
 }
 
+#[cfg(unix)]
 fn check_text(entry: &native::WorkingEntry) -> Result<(), &'static str> {
     let file = fs_ops::open_at(&entry.dir, &entry.name, libc::O_RDONLY | libc::O_NOCTTY, 0).map_err(|_| UNREADABLE)?;
     let metadata = file.metadata().map_err(|_| UNREADABLE)?;
@@ -120,6 +167,7 @@ fn check_text(entry: &native::WorkingEntry) -> Result<(), &'static str> {
 // tkmp writes rendered text and OSC 8 link destinations to the terminal.
 // CommonMark can expand numeric entities there, so check those as well as
 // literal controls. This is not a sandbox for a live, external viewer.
+#[cfg(unix)]
 fn encoded_control(text: &str) -> bool {
     text.match_indices("&#").any(|(at, _)| {
         let tail = &text[at + 2..];
@@ -138,14 +186,17 @@ fn encoded_control(text: &str) -> bool {
 }
 
 /// Doctor and the action use the same read-only detector; it never runs a candidate.
+#[cfg(unix)]
 pub(crate) fn installed(root: Option<&Path>) -> Option<PathBuf> {
     installed_on(std::env::var_os("PATH")?.as_os_str(), root, Path::new("."))
 }
 
+#[cfg(unix)]
 fn installed_on(path: &OsStr, root: Option<&Path>, cwd: &Path) -> Option<PathBuf> {
     find("tkmp", root, cwd, None, path)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use std::ffi::CString;

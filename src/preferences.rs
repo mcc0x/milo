@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read as _, Write as _};
-use std::os::unix::ffi::OsStrExt as _;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -581,7 +581,10 @@ fn writable_mode(path: &Path) -> io::Result<Option<u32>> {
         Ok(info) if info.permissions().readonly() => {
             Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} is read-only", path.display())))
         }
+        #[cfg(unix)]
         Ok(info) => Ok(Some(info.permissions().mode() & 0o7777)),
+        #[cfg(windows)]
+        Ok(_) => Ok(Some(0)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
@@ -607,7 +610,7 @@ pub(crate) fn layers(dir: &Path, worktree: &Path) -> [PathBuf; 2] {
 /// A stable identifier for the checkout path, not the common git directory.
 fn worktree_key(root: &Path) -> u64 {
     root.as_os_str()
-        .as_bytes()
+        .as_encoded_bytes()
         .iter()
         .fold(0xcbf2_9ce4_8422_2325, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
 }
@@ -645,13 +648,19 @@ fn lock_directory(dir: &Path) -> io::Result<fs::File> {
 
 pub(crate) fn replace(dir: &Path, path: &Path, text: &str) -> io::Result<()> {
     static SERIAL: AtomicU32 = AtomicU32::new(0);
+    #[cfg(unix)]
     let mode = writable_mode(path)?;
+    #[cfg(windows)]
+    writable_mode(path)?;
     let (temp, mut file) = fs_ops::Temp::create(dir.join(format!(
         ".milo-prefs-{}-{}",
         std::process::id(),
         SERIAL.fetch_add(1, Ordering::Relaxed),
     )))?;
     file.write_all(text.as_bytes())?;
+    // Windows keeps no mode bits here: the file lives in the per-user profile directory, whose
+    // inherited access list is already private.
+    #[cfg(unix)]
     if let Some(mode) = mode {
         file.set_permissions(fs::Permissions::from_mode(mode))?;
     }
@@ -868,6 +877,7 @@ mod tests {
         assert_eq!(Preferences::resolve_in(&f.root, Some(&root)).unwrap(), expected);
     }
 
+    #[cfg(unix)]
     #[test]
     fn read_only_preference_layers_can_be_inherited_but_not_replaced_or_removed() {
         let f = Fixture::folder();
@@ -897,6 +907,7 @@ mod tests {
         assert!(fs::metadata(&local).unwrap().permissions().readonly());
     }
 
+    #[cfg(unix)]
     #[test]
     fn updating_preferences_preserves_existing_permissions() {
         let f = Fixture::folder();

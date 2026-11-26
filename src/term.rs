@@ -1,16 +1,33 @@
 //! Sets terminal modes and waits for keyboard input, signals or file notifications.
 
-use crate::sys::{AsRawFd, RawFd};
-use std::ffi::{CStr, OsStr};
-use std::fs::{File, OpenOptions};
-use std::io::{self, ErrorKind, IsTerminal, PipeReader, Read, Write};
-use std::os::fd::{AsFd, IntoRawFd};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+#[cfg(windows)]
+mod windows;
+
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{self, ErrorKind, IsTerminal, PipeReader, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::keys::{Input, Key};
+use crate::sys::{AsRawFd, RawFd};
+
+/// Where keys are read from: the terminal on Unix, the console's input records on Windows.
+#[cfg(unix)]
+pub(crate) type Keyboard = File;
+#[cfg(windows)]
+pub(crate) use windows::Keyboard;
+
+#[cfg(unix)]
+type AtomicFd = std::sync::atomic::AtomicI32;
+#[cfg(windows)]
+type AtomicFd = std::sync::atomic::AtomicIsize;
+
+/// The keyboard's modes before the pane changed them.
+#[cfg(unix)]
+type Saved = libc::termios;
+#[cfg(windows)]
+type Saved = windows::Saved;
 
 // One decoder burst can exceed this threshold. On saturation, leave input on
 // the tty until the frame drains, even if Ctrl-C is behind the queued keys.
@@ -21,7 +38,7 @@ pub static RESIZED: AtomicBool = AtomicBool::new(true);
 /// Wind down after a termination signal, including while waiting on git.
 pub static TERMINATED: AtomicBool = AtomicBool::new(false);
 /// The write end of the wake pipe, kept open for handlers until the program exits.
-static WAKE: AtomicI32 = AtomicI32::new(-1);
+static WAKE: AtomicFd = AtomicFd::new(-1);
 
 // Use the alternate screen, hide the cursor, ask for mouse and focus reports,
 // and ask the terminal to mark pasted text so it cannot act as key presses.
@@ -60,12 +77,12 @@ fn host_with_term(term: &OsStr) -> Host {
 }
 
 fn identify(term: &OsStr, program: &OsStr, in_mux: bool) -> Host {
-    let name = term.as_bytes();
+    let name = term.as_encoded_bytes();
     if name == b"tmux"
         || name.starts_with(b"tmux-")
         || name == b"screen"
         || name.starts_with(b"screen-")
-        || matches!(program.as_bytes(), b"tmux" | b"screen")
+        || matches!(program.as_encoded_bytes(), b"tmux" | b"screen")
     {
         return Host::Multiplexer;
     }
@@ -80,7 +97,7 @@ fn identify(term: &OsStr, program: &OsStr, in_mux: bool) -> Host {
     if matches!(name, b"xterm-kitty" | b"xterm-ghostty" | b"ghostty" | b"wezterm" | b"konsole" | b"konsole-256color") {
         return Host::Graphics;
     }
-    match program.as_bytes() {
+    match program.as_encoded_bytes() {
         b"rex" => Host::Rex,
         b"kitty" | b"ghostty" | b"WezTerm" | b"iTerm.app" | b"konsole" | b"WarpTerminal" => Host::Graphics,
         b"" => Host::Unknown,
@@ -89,7 +106,7 @@ fn identify(term: &OsStr, program: &OsStr, in_mux: bool) -> Host {
 }
 
 fn supports_panes(term: &OsStr) -> bool {
-    !matches!(term.as_bytes(), b"dumb" | b"linux")
+    !matches!(term.as_encoded_bytes(), b"dumb" | b"linux")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -114,13 +131,13 @@ impl Capabilities {
     }
 
     fn for_host(term: &OsStr, colorterm: &OsStr, no_color: &OsStr, graphics: &OsStr, host: Host) -> Self {
-        let term = term.as_bytes();
+        let term = term.as_encoded_bytes();
         let legacy_vt = matches!(term, [b'v', b't', b'0'..=b'9', ..]);
         let colors = if !no_color.is_empty() || legacy_vt {
             Colors::None
         } else if matches!(host, Host::Rex | Host::Graphics)
             || term.ends_with(b"-direct")
-            || matches!(colorterm.as_bytes(), b"truecolor" | b"24bit")
+            || matches!(colorterm.as_encoded_bytes(), b"truecolor" | b"24bit")
         {
             Colors::Rgb
         } else if term.ends_with(b"-256color") {
@@ -149,16 +166,19 @@ pub fn milliseconds(wait: Duration) -> i32 {
 }
 
 // These handlers only load and store atomics and call write, both async-signal-safe.
+#[cfg(unix)]
 extern "C" fn on_winch(_: libc::c_int) {
     RESIZED.store(true, Ordering::Relaxed);
     wake(WAKE.load(Ordering::Relaxed));
 }
 
+#[cfg(unix)]
 extern "C" fn on_term(_: libc::c_int) {
     TERMINATED.store(true, Ordering::Relaxed);
     wake(WAKE.load(Ordering::Relaxed));
 }
 
+#[cfg(unix)]
 fn install(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) -> io::Result<()> {
     // With no SA_RESTART, signals can also interrupt a wait on descriptors.
     // SAFETY: A zeroed sigaction has no flags and no handler; fill both the
@@ -174,7 +194,7 @@ fn install(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) -> io::Result<
 
 /// Owns the terminal modes until the pane returns or unwinds.
 pub struct Session {
-    keyboard: File,
+    keyboard: Keyboard,
     input: Input,
     keys: Vec<Key>,
     cancelled_input: bool,
@@ -182,7 +202,7 @@ pub struct Session {
     signal: PipeReader,
     pending_interrupt: bool,
     cancelled_output: bool,
-    saved: Option<libc::termios>,
+    saved: Option<Saved>,
     capabilities: Capabilities,
     /// When to stop taking answers to the initial terminal queries.
     answers_due: Option<Instant>,
@@ -195,10 +215,21 @@ pub fn output_columns() -> Option<usize> {
     if !stdout.is_terminal() {
         return None;
     }
+    window_size(&stdout).map(|(columns, _)| columns)
+}
+
+/// The columns and rows of the terminal `output` writes to.
+#[cfg(unix)]
+fn window_size(output: &impl AsRawFd) -> Option<(usize, usize)> {
     let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
     // SAFETY: TIOCGWINSZ writes into the live `winsize` record.
-    let result = unsafe { libc::ioctl(stdout.as_raw_fd(), libc::TIOCGWINSZ as _, &raw mut ws) };
-    (result == 0 && ws.ws_col > 0).then(|| usize::from(ws.ws_col))
+    let result = unsafe { libc::ioctl(output.as_raw_fd(), libc::TIOCGWINSZ as _, &raw mut ws) };
+    (result == 0 && ws.ws_col > 0 && ws.ws_row > 0).then(|| (usize::from(ws.ws_col), usize::from(ws.ws_row)))
+}
+
+#[cfg(windows)]
+fn window_size(output: &impl std::os::windows::io::AsRawHandle) -> Option<(usize, usize)> {
+    windows::size(output)
 }
 
 impl Session {
@@ -218,29 +249,15 @@ impl Session {
             )));
         }
         let output = terminal_output(stdout.as_raw_fd())?;
-        let keyboard = File::from(io::stdin().as_fd().try_clone_to_owned()?);
+        #[cfg(unix)]
+        let keyboard = File::from(std::os::fd::AsFd::as_fd(&io::stdin()).try_clone_to_owned()?);
+        #[cfg(windows)]
+        let keyboard = windows::keyboard()?;
         Self::enter(keyboard, output, listen()?, Capabilities::environment(&term))
     }
 
-    fn enter(keyboard: File, output: File, signal: PipeReader, capabilities: Capabilities) -> io::Result<Self> {
-        let fd = keyboard.as_raw_fd();
-        // SAFETY: A zeroed termios holds valid zero values in its integer fields.
-        let mut saved: libc::termios = unsafe { std::mem::zeroed() };
-        // SAFETY: The keyboard descriptor is open and `saved` is writable.
-        if unsafe { libc::tcgetattr(fd, &mut saved) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: The keyboard descriptor is open; discard input queued before startup.
-        unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
-        let mut raw = saved;
-        // SAFETY: `raw` is a writable copy of the keyboard's terminal modes.
-        unsafe { libc::cfmakeraw(&mut raw) };
-        raw.c_cc[libc::VMIN] = 0;
-        raw.c_cc[libc::VTIME] = 0;
-        // SAFETY: The keyboard descriptor is open and `raw` holds valid terminal modes.
-        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+    fn enter(keyboard: Keyboard, output: File, signal: PipeReader, capabilities: Capabilities) -> io::Result<Self> {
+        let saved = raw_mode(&keyboard, &output)?;
         let mut session = Self {
             keyboard,
             input: Input::default(),
@@ -443,17 +460,10 @@ impl Session {
     }
 
     pub fn size(&self) -> (usize, usize) {
-        let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
-        // SAFETY: TIOCGWINSZ writes into the live `winsize` record.
-        let result = unsafe { libc::ioctl(self.output.as_raw_fd(), libc::TIOCGWINSZ as _, &raw mut ws) };
-        if result == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
-            (usize::from(ws.ws_col), usize::from(ws.ws_row))
-        } else {
-            (80, 24)
-        }
+        window_size(&self.output).unwrap_or((80, 24))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn test_pty() -> (Self, File, io::PipeWriter) {
         let (keyboard, master) = test_pair();
         let output = keyboard.try_clone().unwrap();
@@ -469,21 +479,31 @@ impl Session {
         if let Some(due) = self.answers_due.take() {
             self.input.drain_answers(&mut self.keyboard, due);
         }
-        let fd = self.keyboard.as_raw_fd();
-        loop {
-            // SAFETY: `saved` holds the keyboard's original modes and lives through the call.
-            let result = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &saved) };
-            if result == 0 || io::Error::last_os_error().kind() != ErrorKind::Interrupted {
-                break;
+        #[cfg(unix)]
+        {
+            let fd = self.keyboard.as_raw_fd();
+            loop {
+                // SAFETY: `saved` holds the keyboard's original modes and lives through the call.
+                let result = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &saved) };
+                if result == 0 || io::Error::last_os_error().kind() != ErrorKind::Interrupted {
+                    break;
+                }
+            }
+            // SAFETY: The keyboard descriptor is open; unread keys do not belong to the shell.
+            unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
+            if self.output.write_all(LEAVE).is_err_and(|e| e.kind() == ErrorKind::WouldBlock) {
+                // Drop pending drawing bytes to make room for the cleanup sequence.
+                // SAFETY: The output descriptor is open and this flush does not wait for a reader.
+                unsafe { libc::tcflush(self.output.as_raw_fd(), libc::TCOFLUSH) };
+                let _ = self.output.write_all(LEAVE);
             }
         }
-        // SAFETY: The keyboard descriptor is open; unread keys do not belong to the shell.
-        unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
-        if self.output.write_all(LEAVE).is_err_and(|e| e.kind() == ErrorKind::WouldBlock) {
-            // Drop pending drawing bytes to make room for the cleanup sequence.
-            // SAFETY: The output descriptor is open and this flush does not wait for a reader.
-            unsafe { libc::tcflush(self.output.as_raw_fd(), libc::TCOFLUSH) };
+        // The console interprets the sequences that leave the alternate screen only while the
+        // pane's output mode is on, so they go before the modes are put back.
+        #[cfg(windows)]
+        {
             let _ = self.output.write_all(LEAVE);
+            windows::restore(&self.keyboard, &self.output, &saved);
         }
     }
 }
@@ -494,7 +514,37 @@ impl Drop for Session {
     }
 }
 
+/// Changes the keyboard to raw input and returns its earlier modes.
+#[cfg(unix)]
+fn raw_mode(keyboard: &Keyboard, _output: &File) -> io::Result<Saved> {
+    let fd = keyboard.as_raw_fd();
+    // SAFETY: A zeroed termios holds valid zero values in its integer fields.
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: The keyboard descriptor is open and `saved` is writable.
+    if unsafe { libc::tcgetattr(fd, &mut saved) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: The keyboard descriptor is open; discard input queued before startup.
+    unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
+    let mut raw = saved;
+    // SAFETY: `raw` is a writable copy of the keyboard's terminal modes.
+    unsafe { libc::cfmakeraw(&mut raw) };
+    raw.c_cc[libc::VMIN] = 0;
+    raw.c_cc[libc::VTIME] = 0;
+    // SAFETY: The keyboard descriptor is open and `raw` holds valid terminal modes.
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(saved)
+}
+
+#[cfg(windows)]
+fn raw_mode(keyboard: &Keyboard, output: &File) -> io::Result<Saved> {
+    windows::enter(keyboard, output)
+}
+
 /// Open a separate description so non-blocking writes don't change the shell's stdout flags.
+#[cfg(unix)]
 fn terminal_output(fd: RawFd) -> io::Result<File> {
     let mut path = [0; 4096];
     #[cfg(target_os = "macos")]
@@ -513,9 +563,17 @@ fn terminal_output(fd: RawFd) -> io::Result<File> {
             return Err(io::Error::from_raw_os_error(result));
         }
     }
-    let name = CStr::from_bytes_until_nul(&path).map_err(io::Error::other)?;
-    let name = std::ffi::OsStr::from_bytes(name.to_bytes());
-    OpenOptions::new().write(true).custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK).open(name)
+    let name = std::ffi::CStr::from_bytes_until_nul(&path).map_err(io::Error::other)?;
+    let name = <OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(name.to_bytes());
+    let mut options = std::fs::OpenOptions::new();
+    std::os::unix::fs::OpenOptionsExt::custom_flags(options.write(true), libc::O_NOCTTY | libc::O_NONBLOCK);
+    options.open(name)
+}
+
+/// The console's screen buffer, whatever standard output was redirected to.
+#[cfg(windows)]
+fn terminal_output(_: RawFd) -> io::Result<File> {
+    windows::output()
 }
 
 /// Report a setup error without claiming the shell's root activity record or
@@ -543,13 +601,14 @@ fn wake_pipe() -> io::Result<PipeReader> {
     let (reader, writer) = io::pipe()?;
     // A signal just before a wait must still wake it, without ever
     // blocking the handler or leaving the event loop stuck reading.
-    for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
-        // SAFETY: `fd` is an open pipe end and F_SETFL takes an integer flag.
-        if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    WAKE.store(writer.into_raw_fd(), Ordering::Relaxed);
+    #[cfg(unix)]
+    crate::sys::set_nonblocking(reader.as_raw_fd())?;
+    crate::sys::set_nonblocking(writer.as_raw_fd())?;
+    #[cfg(unix)]
+    let writer = std::os::fd::IntoRawFd::into_raw_fd(writer);
+    #[cfg(windows)]
+    let writer = std::os::windows::io::IntoRawHandle::into_raw_handle(writer) as RawFd;
+    WAKE.store(writer, Ordering::Relaxed);
     Ok(reader)
 }
 
@@ -557,18 +616,26 @@ fn wake_pipe() -> io::Result<PipeReader> {
 /// process is asked to end, which also sets `TERMINATED`.
 pub fn termination() -> io::Result<PipeReader> {
     let reader = wake_pipe()?;
+    #[cfg(unix)]
     for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
         install(sig, on_term)?;
     }
+    #[cfg(windows)]
+    windows::listen()?;
     Ok(reader)
 }
 
 fn listen() -> io::Result<PipeReader> {
     let reader = wake_pipe()?;
-    install(libc::SIGWINCH, on_winch)?;
-    for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT] {
-        install(sig, on_term)?;
+    #[cfg(unix)]
+    {
+        install(libc::SIGWINCH, on_winch)?;
+        for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT] {
+            install(sig, on_term)?;
+        }
     }
+    #[cfg(windows)]
+    windows::listen()?;
     Ok(reader)
 }
 
@@ -584,9 +651,9 @@ pub enum Wait {
     Closed,
 }
 
-fn drain_signal(mut reader: &PipeReader) {
+fn drain_signal(reader: &PipeReader) {
     let mut buf = [0u8; 64];
-    while reader.read(&mut buf).is_ok_and(|n| n > 0) {}
+    while crate::sys::read_nonblocking(reader, &mut buf).is_ok_and(|n| n > 0) {}
 }
 
 /// Waits for input, a signal, a watcher, an external source, a finished check or a timeout.
@@ -630,7 +697,7 @@ fn wait_for(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn test_pair() -> (File, File) {
     use std::os::fd::FromRawFd;
 
@@ -650,6 +717,7 @@ fn test_pair() -> (File, File) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read as _;
 
     #[test]
     fn explicit_terminal_identity_beats_stale_rex_branding() {
@@ -689,6 +757,7 @@ mod tests {
         assert!(!caps("tmux-256color", "rex", "", "", "kitty").graphics);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_terminal_that_was_not_asked_cannot_enable_picture_uploads() {
         let (keyboard, mut master) = test_pair();
@@ -705,6 +774,7 @@ mod tests {
         assert_eq!(terminal.receive().collect::<Vec<_>>(), [Key::CellSize(10, 20), Key::Answered, Key::Char('q')]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn silence_ends_negotiation_and_late_replies_are_not_keys() {
         let (mut terminal, mut master, _wake) = Session::test_pty();
@@ -778,6 +848,7 @@ mod tests {
         assert!(matches!(wait(), Wait::Input));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_signal_drained_during_a_blocked_write_still_interrupts_the_next_wait() {
         use std::os::fd::OwnedFd;
@@ -837,6 +908,7 @@ mod tests {
         assert!(matches!(terminal.wait(0, [None; 3]), Wait::Timeout));
     }
 
+    #[cfg(unix)]
     #[test]
     fn completing_open_cancels_a_partial_loading_frame_and_resets_terminal_state() {
         use std::os::fd::OwnedFd;
@@ -875,6 +947,7 @@ mod tests {
         assert!(resumed.starts_with(CANCEL_FRAME) && resumed.ends_with(b"Ready"));
     }
 
+    #[cfg(unix)]
     fn modes(terminal: &File) -> (libc::tcflag_t, libc::tcflag_t, libc::tcflag_t, libc::tcflag_t) {
         // SAFETY: A zeroed termios is valid and `tcgetattr` can fill it.
         let mut attrs: libc::termios = unsafe { std::mem::zeroed() };
@@ -883,6 +956,7 @@ mod tests {
         (attrs.c_iflag, attrs.c_oflag, attrs.c_cflag, attrs.c_lflag)
     }
 
+    #[cfg(unix)]
     #[test]
     fn unwinding_restores_keyboard_modes_and_leaves_the_alternate_screen() {
         let (keyboard, mut master) = test_pair();
@@ -913,6 +987,7 @@ mod tests {
         assert!(output.starts_with(ENTER) && output.ends_with(LEAVE));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_failed_open_write_still_restores_keyboard_modes() {
         let (keyboard, _master) = test_pair();
@@ -924,6 +999,7 @@ mod tests {
         assert_eq!(modes(&keyboard), before);
     }
 
+    #[cfg(unix)]
     #[test]
     fn answers_that_arrive_as_a_pane_closes_are_not_left_for_the_shell() {
         let (keyboard, mut master) = test_pair();

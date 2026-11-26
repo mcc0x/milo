@@ -1,5 +1,7 @@
 //! Runs pane startup and input through a real terminal.
 
+#![cfg(unix)]
+
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};

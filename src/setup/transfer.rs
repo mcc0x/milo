@@ -15,7 +15,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{Read as _, Write as _};
-use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Component, Path, PathBuf};
 
@@ -422,7 +422,7 @@ impl Plan {
         };
         for change in &self.changes {
             let (before, after) = change.images();
-            feed(change.path().as_os_str().as_bytes());
+            feed(change.path().as_os_str().as_encoded_bytes());
             feed(before.map_or(&[][..], |image| &image.bytes));
             feed(&[u8::from(before.is_some())]);
             feed(after.map_or(&[][..], |image| &image.bytes));
@@ -431,9 +431,14 @@ impl Plan {
             if let Destination::Worktree { root, matched: WorktreeMatch::Chosen } = &section.destination {
                 let folder =
                     fs::metadata(root).map_err(|_| format!("Could not read the worktree at {}.", root.display()))?;
-                feed(root.as_os_str().as_bytes());
-                feed(&folder.dev().to_le_bytes());
-                feed(&folder.ino().to_le_bytes());
+                feed(root.as_os_str().as_encoded_bytes());
+                #[cfg(unix)]
+                {
+                    feed(&folder.dev().to_le_bytes());
+                    feed(&folder.ino().to_le_bytes());
+                }
+                #[cfg(windows)]
+                let _ = folder;
                 let (device, inode, first) = git::mapped_checkout(root)
                     .ok_or_else(|| format!("Could not verify the repository at {}.", root.display()))?;
                 feed(&device.to_le_bytes());
@@ -660,7 +665,8 @@ fn journal(changes: &[Change]) -> Vec<u8> {
     };
     for change in changes {
         let (before, after) = change.images();
-        writeln!(out, "{}\t{}\t{}", hex(change.path().as_os_str().as_bytes()), image(after), image(before)).unwrap();
+        writeln!(out, "{}\t{}\t{}", hex(change.path().as_os_str().as_encoded_bytes()), image(after), image(before))
+            .unwrap();
     }
     out.push_str("end\n");
     out.into_bytes()
@@ -689,7 +695,7 @@ fn reversal(place: &Place<'_>, text: &str) -> Option<Vec<Change>> {
     for line in records.strip_suffix('\n')?.split('\n') {
         let mut fields = line.split('\t');
         let (path, written, previous) = (fields.next()?, fields.next()?, fields.next()?);
-        let path = PathBuf::from(OsString::from_vec(unhex(path)?));
+        let path = PathBuf::from(crate::sys::os_string(unhex(path)?)?);
         let inside = path
             .strip_prefix(place.config)
             .is_ok_and(|rest| rest.components().all(|part| matches!(part, Component::Normal(_))));
@@ -793,7 +799,7 @@ impl<'a> Request<'a> {
                     match flag.to_str() {
                         Some("--apply") if !apply => apply = true,
                         Some("--map") => {
-                            let pair = words.next().map(OsStr::as_bytes);
+                            let pair = words.next().map(OsStr::as_encoded_bytes);
                             let split = pair.and_then(|pair| {
                                 pair.iter().position(|&byte| byte == b'=').map(|at| pair.split_at(at))
                             });
@@ -802,7 +808,10 @@ impl<'a> Request<'a> {
                                 .ok()
                                 .filter(|name| !name.is_empty())
                                 .ok_or("--map takes NAME=DIR")?;
-                            maps.push((name.to_owned(), PathBuf::from(OsStr::from_bytes(&dir[1..]))));
+                            maps.push((
+                                name.to_owned(),
+                                PathBuf::from(crate::sys::os_str(&dir[1..]).ok_or("--map takes NAME=DIR")?),
+                            ));
                         }
                         _ => return Err(EXPECTED.into()),
                     }
@@ -833,6 +842,9 @@ fn read_bundle(file: &OsStr) -> Result<String, String> {
 
 /// Runs `milo settings` against this host's own settings folders.
 pub(crate) fn command(request: Request<'_>) -> Result<String, String> {
+    if cfg!(windows) {
+        return Err("milo settings is not supported on Windows yet.".into());
+    }
     let store = Store::real().ok_or("Could not locate your settings folders. Check HOME and XDG_CONFIG_HOME.")?;
     let home = paths::home();
     let cwd = Path::new(".");
@@ -852,14 +864,17 @@ pub(crate) fn command(request: Request<'_>) -> Result<String, String> {
             let bundle = export(&place, &groups, scopes)?;
             let Some(output) = output else { return Ok(bundle.trim_end().to_owned()) };
             // The bundle is the person's own choices; another account has no use for it.
-            let mut file =
-                OpenOptions::new().write(true).create_new(true).mode(0o600).open(output).map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::AlreadyExists {
-                        "That file exists already. Choose a new name; an export never replaces a file.".to_owned()
-                    } else {
-                        format!("Could not write the bundle: {error}")
-                    }
-                })?;
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(output).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    "That file exists already. Choose a new name; an export never replaces a file.".to_owned()
+                } else {
+                    format!("Could not write the bundle: {error}")
+                }
+            })?;
             file.write_all(bundle.as_bytes()).map_err(|error| format!("Could not write the bundle: {error}"))?;
             Ok(format!(
                 "Exported {} to {}. On the other host, preview it with: milo settings import FILE",
@@ -895,5 +910,5 @@ pub(crate) fn command(request: Request<'_>) -> Result<String, String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

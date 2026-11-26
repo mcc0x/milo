@@ -10,6 +10,7 @@ use std::cell::OnceCell;
 use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::{Read as _, Write as _};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -558,8 +559,12 @@ impl Sources {
         };
         let metadata = file.metadata().map_err(|_| Failure::OpenFile)?;
         // SAFETY: geteuid has no preconditions and cannot fail.
-        let mine = metadata.uid() == unsafe { libc::geteuid() };
-        if !metadata.is_file() || !mine || metadata.mode() & 0o077 != 0 || metadata.len() > SETTINGS_LIMIT {
+        #[cfg(unix)]
+        let private = metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0;
+        // Windows has no owner and mode to check here, so no file is trusted to hold a key.
+        #[cfg(windows)]
+        let private = false;
+        if !metadata.is_file() || !private || metadata.len() > SETTINGS_LIMIT {
             return Err(Failure::OpenFile);
         }
         let mut text = String::new();
@@ -1036,8 +1041,7 @@ impl Accounts {
         self.start(now, clock, manual);
         while let Some(fd) = self.fd() {
             let mut poll = crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 };
-            // SAFETY: `poll` points to one writable pollfd whose descriptor the job keeps open.
-            unsafe { libc::poll(&raw mut poll, 1, 30_000) };
+            crate::sys::poll(std::slice::from_mut(&mut poll), 30_000);
             self.collect(clock);
         }
     }

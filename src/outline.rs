@@ -801,6 +801,7 @@ mod tests {
         assert!(draw(&mut o, 80, 12).text()[11].contains("The project folder changed"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn tree_actions_filter_folders_and_recheck_native_open_on_selection() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -886,6 +887,7 @@ mod tests {
         assert!(o.reading.is_some());
     }
 
+    #[cfg(unix)]
     #[test]
     fn find_offers_preview_only_for_eligible_working_markdown() {
         use std::os::unix::fs::symlink;
@@ -1430,6 +1432,7 @@ mod tests {
         assert_eq!(o.next_frame(), None, "no further frames once sweep and marks have finished");
     }
 
+    #[cfg(unix)]
     #[test]
     fn binary_and_large_files_are_not_retried_and_links_are_not_followed() {
         let f = Fixture::new();

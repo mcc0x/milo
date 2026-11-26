@@ -3,7 +3,6 @@
 use crate::sys::{AsRawFd, RawFd};
 use std::ffi::OsStr;
 use std::io::{self, PipeReader, Read};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -226,7 +225,7 @@ fn readable(path: &Path) -> bool {
 fn read_only_uri(path: &Path) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     const OPTIONS: &str = "?mode=ro&readonly_shm=1";
-    let bytes = path.as_os_str().as_bytes();
+    let bytes = path.as_os_str().as_encoded_bytes();
     let mut uri = String::with_capacity(5 + bytes.len() + OPTIONS.len());
     uri.push_str("file:");
     for &b in bytes {
@@ -292,6 +291,7 @@ mod tests {
         None
     }
 
+    #[cfg(unix)]
     #[test]
     fn sqlite_that_closes_stdout_without_exiting_is_killed_and_reaped() {
         let mut child = Command::new("/bin/sh")
@@ -333,6 +333,7 @@ mod tests {
         finish.send(()).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn closing_usage_waits_for_its_sqlite_worker_to_reap_the_child() {
         let (send, receive) = std::sync::mpsc::channel();

@@ -6,6 +6,8 @@
 //! what that leaves a browser with: nothing until the editor is whole, then
 //! the whole state, and a clean end if it is stopped in between.
 
+#![cfg(unix)]
+
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::TcpStream;

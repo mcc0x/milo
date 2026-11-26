@@ -3,7 +3,6 @@
 use crate::sys::{AsRawFd, RawFd};
 use std::fmt::Write as _;
 use std::io::{self, Write};
-use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -34,6 +33,9 @@ impl Refresh {
 }
 
 pub fn menu_stream() -> io::Result<()> {
+    if cfg!(windows) {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "usage is not supported on Windows yet"));
+    }
     let home = paths::home();
     let home = home.as_deref();
     let config = paths::config_dir();
@@ -238,8 +240,8 @@ fn limit_windows(
 }
 
 pub(super) fn snapshots(
-    input: impl AsFd,
-    mut output: impl Write + AsFd,
+    input: impl AsRawFd,
+    mut output: impl Write + AsRawFd,
     mut refresh: impl FnMut(&mut String, Refresh) -> io::Result<Option<Duration>>,
 ) -> io::Result<()> {
     let mut line = String::with_capacity(1024);
@@ -254,7 +256,7 @@ pub(super) fn snapshots(
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(()),
             result => result?,
         }
-        match next_refresh(input.as_fd().as_raw_fd(), output.as_fd().as_raw_fd(), deadline)? {
+        match next_refresh(input.as_raw_fd(), output.as_raw_fd(), deadline)? {
             Some(next) => request = next,
             None => return Ok(()),
         }
@@ -262,6 +264,12 @@ pub(super) fn snapshots(
 }
 
 /// A newline refreshes usage; NUL only rereads the display choice. Coalesce queued requests.
+#[cfg(windows)]
+fn next_refresh(_input: RawFd, _output: RawFd, _deadline: Instant) -> io::Result<Option<Refresh>> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "usage is not supported on Windows yet"))
+}
+
+#[cfg(unix)]
 fn next_refresh(input: RawFd, output: RawFd, deadline: Instant) -> io::Result<Option<Refresh>> {
     let mut fds = [
         crate::sys::pollfd { fd: input, events: crate::sys::POLLIN, revents: 0 },

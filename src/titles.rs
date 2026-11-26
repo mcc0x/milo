@@ -10,6 +10,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
@@ -128,10 +129,17 @@ fn outside_grounds(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Whether only this user and the system can add files to `folder`.
+#[cfg(unix)]
 fn private(folder: &Path) -> bool {
     // SAFETY: `geteuid` takes no arguments and only reads this process's user ID.
     let user = unsafe { libc::geteuid() };
     folder.metadata().is_ok_and(|meta| meta.mode() & 0o022 == 0 && (meta.uid() == user || meta.uid() == 0))
+}
+
+/// Windows has no owner and mode to check here, so no folder counts as private.
+#[cfg(windows)]
+fn private(_folder: &Path) -> bool {
+    false
 }
 
 /// The listener passes the name of a process it recognised, never free text.
@@ -253,6 +261,7 @@ impl Claims {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
@@ -381,6 +390,7 @@ mod tests {
         assert_eq!(homes.title(&[deep.to_str().unwrap()]), "project");
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_answer_that_may_not_last_has_no_grounds() {
         let homes = Homes::new();

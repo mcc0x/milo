@@ -7,7 +7,10 @@
 
 use std::fs::File;
 use std::io;
-use std::os::unix::fs::{FileExt as _, MetadataExt as _};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt as _;
 
 use super::content::LIMIT;
 use super::working_path::{Entry, LookupError};
@@ -96,6 +99,24 @@ pub(super) enum SaveError {
     Refused(&'static str),
 }
 
+/// Another program holds the file open for writing, so it cannot be opened to save.
+#[cfg(windows)]
+const ERROR_SHARING_VIOLATION: i32 = 32;
+
+/// Changes to these between two looks at an open file mean something wrote to it in between.
+/// The Windows save handle refuses other writers while it is open, so its length and last write
+/// time only catch a writer that already had the file open.
+fn written_stamp(m: &std::fs::Metadata) -> (u64, i128, i128) {
+    #[cfg(unix)]
+    return (
+        m.len(),
+        i128::from(m.ctime()) << 32 | i128::from(m.ctime_nsec()),
+        i128::from(m.mtime()) << 32 | i128::from(m.mtime_nsec()),
+    );
+    #[cfg(windows)]
+    (m.len(), i128::from(m.last_write_time()), i128::from(m.creation_time()))
+}
+
 /// Opens the file itself and checks that it is a regular file.
 fn open(entry: &Entry<'_>, write: bool) -> io::Result<(File, std::fs::Metadata)> {
     let file = if write { entry.open_edit() } else { entry.open_read() }?;
@@ -115,7 +136,7 @@ fn contents(file: &File, size: u64) -> io::Result<Option<Vec<u8>>> {
     let mut offset = 0;
     let mut chunk = [0; 1 << 16];
     loop {
-        let read = match file.read_at(&mut chunk, offset) {
+        let read = match crate::sys::read_at(file, &mut chunk, offset) {
             Ok(0) => return Ok(Some(bytes)),
             Ok(read) => read,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -147,7 +168,7 @@ pub(super) fn load(entry: &Entry<'_>) -> Result<Original, ReadOnly> {
         io::ErrorKind::NotFound => ReadOnly::GONE,
         io::ErrorKind::InvalidInput => ReadOnly::NOT_FILE,
         // A link put in the file's place since the lookup.
-        _ if error.raw_os_error() == Some(libc::ELOOP) => ReadOnly::LINK,
+        _ if error.raw_os_error() == Some(crate::fs_ops::LINK_REFUSED) => ReadOnly::LINK,
         _ => ReadOnly::UNREADABLE,
     })?;
     let bytes = contents(&file, meta.len()).map_err(|_| ReadOnly::UNREADABLE)?.ok_or(ReadOnly::TOO_LARGE)?;
@@ -156,7 +177,8 @@ pub(super) fn load(entry: &Entry<'_>) -> Result<Original, ReadOnly> {
     }
     let marked = bytes.starts_with(BOM.as_bytes());
     let text = String::from_utf8(bytes).map_err(|_| ReadOnly::NOT_TEXT)?;
-    Ok(Original { snapshot: Snapshot { text, identity: (meta.dev(), meta.ino()) }, marked })
+    let identity = crate::sys::identity(&file).map_err(|_| ReadOnly::UNREADABLE)?;
+    Ok(Original { snapshot: Snapshot { text, identity }, marked })
 }
 
 /// What the file must hold for a save to write over it.
@@ -191,6 +213,10 @@ pub(super) fn save(
         SaveError::Refused(match error.kind() {
             io::ErrorKind::NotFound => "Not saved: the file is gone.",
             io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => "Not saved: no write permission.",
+            #[cfg(windows)]
+            _ if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
+                "Not saved: another program is writing to it."
+            }
             _ => "Not saved: the file cannot be opened.",
         })
     })?;
@@ -201,7 +227,8 @@ pub(super) fn save(
         return Err(SaveError::Refused("Not saved: the file is no longer text."));
     }
     let text = String::from_utf8(bytes).map_err(|_| SaveError::Refused("Not saved: the file is no longer text."))?;
-    let identity = (meta.dev(), meta.ino());
+    let identity =
+        crate::sys::identity(&file).map_err(|_| SaveError::Refused("Not saved: the file cannot be read back."))?;
     let current = Snapshot { identity, text };
     let expected = match basis {
         Basis::Original => current == original.snapshot,
@@ -211,17 +238,16 @@ pub(super) fn save(
     let replacement = expected.then(draft);
     // Only present snapshots from stable reads, and do not write over an edit that happened during one.
     let after = file.metadata().map_err(|_| SaveError::Refused("Not saved: the file cannot be read back."))?;
-    let stamp = |m: &std::fs::Metadata| (m.len(), m.ctime(), m.ctime_nsec(), m.mtime(), m.mtime_nsec());
-    if stamp(&after) != stamp(&meta) {
+    if written_stamp(&after) != written_stamp(&meta) {
         return Err(SaveError::Refused("Not saved: the file changed while reading. Save again."));
     }
     let Some(text) = replacement else { return Ok(Some(current)) };
     let bytes = text.as_bytes();
-    let written = file.write_all_at(bytes, 0).and_then(|()| file.set_len(bytes.len() as u64));
+    let written = crate::sys::write_all_at(&file, bytes, 0).and_then(|()| file.set_len(bytes.len() as u64));
     if written.is_err() {
         // Leave what was there rather than part of each.
         let old = current.text.as_bytes();
-        let restored = file.write_all_at(old, 0).and_then(|()| file.set_len(old.len() as u64)).is_ok();
+        let restored = crate::sys::write_all_at(&file, old, 0).and_then(|()| file.set_len(old.len() as u64)).is_ok();
         return Err(SaveError::Refused(if restored {
             "Not saved: writing failed. File is as it was."
         } else {

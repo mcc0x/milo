@@ -8,10 +8,10 @@ mod pending;
 pub(crate) mod run;
 pub(crate) mod worktrees;
 
+use crate::sys::BorrowedFd;
 use std::cell::{Cell, OnceCell};
 use std::ffi::OsStr;
-use std::os::fd::BorrowedFd;
-use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -331,7 +331,7 @@ pub fn worktree(dir: &Path) -> Option<PathBuf> {
 /// Distinguish a missing executable from an ordinary directory.
 pub(crate) fn discover_worktree(dir: &Path) -> Result<Option<PathBuf>, &'static str> {
     let raw = discovery_output(dir, &["rev-parse", "--show-toplevel"])?;
-    Ok(raw.map(|raw| PathBuf::from(OsStr::from_bytes(&raw))).filter(|root| root.is_absolute()))
+    Ok(raw.and_then(|raw| crate::sys::os_string(raw).map(PathBuf::from)).filter(|root| root.is_absolute()))
 }
 
 /// The ID of the commit a checkout's history starts from. Clones of one
@@ -354,16 +354,35 @@ fn first_visible_commit(root: &Path) -> Option<String> {
 /// The Git directory distinguishes two unborn repositories installed in the same worktree directory.
 pub(crate) fn mapped_checkout(root: &Path) -> Option<(u64, u64, Option<String>)> {
     let raw = discovery_output(root, &["rev-parse", "--absolute-git-dir"]).ok()??;
-    let git = Path::new(OsStr::from_bytes(&raw));
+    let git = Path::new(crate::sys::os_str(&raw)?);
     if !git.is_absolute() {
         return None;
     }
-    let directory = git.metadata().ok()?;
+    let directory = folder_identity(git)?;
     let first = first_visible_commit(root);
     if first.is_none() && run::optional_oid(root, &[], &["rev-parse", "--verify", "--quiet", "HEAD"])?.is_some() {
         return None; // HEAD exists but its history could not be read.
     }
-    Some((directory.dev(), directory.ino(), first))
+    Some((directory.0, directory.1, first))
+}
+
+/// Which folder `path` leads to, whatever way it is spelled.
+#[cfg(unix)]
+fn folder_identity(path: &Path) -> Option<(u64, u64)> {
+    let found = path.metadata().ok()?;
+    Some((found.dev(), found.ino()))
+}
+
+#[cfg(windows)]
+fn folder_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    // Opening a folder takes backup semantics; the handle then names the folder itself.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let folder = std::fs::OpenOptions::new().access_mode(0).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path).ok()?;
+    if !folder.metadata().ok()?.is_dir() {
+        return None;
+    }
+    crate::sys::identity(&folder).ok()
 }
 
 /// What people call a checkout: its repository and, in a linked worktree, that worktree's folder.
@@ -416,8 +435,7 @@ fn repository_name(common: &Path, root: &Path) -> Option<String> {
 /// Whether two paths lead to one folder. A folder can be spelled in more than
 /// one way, in another case for instance, so the spellings are not compared.
 pub(crate) fn same_folder(one: &Path, other: &Path) -> bool {
-    let folder = |path: &Path| path.metadata().ok().map(|found| (found.dev(), found.ino()));
-    folder(one).is_some_and(|found| folder(other) == Some(found))
+    folder_identity(one).is_some_and(|found| folder_identity(other) == Some(found))
 }
 
 fn discovery_output(dir: &Path, args: &[&str]) -> Result<Option<Vec<u8>>, &'static str> {
@@ -433,7 +451,7 @@ fn discovery_output(dir: &Path, args: &[&str]) -> Result<Option<Vec<u8>>, &'stat
 
 fn git_dirs(dir: &Path) -> Result<Option<GitDirs>, &'static str> {
     let ask = |args: &[&str]| discovery_output(dir, args);
-    let path = |bytes: &[u8]| PathBuf::from(OsStr::from_bytes(bytes));
+    let path = |bytes: &[u8]| crate::sys::os_str(bytes).map(PathBuf::from);
     let raw =
         ask(&["rev-parse", "--show-toplevel", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"])?;
     let Some(raw) = raw else {
@@ -442,12 +460,14 @@ fn git_dirs(dir: &Path) -> Result<Option<GitDirs>, &'static str> {
     };
     let mut paths = raw.split(|&b| b == b'\n');
     if let (Some(root), Some(git), Some(common), None) = (paths.next(), paths.next(), paths.next(), paths.next()) {
-        return Ok(Some(GitDirs { root: path(root), git: Some(path(git)), common: Some(path(common)) }));
+        // A root that cannot be represented exactly is not a checkout this build can open.
+        let Some(root) = path(root) else { return Ok(None) };
+        return Ok(Some(GitDirs { root, git: path(git), common: path(common) }));
     }
     // A newline can be part of a path. Separate answers have no ambiguous delimiters.
     // Git before 2.31 prints `--path-format` back instead of following it, so only a
     // whole path is an answer. That Git does not say where its records are.
-    let one = |args: &[&str]| ask(args).map(|raw| raw.as_deref().map(path).filter(|folder| folder.is_absolute()));
+    let one = |args: &[&str]| ask(args).map(|raw| raw.as_deref().and_then(path).filter(|folder| folder.is_absolute()));
     let Some(root) = discover_worktree(dir)? else { return Ok(None) };
     Ok(Some(GitDirs {
         root,
@@ -1065,8 +1085,11 @@ impl Repo {
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
-    use std::fs::{self, Permissions};
-    use std::os::fd::AsFd as _;
+    use crate::sys::AsFd as _;
+    use std::fs;
+    #[cfg(unix)]
+    use std::fs::Permissions;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn read_repo(f: &Fixture) -> Repo {
@@ -1309,6 +1332,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn git_lists_valid_siblings_without_mistaking_non_utf8_names_for_them() {
+        use std::os::unix::ffi::OsStrExt as _;
+
         let f = Fixture::new();
         let invalid = f.root.join(OsStr::from_bytes(b"page\xff.txt"));
         f.write("page\u{fffd}.txt", "valid\n");
@@ -1421,6 +1446,7 @@ mod tests {
         assert!(!repo.history(1).unwrap()[0].unpushed);
     }
 
+    #[cfg(unix)]
     #[test]
     fn reading_a_repository_does_not_run_its_filters_hooks_or_file_monitor() {
         let f = Fixture::new();
@@ -1498,6 +1524,7 @@ mod tests {
         assert_eq!(repo.media_kind("old.png", true), Some(Kind::Deleted));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_working_file_diff_excludes_former_directory_children() {
         use crate::diff::{self, LineKind};

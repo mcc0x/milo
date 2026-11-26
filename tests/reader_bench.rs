@@ -23,6 +23,8 @@
 //! - `MILO_BENCH_RUNS` sets how often each file is opened (10).
 //! - `MILO_BENCH_REPORT` names a file to write the report to as well.
 
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs::{self, File};

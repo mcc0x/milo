@@ -179,12 +179,19 @@ fn computer_name() -> String {
     if let Some(name) = std::env::var_os("MILO_TEST_HOST_NAME").and_then(|name| name.into_string().ok()) {
         return short_name(name.as_bytes());
     }
-    let mut buffer = [0u8; 256];
-    // SAFETY: The buffer is writable for the length given, and one byte is
-    // kept back so that the name always ends in a NUL.
-    let failed = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len() - 1) } != 0;
-    let len = buffer.iter().position(|&byte| byte == 0).unwrap_or(0);
-    short_name(if failed { &[] } else { &buffer[..len] })
+    #[cfg(windows)]
+    {
+        short_name(std::env::var("COMPUTERNAME").unwrap_or_default().as_bytes())
+    }
+    #[cfg(unix)]
+    {
+        let mut buffer = [0u8; 256];
+        // SAFETY: The buffer is writable for the length given, and one byte is
+        // kept back so that the name always ends in a NUL.
+        let failed = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len() - 1) } != 0;
+        let len = buffer.iter().position(|&byte| byte == 0).unwrap_or(0);
+        short_name(if failed { &[] } else { &buffer[..len] })
+    }
 }
 
 fn short_name(full: &[u8]) -> String {
