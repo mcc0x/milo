@@ -20,7 +20,7 @@ struct StartupInfoEx {
     reserved: *mut u16,
     desktop: *mut u16,
     title: *mut u16,
-    numbers: [u32; 8],
+    numbers: [u32; 7],
     flags: u32,
     show_window: u16,
     reserved2_size: u16,
@@ -161,7 +161,7 @@ impl Console {
             reserved: std::ptr::null_mut(),
             desktop: std::ptr::null_mut(),
             title: std::ptr::null_mut(),
-            numbers: [0; 8],
+            numbers: [0; 7],
             // Without explicit handles the child takes this test's own redirected output instead
             // of the pseudoconsole's, so Milo would not see a terminal. Invalid handles make it
             // use the console it is attached to.
