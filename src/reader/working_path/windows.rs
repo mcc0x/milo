@@ -350,16 +350,19 @@ fn kind(attributes: u32, reparse_tag: u32) -> Kind {
 }
 
 /// Includes file identity and change time: saving by replacement can preserve length and write time.
+/// The length is there too, because Windows advances the change time only once per clock tick
+/// and two writes within one tick would otherwise look like one.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::reader) struct Stamp {
     identity: (u64, u64),
     changed: i64,
+    size: u64,
     kind: Kind,
 }
 
 impl Stamp {
     fn of_stat(stat: &Stat) -> Self {
-        Self { identity: stat.identity, changed: stat.changed, kind: stat.kind() }
+        Self { identity: stat.identity, changed: stat.changed, size: stat.size, kind: stat.kind() }
     }
 
     /// Looks at the name itself, not what a link there points to.
