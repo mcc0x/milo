@@ -9,6 +9,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 pub(crate) use libc::{POLLHUP, POLLIN, POLLOUT, pollfd};
@@ -111,6 +112,17 @@ pub(crate) fn os_string(bytes: Vec<u8>) -> Option<OsString> {
     }
     #[cfg(windows)]
     String::from_utf8(bytes).ok().map(OsString::from)
+}
+
+/// The real path of a file, written the way Git and the user write it. Windows adds a \\?\ prefix
+/// when it canonicalizes, so a path Git reports would never match; the prefix stays only where
+/// the plain form could name something else.
+pub(crate) fn canonicalize(path: &Path) -> io::Result<PathBuf> {
+    let real = path.canonicalize()?;
+    #[cfg(windows)]
+    return Ok(windows::plain_path(real));
+    #[cfg(unix)]
+    Ok(real)
 }
 
 /// Whether a process with this ID is running. A process this user may not signal still counts.

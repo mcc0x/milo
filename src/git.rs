@@ -496,7 +496,7 @@ impl Repo {
         let git_unavailable = discovered.is_err();
         let (root, git, git_dir, common_dir) = match discovered.ok().flatten() {
             Some(found) => (found.root, true, found.git, found.common),
-            None => (dir.canonicalize().ok().filter(|d| d.is_dir())?, false, None, None),
+            None => (crate::sys::canonicalize(dir).ok().filter(|d| d.is_dir())?, false, None, None),
         };
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let index_lock = git_dir.as_ref().map(|dir| dir.join("index.lock"));

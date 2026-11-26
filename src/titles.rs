@@ -75,7 +75,7 @@ fn run(args: &[OsString], config: &Path, state: &Path) -> Result<String, &'stati
                 Err(_) => (String::new(), Vec::new()),
             };
             // A path through a link can come to mean another folder without any file changing.
-            let settled = cwd.canonicalize().is_ok_and(|real| real == cwd);
+            let settled = crate::sys::canonicalize(cwd).is_ok_and(|real| real == cwd);
             Ok(answer(&title, if settled { &grounds } else { &[] }))
         }
         (Some("claim"), [id, title]) => {

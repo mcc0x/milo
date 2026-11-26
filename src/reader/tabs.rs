@@ -781,7 +781,7 @@ impl TabSets {
     /// The lists of the worktree that holds `dir`. `last` starts at the preview of its last tabs.
     pub fn open(dir: &Path, last: bool) -> Result<Self, String> {
         let state = rescue::state_dir().ok_or("milo has no state folder to remember tabs in")?;
-        let found = dir.canonicalize().ok().and_then(|dir| Repo::open(&dir));
+        let found = crate::sys::canonicalize(dir).ok().and_then(|dir| Repo::open(&dir));
         let repo = found.ok_or_else(|| format!("{} is not a directory", dir.display()))?;
         Ok(Self::at(state, repo.root, last))
     }
@@ -1034,12 +1034,12 @@ mod tests {
         f.commit("two files");
         let other = Fixture::new();
         other.write("b.txt", "another project\n");
-        let root = f.root.canonicalize().unwrap();
+        let root = crate::sys::canonicalize(&f.root).unwrap();
         let place = Place { state: state(&f), block: BLOCK.into() };
         let mut tabs = Tabs::placed(reader(&f, "a.txt"), Some(place));
         let spot = Some(crate::reader::Spot { line: 2, column: None });
 
-        let elsewhere = other.root.canonicalize().unwrap();
+        let elsewhere = crate::sys::canonicalize(&other.root).unwrap();
         assert!(!ask_reader(&state(&f), BLOCK, &elsewhere, &elsewhere.join("b.txt"), spot));
         assert!(matches!(tabs.check_external(), External::Unchanged));
         assert!(ask_reader(&state(&f), BLOCK, &root, &root.join("b.txt"), spot));

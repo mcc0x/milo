@@ -122,16 +122,16 @@ impl Worktree {
         if !cwd.is_absolute() {
             return None;
         }
-        let cwd = cwd.canonicalize().ok().filter(|dir| dir.is_dir())?;
+        let cwd = crate::sys::canonicalize(cwd).ok().filter(|dir| dir.is_dir())?;
         let checkout = git::checkout(&cwd).ok().flatten();
-        let root = checkout.and_then(|checkout| checkout.root.canonicalize().ok()).filter(|root| cwd.starts_with(root));
+        let root = checkout.and_then(|checkout| crate::sys::canonicalize(&checkout.root).ok()).filter(|root| cwd.starts_with(root));
         Some(Self { root: root.unwrap_or_else(|| cwd.clone()), cwd })
     }
 
     /// Follows `path` as a program in the working folder would, links
     /// included, and says whether it ends at a file of this worktree.
     fn lookup(&self, path: &str) -> Lookup {
-        let Ok(real) = self.cwd.join(path).canonicalize() else { return Lookup::Missing };
+        let Ok(real) = crate::sys::canonicalize(&self.cwd.join(path)) else { return Lookup::Missing };
         if !real.is_file() {
             return Lookup::Missing;
         }

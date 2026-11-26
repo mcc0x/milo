@@ -3,6 +3,7 @@
 use std::ffi::c_void;
 use std::io;
 use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle as _, OwnedHandle};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// A handle's value. -1 is `INVALID_HANDLE_VALUE`, which a wait skips like a negative descriptor.
@@ -296,3 +297,43 @@ impl Job {
         unsafe { TerminateJobObject(self.handle(), 1) };
     }
 }
+
+/// A verbatim drive path without its \\?\ prefix, when the plain form names the same file:
+/// Windows trims a trailing dot or space, reads a device name such as CON as the device and
+/// stops at the old length limit, so such paths keep the prefix.
+pub(crate) fn plain_path(path: PathBuf) -> PathBuf {
+    let Some(plain) = path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) else { return path };
+    let mut names = plain.split('\\');
+    let drive = names.next().is_some_and(|drive| drive.len() == 2 && drive.ends_with(':'));
+    let reserved = |name: &str| {
+        let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+        matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+            || (stem.len() == 4
+                && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.as_bytes()[3].is_ascii_digit())
+    };
+    let changed = |name: &str| name.ends_with(['.', ' ']) || reserved(name);
+    if !drive || plain.len() >= 260 || names.any(changed) {
+        return path;
+    }
+    PathBuf::from(plain)
+}
+
+#[cfg(test)]
+mod plain_path_tests {
+    use super::plain_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn only_a_drive_path_that_means_the_same_without_the_prefix_loses_it() {
+        let plain = |text: &str| plain_path(PathBuf::from(text)).to_str().unwrap().to_owned();
+        assert_eq!(plain(r"\\?\D:\a\_temp\project"), r"D:\a\_temp\project");
+        assert_eq!(plain(r"\\?\D:\"), r"D:\");
+        for kept in [r"\\?\D:\a\name.", r"\\?\D:\a\name ", r"\\?\D:\a\con.txt", r"\\?\D:\COM1", r"\\?\UNC\host\share\a"] {
+            assert_eq!(plain(kept), kept);
+        }
+        let long = format!(r"\\?\D:\{}", "a".repeat(300));
+        assert_eq!(plain(&long), long);
+    }
+}
+

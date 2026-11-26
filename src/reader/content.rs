@@ -33,7 +33,7 @@ impl Location {
         let dir = file.ancestors().skip(1).find(|dir| dir.is_dir())?;
         // Keep the final component even if it is a link. Within a known
         // worktree also keep the directory aliases the user actually opened.
-        let resolved = dir.canonicalize().ok()?;
+        let resolved = crate::sys::canonicalize(dir).ok()?;
         let tail = file.strip_prefix(dir).ok()?;
         if resolved != dir {
             if dir.components().any(|part| part == Component::ParentDir) {
@@ -109,7 +109,7 @@ fn enclosing_worktree<'a>(dir: &'a Path, resolved: &Path) -> Option<Option<(&'a 
         if fs::symlink_metadata(name.join(".git")).is_err() {
             continue;
         }
-        let root = name.canonicalize().ok()?;
+        let root = crate::sys::canonicalize(name).ok()?;
         if !resolved.starts_with(&root) {
             return None;
         }

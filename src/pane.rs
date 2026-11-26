@@ -465,7 +465,7 @@ fn draw_loading(screen: &mut Screen, dir: Option<&Path>, w: usize, h: usize) {
         screen.put_fit(0, 0, w, "Reading…", ui::FAINT);
         return;
     };
-    let absolute = dir.canonicalize().ok();
+    let absolute = crate::sys::canonicalize(dir).ok();
     let dir = absolute.as_deref().unwrap_or(dir);
     let project = dir.ancestors().find(|dir| dir.join(".git").exists()).unwrap_or(dir);
     let name = project.file_name().unwrap_or(project.as_os_str()).to_string_lossy();

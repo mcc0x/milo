@@ -14,13 +14,7 @@ impl Fixture {
     /// Creates an empty directory, without a repository.
     pub fn folder() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let temp = std::env::temp_dir().canonicalize().unwrap();
-        // Git can't use a verbatim \\?\ path, so keep the plain drive form Windows canonicalizes away.
-        #[cfg(windows)]
-        let temp = match temp.to_str().and_then(|path| path.strip_prefix(r"\\?\")) {
-            Some(path) if !path.starts_with("UNC\\") => PathBuf::from(path),
-            _ => temp,
-        };
+        let temp = crate::sys::canonicalize(&std::env::temp_dir()).unwrap();
         let home = loop {
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
             let path = temp.join(format!("milo-test-{}-{n}", std::process::id()));
