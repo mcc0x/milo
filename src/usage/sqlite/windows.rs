@@ -1,6 +1,10 @@
 //! Windows form of the read-only query. Windows has no sqlite3 program, so the SQLite that ships
 //! with it, System32\winsqlite3.dll, runs the query on the reading thread. Its answer is written
 //! as the sqlite3 shell's `-json` output, so the readers parse one format on every system.
+//!
+//! That build also ignores `readonly_shm`: opening a log whose sidecars are gone makes new ones.
+//! Only a database whose sidecars were both found is opened, so that happens only if the writer
+//! removes them between that look and the open.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::io::Write as _;

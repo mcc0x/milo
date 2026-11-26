@@ -86,15 +86,15 @@ fn a_link_to_a_database_or_its_log_is_refused_and_nothing_is_made_beside_it() {
     assert!(direct(&copy, "SELECT 1", WAIT, MAX_OUTPUT).is_none());
 }
 
+/// Windows' SQLite ignores readonly_shm and would make the file, so such a log is never opened.
 #[test]
-fn a_log_without_its_shared_memory_file_is_not_given_one() {
+fn a_log_without_its_shared_memory_file_is_left_unread_and_not_given_one() {
     let f = Fixture::folder();
     let (path, _writer) = busy(&f);
     let copy = f.root.join("copy.db");
     fs::write(&copy, fs::read(&path).unwrap()).unwrap();
     fs::write(f.root.join("copy.db-wal"), fs::read(path.with_extension("db-wal")).unwrap()).unwrap();
     assert!(checked_query(executable(), &copy, "SELECT 1", WAIT).is_none());
-    let _ = direct(&copy, "SELECT 1", WAIT, MAX_OUTPUT);
     assert!(!f.root.join("copy.db-shm").exists(), "a read-only query made a shared-memory file");
 }
 
