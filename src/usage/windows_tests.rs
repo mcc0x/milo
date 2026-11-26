@@ -253,7 +253,7 @@ fn doctor_reads_codex_and_claude_files_and_says_the_status_line_is_not_supported
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert!(lines[0].starts_with("Codex limits: ") && !lines[0].contains("no local report"), "{lines:?}");
     assert_eq!(
-        lines[1], "Claude limits: no local report; Claude Code's status line is not supported on Windows yet",
+        lines[1], "Claude Code limits: no local report; Claude Code's status line is not supported on Windows yet",
         "{lines:?}"
     );
     assert!(lines.iter().all(|line| !line.contains("milo setup")), "{lines:?}");
