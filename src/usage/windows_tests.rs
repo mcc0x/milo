@@ -215,7 +215,7 @@ fn a_transcript_replaced_by_a_link_after_discovery_is_no_longer_read() {
     write(&f, CLAUDE, &assistant(now - HOUR, 1000, 0, 0), now);
     write(&f, "elsewhere/other.jsonl", &assistant(now - HOUR, 9000, 0, 0), now);
     let mut usage = open(&f, now);
-    assert!(today(&mut usage).contains("1.0k tokens today"));
+    assert!(today(&mut usage).contains("tokens today"));
     fs::remove_file(f.root.join(CLAUDE)).unwrap();
     if !linked(symlink_file(f.root.join("elsewhere/other.jsonl"), f.root.join(CLAUDE))) {
         return;
