@@ -1,9 +1,10 @@
 //! Windows form of the read-only query. Windows has no sqlite3 program, and the SQLite that ships
 //! with it, System32\winsqlite3.dll, ignores `readonly_shm`: opened in place, it would write its
-//! shared-memory file and make missing sidecars. So the database is never opened in place. Its file
-//! and write-ahead log are read through handles that only read, the committed frames are applied to
-//! a private copy in memory, and that copy is queried. Nothing beside the database is opened, made
-//! or written, and the tool that owns it never waits on Milo.
+//! shared-memory file and make missing sidecars. So the database is never opened in place. Under
+//! SQLite's own shared lock, its file and write-ahead log are read through handles that only read,
+//! the committed frames are applied to a private copy in memory, and that copy is queried. Nothing
+//! beside the database is opened for writing, made or changed. A copy that the files show was
+//! disturbed is taken again, and after a few tries the database is left unread.
 //!
 //! The answer is written as the sqlite3 shell's `-json` output, so the readers parse one format.
 
@@ -11,7 +12,8 @@ use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::fs::File;
 use std::io::{self, Write as _};
 use std::os::windows::fs::FileExt as _;
-use std::path::Path;
+use std::os::windows::io::AsRawHandle as _;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -37,8 +39,9 @@ const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
 const STEPS: c_int = 1000;
 /// The most a database and its log may hold together before it is left unread.
 pub(super) const MAX_SNAPSHOT: u64 = 64 << 20;
-/// A writer that restarts its log during every copy leaves the database unread.
+/// A writer that is busy during every copy leaves the database unread.
 const ATTEMPTS: usize = 3;
+const RETRY: std::time::Duration = std::time::Duration::from_millis(10);
 const WAL_HEADER: usize = 32;
 const FRAME_HEADER: usize = 24;
 
@@ -46,6 +49,15 @@ const FRAME_HEADER: usize = 24;
 unsafe extern "system" {
     fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const c_char) -> Option<unsafe extern "system" fn() -> isize>;
+    fn LockFileEx(
+        file: *mut c_void,
+        flags: u32,
+        reserved: u32,
+        low: u32,
+        high: u32,
+        overlapped: *mut Overlapped,
+    ) -> i32;
+    fn UnlockFileEx(file: *mut c_void, reserved: u32, low: u32, high: u32, overlapped: *mut Overlapped) -> i32;
 }
 
 type Open = unsafe extern "system" fn(*const c_char, *mut *mut Db, c_int, *const c_char) -> c_int;
@@ -315,52 +327,47 @@ fn checksum(mut sum: (u32, u32), bytes: &[u8], big_endian: bool) -> (u32, u32) {
 }
 
 /// The database as of the last transaction committed in its log, with the log folded in and the
-/// header marked as having none, so SQLite reads the copy on its own. A frame after the last commit,
-/// a torn frame and any frame after one are left out, as SQLite itself leaves them out.
-pub(super) fn fold(mut db: Vec<u8>, wal: &[u8]) -> Option<Vec<u8>> {
+/// header marked as having none, so SQLite reads the copy on its own. As SQLite does, a log is used
+/// only for a database in WAL mode with a matching page size, and a frame after the last commit, a
+/// torn frame and any frame after one are left out. Nothing grows past `limit`.
+pub(super) fn fold(mut db: Vec<u8>, wal: &[u8], limit: u64) -> Option<Vec<u8>> {
     if db.len() < 100 || &db[..16] != b"SQLite format 3\0" || !matches!((db[18], db[19]), (1 | 2, 1 | 2)) {
         return None;
     }
-    if wal.len() >= WAL_HEADER {
-        let magic = be32(wal, 0);
-        let page = usize::try_from(be32(wal, 8)).ok()?;
-        let header_sum = (be32(wal, 24), be32(wal, 28));
-        let big_endian = magic & 1 == 1;
-        let db_page = match u16::from_be_bytes([db[16], db[17]]) {
-            1 => 65536,
-            size => usize::from(size),
-        };
-        let valid = magic & !1 == 0x377f_0682
-            && page == db_page
-            && be32(wal, 4) == 3_007_000
-            && page.is_power_of_two()
-            && (512..=65536).contains(&page)
-            && checksum((0, 0), &wal[..24], big_endian) == header_sum;
-        if valid {
-            let mut sum = header_sum;
-            let (mut pages, mut committed) = (Vec::new(), None);
-            for frame in wal[WAL_HEADER..].chunks_exact(FRAME_HEADER + page) {
-                if frame[8..16] != wal[16..24] {
-                    break;
-                }
-                sum = checksum(checksum(sum, &frame[..8], big_endian), &frame[FRAME_HEADER..], big_endian);
-                if sum != (be32(frame, 16), be32(frame, 20)) {
-                    break;
-                }
-                pages.push(frame);
-                if be32(frame, 4) != 0 {
-                    committed = Some(pages.len());
-                }
+    let db_page = match u16::from_be_bytes([db[16], db[17]]) {
+        1 => 65536,
+        size => usize::from(size),
+    };
+    let header_valid = db[18] == 2
+        && wal.len() >= WAL_HEADER
+        && be32(wal, 0) & !1 == 0x377f_0682
+        && be32(wal, 4) == 3_007_000
+        && usize::try_from(be32(wal, 8)).is_ok_and(|page| page == db_page && page.is_power_of_two() && page >= 512)
+        && checksum((0, 0), &wal[..24], be32(wal, 0) & 1 == 1) == (be32(wal, 24), be32(wal, 28));
+    if header_valid {
+        let (page, big_endian) = (db_page, be32(wal, 0) & 1 == 1);
+        let mut sum = (be32(wal, 24), be32(wal, 28));
+        let (mut frames, mut committed) = (Vec::new(), None);
+        for frame in wal[WAL_HEADER..].chunks_exact(FRAME_HEADER + page) {
+            if frame[8..16] != wal[16..24] {
+                break;
             }
-            if let Some(count) = committed {
-                let size = usize::try_from(be32(pages[count - 1], 4)).ok()?.checked_mul(page)?;
-                db.resize(size, 0);
-                for frame in &pages[..count] {
-                    let number = usize::try_from(be32(frame, 0)).ok()?.checked_sub(1)?;
-                    let at = number.checked_mul(page)?;
-                    if let Some(target) = db.get_mut(at..at + page) {
-                        target.copy_from_slice(&frame[FRAME_HEADER..]);
-                    }
+            sum = checksum(checksum(sum, &frame[..8], big_endian), &frame[FRAME_HEADER..], big_endian);
+            if sum != (be32(frame, 16), be32(frame, 20)) {
+                break;
+            }
+            frames.push(frame);
+            if be32(frame, 4) != 0 {
+                committed = Some(frames.len());
+            }
+        }
+        if let Some(count) = committed {
+            let size = u64::from(be32(frames[count - 1], 4)).checked_mul(page as u64).filter(|&size| size <= limit)?;
+            db.resize(usize::try_from(size).ok()?, 0);
+            for frame in &frames[..count] {
+                let at = usize::try_from(be32(frame, 0)).ok()?.checked_sub(1)?.checked_mul(page)?;
+                if let Some(target) = db.get_mut(at..at.checked_add(page)?) {
+                    target.copy_from_slice(&frame[FRAME_HEADER..]);
                 }
             }
         }
@@ -373,38 +380,150 @@ pub(super) fn fold(mut db: Vec<u8>, wal: &[u8]) -> Option<Vec<u8>> {
     Some(db)
 }
 
-/// A coherent copy of the database and its log. A writer that restarts the log changes its header
-/// first, so an unchanged header around the copy means every committed frame the copy needs is in it.
-/// A checkpoint during the copy only moves frames the log still holds. The handles share reading,
-/// writing and deletion, so the writer is never held back.
+#[repr(C)]
+struct Overlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    event: *mut c_void,
+}
+
+/// SQLite's lock bytes on Windows, past the end of any database Milo reads.
+const PENDING_BYTE: u32 = 0x4000_0000;
+const SHARED_FIRST: u32 = PENDING_BYTE + 2;
+const SHARED_SIZE: u32 = 510;
+const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x1;
+const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x2;
+
+fn lock(file: &File, offset: u32, len: u32, flags: u32) -> bool {
+    let mut overlapped = Overlapped { internal: 0, internal_high: 0, offset, offset_high: 0, event: ptr::null_mut() };
+    // SAFETY: The handle is open, the OVERLAPPED only names the range, and the call never waits.
+    unsafe { LockFileEx(file.as_raw_handle(), flags | LOCKFILE_FAIL_IMMEDIATELY, 0, len, 0, &raw mut overlapped) != 0 }
+}
+
+fn unlock(file: &File, offset: u32, len: u32) {
+    let mut overlapped = Overlapped { internal: 0, internal_high: 0, offset, offset_high: 0, event: ptr::null_mut() };
+    // SAFETY: As above; the range was locked through this handle.
+    unsafe { UnlockFileEx(file.as_raw_handle(), 0, len, 0, &raw mut overlapped) };
+}
+
+/// SQLite's own shared lock on the database, taken as SQLite takes it on Windows: through a brief
+/// pending lock, so a writer already waiting goes first. Locks change no bytes. While it is held,
+/// no connection can take the exclusive lock it needs to write a rollback-journal database in place,
+/// or to check its log into the database and delete it when it closes; it leaves the log instead.
+struct ReadLock<'a>(&'a File);
+
+impl<'a> ReadLock<'a> {
+    fn take(file: &'a File) -> Option<Self> {
+        if !lock(file, PENDING_BYTE, 1, LOCKFILE_EXCLUSIVE_LOCK) {
+            return None;
+        }
+        let shared = lock(file, SHARED_FIRST, SHARED_SIZE, 0);
+        unlock(file, PENDING_BYTE, 1);
+        shared.then_some(Self(file))
+    }
+}
+
+impl Drop for ReadLock<'_> {
+    fn drop(&mut self) {
+        unlock(self.0, SHARED_FIRST, SHARED_SIZE);
+    }
+}
+
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// The file now at `path`, if any, opened without following a link.
+fn reopen(path: &Path) -> io::Result<Option<(u64, u64)>> {
+    match fs_ops::open_read(path) {
+        Ok(file) => crate::sys::identity(&file).map(Some),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+enum Attempt {
+    Copied(Vec<u8>),
+    /// A writer was busy; a later attempt may find the files settled.
+    Again,
+    Unreadable,
+}
+
+/// One copy of the database and its log under SQLite's shared lock. The copy stands only if the
+/// files at both names are the ones read, the database kept its size, and the log kept the header
+/// it had before the database was read: SQLite rewrites that header before it reuses or empties
+/// the log, and a checkpoint during the copy only moves frames the log still holds.
+fn copy(path: &Path, limit: u64) -> Attempt {
+    let Ok(db) = fs_ops::open_read(path) else { return Attempt::Unreadable };
+    let Some(_lock) = ReadLock::take(&db) else { return Attempt::Again };
+    // A journal that starts with anything but zero belongs to a transaction only its writer can finish or undo.
+    match fs_ops::open_read(&sidecar(path, "-journal")) {
+        Ok(journal) if header(&journal).is_none_or(|start| start.first().is_some_and(|&b| b != 0)) => {
+            return Attempt::Again;
+        }
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Attempt::Unreadable,
+        _ => {}
+    }
+    let log = sidecar(path, "-wal");
+    let (Ok(identity), Ok(size)) = (crate::sys::identity(&db), db.metadata().map(|m| m.len())) else {
+        return Attempt::Unreadable;
+    };
+    let wal = match fs_ops::open_read(&log) {
+        Ok(file) => Some(file),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(_) => return Attempt::Unreadable,
+    };
+    let before = match &wal {
+        Some(file) => match (header(file), crate::sys::identity(file)) {
+            (Some(header), Ok(identity)) => Some((header, identity)),
+            _ => return Attempt::Unreadable,
+        },
+        None => None,
+    };
+    let Some(bytes) = read_all(&db, limit) else { return Attempt::Unreadable };
+    let frames = match &wal {
+        Some(file) => match read_all(file, limit.saturating_sub(bytes.len() as u64)) {
+            Some(frames) => frames,
+            None => return Attempt::Unreadable,
+        },
+        None => Vec::new(),
+    };
+    let after = match &wal {
+        Some(file) => header(file).zip(crate::sys::identity(file).ok()),
+        None => None,
+    };
+    let start = &frames[..WAL_HEADER.min(frames.len())];
+    let settled = before == after
+        && before.as_ref().is_none_or(|(header, _)| header[..] == *start)
+        && reopen(path).ok() == Some(Some(identity))
+        && reopen(&log).ok() == Some(before.as_ref().map(|&(_, identity)| identity))
+        && db.metadata().is_ok_and(|m| m.len() == size);
+    if !settled {
+        return Attempt::Again;
+    }
+    match fold(bytes, &frames, limit) {
+        Some(image) => Attempt::Copied(image),
+        None => Attempt::Unreadable,
+    }
+}
+
+/// A coherent copy, or None once the deadline passes or a writer keeps every attempt from settling.
 pub(super) fn snapshot(path: &Path, limit: u64, deadline: Instant) -> Option<Vec<u8>> {
-    let mut log = path.as_os_str().to_owned();
-    log.push("-wal");
-    for _ in 0..ATTEMPTS {
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(RETRY);
+        }
         if Instant::now() >= deadline {
             return None;
         }
-        let wal = match fs_ops::open_read(Path::new(&log)) {
-            Ok(file) => Some(file),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-            Err(_) => return None,
-        };
-        let before = match &wal {
-            Some(file) => Some(header(file)?),
-            None => None,
-        };
-        let db = read_all(&fs_ops::open_read(path).ok()?, limit)?;
-        let frames = match &wal {
-            Some(file) => read_all(file, limit.saturating_sub(db.len() as u64))?,
-            None => Vec::new(),
-        };
-        let after = match &wal {
-            Some(file) => Some(header(file)?),
-            None => std::fs::symlink_metadata(&log).is_ok().then(Vec::new),
-        };
-        let start = &frames[..WAL_HEADER.min(frames.len())];
-        if before == after && before.as_deref().unwrap_or_default() == start {
-            return fold(db, &frames);
+        match copy(path, limit) {
+            Attempt::Copied(image) => return Some(image),
+            Attempt::Again => {}
+            Attempt::Unreadable => return None,
         }
     }
     None
@@ -413,9 +532,7 @@ pub(super) fn snapshot(path: &Path, limit: u64, deadline: Instant) -> Option<Vec
 /// Whether a database and its log hold more than a query on Windows copies.
 pub(in crate::usage) fn too_large(path: &Path) -> bool {
     let size = |path: &Path| std::fs::symlink_metadata(path).map_or(0, |metadata| metadata.len());
-    let mut log = path.as_os_str().to_owned();
-    log.push("-wal");
-    size(path).saturating_add(size(Path::new(&log))) > MAX_SNAPSHOT
+    size(path).saturating_add(size(&sidecar(path, "-wal"))) > MAX_SNAPSHOT
 }
 
 /// Bound memory, output and wall time; the database's own files are only ever read.
@@ -460,7 +577,11 @@ impl Writer {
     }
 
     pub(in crate::usage) fn exec(&self, sql: &str) {
-        assert!(self.0.run(&CString::new(sql).unwrap(), usize::MAX).is_some(), "failed: {sql}");
+        assert!(self.try_exec(sql), "failed: {sql}");
+    }
+
+    fn try_exec(&self, sql: &str) -> bool {
+        self.0.run(&CString::new(sql).unwrap(), usize::MAX).is_some()
     }
 }
 

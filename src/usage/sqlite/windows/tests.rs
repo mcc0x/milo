@@ -28,12 +28,6 @@ fn busy(f: &Fixture) -> (PathBuf, Writer) {
     (path, writer)
 }
 
-fn sidecar(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(suffix);
-    PathBuf::from(name)
-}
-
 /// Every name in the folder with its bytes. The writer's shared-memory file is read like the rest.
 fn state(folder: &Path) -> Vec<(String, Vec<u8>)> {
     let mut files: Vec<_> = fs::read_dir(folder)
@@ -134,16 +128,114 @@ fn a_torn_frame_ends_the_log_there() {
              SELECT value, randomblob(100) FROM s;");
     }
     let (db, wal) = (fs::read(&path).unwrap(), fs::read(sidecar(&path, "-wal")).unwrap());
-    let whole = fold(db.clone(), &wal).unwrap();
+    let whole = fold(db.clone(), &wal, MAX_SNAPSHOT).unwrap();
     assert!(whole.len() > db.len());
     let page = usize::try_from(be32(&wal, 8)).unwrap();
     let mut torn = wal.clone();
     let last = WAL_HEADER + (wal.len() - WAL_HEADER) / (FRAME_HEADER + page) * (FRAME_HEADER + page);
     torn[last - 1] ^= 1;
-    assert!(fold(db.clone(), &torn).unwrap() != whole);
+    assert!(fold(db.clone(), &torn, MAX_SNAPSHOT).unwrap() != whole);
     let mut foreign = wal.clone();
     foreign[16] ^= 1;
-    assert_eq!(fold(db.clone(), &foreign).unwrap()[100..], db[100..]);
+    assert_eq!(fold(db.clone(), &foreign, MAX_SNAPSHOT).unwrap()[100..], db[100..]);
+    assert!(fold(db.clone(), &wal, whole.len() as u64 - 1).is_none(), "a log may not grow the copy past the limit");
+    let mut rollback = db.clone();
+    rollback[18] = 1;
+    rollback[19] = 1;
+    assert_eq!(
+        fold(rollback.clone(), &wal, MAX_SNAPSHOT).unwrap(),
+        rollback,
+        "a log beside a rollback database is not used"
+    );
+}
+
+/// A valid log in little-endian checksum order with the given frames: page number, the database's
+/// size in pages if the frame commits, and the byte the page is filled with.
+fn log(page: usize, frames: &[(u32, u32, u8)]) -> Vec<u8> {
+    let mut wal = Vec::new();
+    for word in [0x377f_0682_u32, 3_007_000, u32::try_from(page).unwrap(), 0, 7, 9] {
+        wal.extend_from_slice(&word.to_be_bytes());
+    }
+    let mut sum = checksum((0, 0), &wal, false);
+    wal.extend_from_slice(&sum.0.to_be_bytes());
+    wal.extend_from_slice(&sum.1.to_be_bytes());
+    for &(number, commit, fill) in frames {
+        let mut frame = Vec::new();
+        for word in [number, commit, 7, 9] {
+            frame.extend_from_slice(&word.to_be_bytes());
+        }
+        let data = vec![fill; page];
+        sum = checksum(checksum(sum, &frame[..8], false), &data, false);
+        frame.extend_from_slice(&sum.0.to_be_bytes());
+        frame.extend_from_slice(&sum.1.to_be_bytes());
+        wal.extend(frame);
+        wal.extend(data);
+    }
+    wal
+}
+
+/// Three pages of 512 bytes in WAL mode, page 1 starting with a database header.
+fn small_db() -> Vec<u8> {
+    let mut db = vec![0; 3 * 512];
+    db[..16].copy_from_slice(b"SQLite format 3\0");
+    db[16..18].copy_from_slice(&512_u16.to_be_bytes());
+    db[18] = 2;
+    db[19] = 2;
+    db
+}
+
+#[test]
+fn a_crafted_log_is_folded_only_as_far_as_its_last_commit_and_never_past_its_bounds() {
+    let db = small_db();
+    let folded = fold(db.clone(), &log(512, &[(2, 0, 0xaa), (3, 3, 0xbb), (2, 0, 0xcc)]), MAX_SNAPSHOT).unwrap();
+    assert!(folded[512..1024].iter().all(|&b| b == 0xaa) && folded[1024..].iter().all(|&b| b == 0xbb));
+    assert_eq!(folded.len(), 3 * 512);
+    assert_eq!((folded[18], folded[19]), (1, 1));
+
+    let shrunk = fold(db.clone(), &log(512, &[(3, 2, 0xbb)]), MAX_SNAPSHOT).unwrap();
+    assert_eq!(shrunk.len(), 2 * 512, "a page past the committed size is dropped");
+    assert!(fold(db.clone(), &log(512, &[(0, 1, 0xbb)]), MAX_SNAPSHOT).is_none(), "page 0 does not exist");
+    assert!(fold(db.clone(), &log(512, &[(2, u32::MAX, 0xbb)]), MAX_SNAPSHOT).is_none());
+    assert_eq!(fold(db.clone(), &log(1024, &[(2, 3, 0xbb)]), MAX_SNAPSHOT).unwrap()[100..], db[100..]);
+    let header_only = log(512, &[]);
+    assert_eq!(fold(db.clone(), &header_only[..20], MAX_SNAPSHOT).unwrap()[100..], db[100..]);
+    assert_eq!(fold(db.clone(), &log(512, &[(1, 3, 0x11)]), MAX_SNAPSHOT), None, "page 1 lost its header");
+    assert!(fold(db[..99].to_vec(), &[], MAX_SNAPSHOT).is_none());
+}
+
+#[test]
+fn the_read_lock_is_the_one_sqlite_honours() {
+    let f = Fixture::folder();
+    let path = f.root.join("journal.db");
+    let writer = Writer::open(&path);
+    writer.exec("CREATE TABLE t(n); INSERT INTO t VALUES (1);");
+    let file = fs_ops::open_read(&path).unwrap();
+    let held = ReadLock::take(&file).unwrap();
+    assert!(!writer.try_exec("INSERT INTO t VALUES (2)"), "a writer changed the database under the read lock");
+    drop(held);
+    writer.exec("INSERT INTO t VALUES (2)");
+
+    writer.exec("BEGIN EXCLUSIVE;");
+    assert!(snapshot(&path, MAX_SNAPSHOT, Instant::now() + WAIT).is_none());
+    writer.exec("COMMIT;");
+    assert_eq!(count(&path), "[{\"c\":2}]\n");
+
+    fs::write(sidecar(&path, "-journal"), [0xd9, 0xd5, 0x05, 0xf9]).unwrap();
+    assert!(snapshot(&path, MAX_SNAPSHOT, Instant::now() + WAIT).is_none(), "a hot journal was ignored");
+    fs::write(sidecar(&path, "-journal"), [0; 28]).unwrap();
+    assert_eq!(count(&path), "[{\"c\":2}]\n");
+}
+
+#[test]
+fn a_writer_that_closes_during_a_copy_leaves_its_log() {
+    let f = Fixture::folder();
+    let (path, writer) = busy(&f);
+    let file = fs_ops::open_read(&path).unwrap();
+    let held = ReadLock::take(&file).unwrap();
+    drop(writer);
+    assert!(sidecar(&path, "-wal").exists(), "the closing writer checked in and deleted its log");
+    drop(held);
+    assert_eq!(count(&path), "[{\"c\":1}]\n");
 }
 
 #[test]
