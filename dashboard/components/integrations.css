@@ -62,14 +62,28 @@
 .integration-mark { display: grid; place-items: center; inline-size: 2.2rem; block-size: 2.2rem; border-radius: .65rem; background: #dfedfb; }
 .integration-mark[data-kind="presence"] { background: #e7e5fa; color: #504a8d; }
 .integration-mark[data-kind="alerts"] { background: #f8eadb; color: #84562d; }
+.integration-mark[data-kind="telemetry"] { background: #daeee4; color: #245d49; }
+.telemetry-settings { max-inline-size: 39rem; }
+.telemetry-settings > .setting { border-block-end: 1px solid var(--line); }
+.telemetry-settings > p { margin-block-start: .65rem; }
+.telemetry-settings .integration-switch { flex: none; }
+.telemetry-settings .integration-switch[aria-disabled=true] { opacity: .65; cursor: wait; }
 .integration-state { color: var(--muted); background: #e5ebf1; border-radius: 1rem; padding: .18rem .52rem; font-size: .72rem; font-weight: 650; }
 .integration-state[data-state="on"] { color: #245d49; background: #daeee4; }
 .integration-state[data-state="warning"] { color: #774e19; background: #fbecd3; }
 @media (max-width: 30rem) {
   /* A title, its timing note and an action do not fit one line of a narrow panel. */
   .integration-heading { flex-wrap: wrap; }
-  .integration-row { padding-inline: .1rem; column-gap: .35rem; }
+  .integrations:has(.integrations-list) { gap: .6rem; }
+  .integrations:has(.telemetry-settings) { gap: .55rem; }
+  .telemetry-settings > p { margin-block-start: .45rem; }
+  .integration-row { padding: .375rem .1rem; column-gap: .35rem; }
   .integration-state[data-state="unavailable"] { grid-column: 2/-1; justify-self: start; }
+  .integration-row[data-kind="telemetry"] { grid-template-columns: auto minmax(0, 1fr) auto; row-gap: .18rem; }
+  .integration-row[data-kind="telemetry"] .integration-mark { grid-row: 1 / span 2; }
+  .integration-row[data-kind="telemetry"] .setting-detail { display: none; }
+  .integration-row[data-kind="telemetry"] .integration-state { grid-area: 2 / 2; justify-self: start; }
+  .integration-row[data-kind="telemetry"] .integration-chevron { grid-area: 1 / 3 / span 2; }
 }
 
 .integration-switch { display: inline-flex; align-items: center; justify-content: flex-end; gap: .4rem; min-height: 44px; padding: 0 .25rem; border: 0; background: transparent; color: var(--muted); font-size: .78rem; font-weight: 650; }

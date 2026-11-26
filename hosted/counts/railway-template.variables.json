@@ -1,0 +1,5 @@
+{
+  "DATABASE_URL": "${{counts-postgres.DATABASE_URL}}",
+  "MILO_COUNTS_ADMIN_USER": "${{secret(32, \"0123456789abcdef\")}}",
+  "MILO_COUNTS_ADMIN_PASSWORD": "${{secret(64, \"0123456789abcdef\")}}"
+}

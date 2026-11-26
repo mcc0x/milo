@@ -3,15 +3,17 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import Alerts from './alerts';
 import HeaderAction from './header-action';
-import { GroupCard, SwitchSetting } from './controls';
+import { GroupCard, SettingRow, SwitchSetting } from './controls';
 import Presence from './presence';
 import { useSession } from './session';
+import type { TelemetryStatus } from './session-state';
 import './integrations.css';
 
 const names = {
   automation: 'Rex automation',
   presence: 'Discord presence',
   alerts: 'Alert forwarding',
+  telemetry: 'Anonymous usage counts',
 } as const;
 
 type Detail = keyof typeof names;
@@ -21,6 +23,7 @@ function IntegrationMark({kind}: {kind: Detail}) {
     {kind === 'automation' ? <img src="/rex.png" alt="" width="23" height="23"/> :
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
         {kind === 'presence' ? <><path d="M4 4h16v12H9l-5 4z"/><path d="M8 10h2l1-2 2 4 1-2h2"/></> :
+          kind === 'telemetry' ? <path d="M4 4v15h16M8 15v-4m5 4V6m5 9V9"/> :
           <><path d="M3 6h9M3 11h6m-6 5h4m4-1 9-9m-7 0h7v7"/></>}
       </svg>}
   </span>;
@@ -49,13 +52,42 @@ function RexAutomation() {
 const unavailable = 'Not available in this session';
 const alertDestinations = [['telegram', 'Telegram'], ['discord', 'Discord']] as const;
 
+const telemetryStatus: Record<TelemetryStatus, string> = {
+  off: 'Your saved preference is off.',
+  suppressed: 'This environment disables sending, regardless of your saved preference.',
+  unconfigured: 'This build has no reporting server configured.',
+  on: 'The first eligible launch sends nothing. Later launches may send counts.',
+};
+
+function AnonymousCounts() {
+  const {state, paused, running, closing, queue, command} = useSession();
+  const telemetry = state.telemetry;
+  if (!telemetry) return null;
+  const waiting = paused || running || closing || queue.some(item => item.action !== 'set');
+  return (
+    <section aria-labelledby="integrations-title" className="telemetry-settings">
+      <SettingRow label="Allow anonymous counts" htmlFor="telemetry-change"
+        detail="For your user account, across all projects." detailId="telemetry-scope">
+        <button type="button" role="switch" id="telemetry-change" className="integration-switch"
+          aria-checked={telemetry.enabled} aria-disabled={waiting || undefined} aria-describedby="telemetry-scope telemetry-status"
+          onClick={() => { if (!waiting) command('telemetry', {value: !telemetry.enabled}); }}>
+          <span>{telemetry.enabled ? 'On' : 'Off'}</span><i aria-hidden="true"/>
+        </button>
+      </SettingRow>
+      <p className="setting-detail" role="status" id="telemetry-status">{telemetryStatus[telemetry.status]}</p>
+      <p className="setting-detail">Reports send only the UTC date and two yes/no fields: first report from this installation and first report this month.</p>
+      <p className="setting-detail">The receiving app stores totals only. Network infrastructure may log IP addresses.</p>
+    </section>
+  );
+}
+
 export default function Integrations() {
   const { state, draftValue, command } = useSession();
   const [detail, setDetail] = useState<Detail | null>(null);
   const returnTo = useRef<Detail | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
-  const { presence, alerts, capabilities } = state;
-  const available = { automation: !state.unsupported?.automation, presence: presence !== null, alerts: alerts !== null };
+  const { presence, alerts, telemetry } = state;
+  const available = { automation: !state.unsupported?.automation, presence: presence !== null, alerts: alerts !== null, telemetry: telemetry !== null };
 
   useLayoutEffect(() => {
     if (detail) {
@@ -83,11 +115,13 @@ export default function Integrations() {
     automation: state.unsupported?.automation ?? (rules ? `${rules} ${rules === 1 ? 'rule' : 'rules'} on` : 'Off'),
     presence: presence ? (presence.enabled ? 'On' : 'Off') : state.unsupported?.presence ?? unavailable,
     alerts: alerts?.health ?? state.unsupported?.alerts ?? unavailable,
+    telemetry: telemetry ? telemetry.status === 'on' ? 'On' : telemetry.status === 'off' ? 'Off' : 'Not sending' : unavailable,
   };
   const descriptions = {
     automation: 'Tab titles and new shell layouts',
     presence: 'What appears on your Discord profile',
     alerts: listedAlerts.length ? listedAlerts.map(([, label]) => label).join(' and ') : 'Send Rex alerts to a chat or channel',
+    telemetry: 'Manage daily and monthly installation counts',
   };
   const timing = detail && available[detail] ? (detail === 'automation' ? 'Save to apply changes' : 'Applies immediately') : '';
 
@@ -115,7 +149,7 @@ export default function Integrations() {
           {(Object.keys(names) as Detail[]).map(key => (
             <li key={key}>
               <button type="button" className="integration-row" id={`integration-${key}`} aria-label={names[key]}
-                aria-describedby={`integration-${key}-summary`} disabled={!available[key]} onClick={() => open(key)}>
+                data-kind={key} aria-describedby={`integration-${key}-summary`} disabled={!available[key]} onClick={() => open(key)}>
                 <IntegrationMark kind={key}/>
                 <span className="setting-info">
                   <span className="setting-label">{names[key]}</span>
@@ -123,7 +157,8 @@ export default function Integrations() {
                 </span>
                 <span className="integration-state" id={`integration-${key}-summary`}
                   data-state={!available[key] ? 'unavailable' : key === 'alerts' && forwarding && !alerts?.running ? 'warning' :
-                    (key === 'automation' ? rules > 0 : key === 'presence' ? presence?.enabled : forwarding) ? 'on' : 'off'}>
+                    (key === 'automation' ? rules > 0 : key === 'presence' ? presence?.enabled :
+                      key === 'telemetry' ? telemetry?.status === 'on' : forwarding) ? 'on' : 'off'}>
                   {summaries[key]}
                 </span>
                 {available[key] ? <span className="integration-chevron" aria-hidden="true">›</span> : null}
@@ -135,7 +170,7 @@ export default function Integrations() {
         <p className="setting-detail">{summaries[detail]}</p>
       ) : detail === 'automation' ? (
         <RexAutomation />
-      ) : detail === 'presence' ? <Presence /> : <Alerts />}
+      ) : detail === 'presence' ? <Presence /> : detail === 'alerts' ? <Alerts /> : <AnonymousCounts />}
     </div>
   );
 }

@@ -2,6 +2,12 @@
 
 Merge the version and packaging changes first. Keep the hosted installer, tap and public download links on the previous release until the new assets are live. The release binary cannot contain a pin to its own checksum.
 
+## Keep qualification out of installation counts
+
+Ordinary builds (including `cargo build --release` and `--all-features`), PRs and candidate packages have no production counts endpoint. An authorized distribution build must separately supply both the Rust compiler configuration `--cfg milo_distribution_counts` and a validated build-time HTTPS `MILO_COUNTS_ENDPOINT`. Neither has any effect as a runtime setting. Do not change the candidate workflow to test collection. The only positive reporting fixtures use a disposable binary compiled for a loopback receiver and throwaway Postgres. Never distribute that binary.
+
+When testing **exact released bytes**, set `MILO_TELEMETRY=0` in the lab environment **before the first launch**, including terminal multiplexers, shells, child panes and helpers. On Unix export it before starting the session; on Windows set `$env:MILO_TELEMETRY = '0'` in the process starting Milo. Carry it explicitly through clean environment lists and service/VM launchers; a variable in one shell cannot affect a process another shell already started. It overrides a saved On preference, does not record the first launch and does not claim a day or queue a report. Do not identify VMs or exclude customers just because they use one.
+
 ## Retain the bytes the Mac job tested
 
 The usual **Release tests** runs retain no installer. To qualify a release from `main`, dispatch that workflow with a one-time **public** recipient certificate. This repository is public, so the jobs upload only encrypted candidates. The workflow creates no tag or release.

@@ -6,6 +6,7 @@ export type PresenceDetails = 'generic' | 'session' | 'project' | 'both';
 export type AlertKind = 'blocked' | 'error' | 'done' | 'notification' | 'bell';
 export type AlertDestination = 'telegram' | 'discord';
 export type MenuIndicator = 'quota' | 'cpu' | 'memory';
+export type TelemetryStatus = 'off' | 'suppressed' | 'unconfigured' | 'on';
 
 export interface GroupState {
   scope: Scope | 'default';
@@ -129,6 +130,7 @@ export interface SessionState {
   host: HostState | null;
   alerts: AlertsState | null;
   presence: PresenceState | null;
+  telemetry: {enabled: boolean; status: TelemetryStatus} | null;
   /** Why alerts or presence cannot be offered on this platform, when that is the reason. */
   unsupported?: {alerts: string; presence: string; automation: string};
 }

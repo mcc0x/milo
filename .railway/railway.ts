@@ -1,4 +1,4 @@
-import { defineRailway, github, project, service, volume } from "railway/iac";
+import { defineRailway, github, postgres, project, service, volume } from "railway/iac";
 
 export default defineRailway((ctx) => {
   if (!ctx.isEnvironment("production")) throw new Error("This configuration manages Milo production only.");
@@ -29,8 +29,18 @@ export default defineRailway((ctx) => {
     volumeMounts: { "/data": volume("telegram-bindings", { sizeMB: 512, region: "us-west2" }) },
   });
 
+  const countsDatabase = postgres("counts-postgres", { region: "us-west2" });
+
+  const counts = service("counts", {
+    source: github("mcc0x/milo", { branch: "main", checkSuites: true, rootDirectory: "/hosted/counts" }),
+    build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile", watchPatterns: ["/hosted/counts/**"] },
+    healthcheck: "/readyz",
+    healthcheckTimeout: 90,
+    replicas: { "us-west2": 1 },
+  });
+
   return project("Milo", {
     variables: { managed: false },
-    resources: [site, connect],
+    resources: [site, connect, countsDatabase, counts],
   });
 });

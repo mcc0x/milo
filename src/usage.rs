@@ -34,6 +34,7 @@ use crate::{paths, preferences, when};
 use self::files::{Budget, FileVersion, Reverse, SessionFile, SessionRoot, Sessions, SnapshotVersion, Stream, Tree};
 use self::time::Timestamp;
 
+pub(crate) use http::{counts_protocol, post_anonymous_counts};
 pub use menu::menu_stream;
 
 const CLOCK_SKEW: i64 = 5 * MINUTE;

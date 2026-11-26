@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 @contextmanager
 def editor(binary, home, delay=None):
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "config"),
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "config"), "MILO_TELEMETRY": "0",
            "XDG_STATE_HOME": str(home / "state"), "XDG_RUNTIME_DIR": str(home / "run"),
            "PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
     if delay is not None:

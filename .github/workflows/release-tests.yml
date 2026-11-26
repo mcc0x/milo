@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+env:
+  MILO_COUNTS_ENDPOINT: ''
+  MILO_TELEMETRY: '0'
+
 jobs:
   macos-changes:
     name: Decide whether macOS tests are needed
@@ -88,6 +92,45 @@ jobs:
           path: ${{ runner.temp }}/milo-linux.tar.p7m
           if-no-files-found: error
           retention-days: 14
+
+  anonymous-counts:
+    name: Anonymous counts with disposable Postgres
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.5
+      - run: rustup toolchain install 1.91.0 --profile minimal
+      - name: Test the receiver, private dashboard and native first-launch gate on loopback
+        env:
+          RUSTUP_TOOLCHAIN: 1.91.0
+          DO_NOT_TRACK: 1
+        run: |
+          test -x "$(pg_config --bindir)/initdb" || (sudo apt-get update && sudo apt-get install -y postgresql)
+          export PG_BIN="$(pg_config --bindir)"
+          pg=hosted/counts/scripts/pg-ephemeral.sh
+          "$pg" bun test ./hosted/counts/counts.integration.ts
+          export MILO_TEST_WITHOUT_CURL="$RUNNER_TEMP/without-curl"
+          cat > "$MILO_TEST_WITHOUT_CURL" <<'SH'
+          #!/bin/sh
+          exec sudo -n unshare --mount --propagation private sh -ec '
+            mount --bind /dev/null /usr/bin/curl
+            test ! -x /usr/bin/curl
+            exec setpriv --reuid="$1" --regid="$2" --clear-groups env -i HOME="$3" PATH=/usr/bin:/bin TERM=xterm-256color "$4" outline
+          ' sh "$(id -u)" "$(id -g)" "$HOME" "$1"
+          SH
+          chmod 700 "$MILO_TEST_WITHOUT_CURL"
+          "$pg" python3 tests/anonymous-counts.py
+      - name: Build the standalone receiver image and check that it fails closed
+        run: |
+          docker build -t milo-counts:ci hosted/counts
+          status=0
+          docker run --rm --network none milo-counts:ci || status=$?
+          test "$status" = 1
 
   dashboard:
     name: Dashboard production export
