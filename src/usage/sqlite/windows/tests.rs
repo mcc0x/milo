@@ -53,6 +53,10 @@ fn count(path: &Path) -> String {
     String::from_utf8(bytes).unwrap()
 }
 
+fn later() -> Instant {
+    Instant::now() + WAIT
+}
+
 fn direct(path: &Path, sql: &str, max: usize) -> Option<Vec<u8>> {
     query(path, sql, Instant::now() + WAIT, max)
 }
@@ -73,8 +77,6 @@ fn a_log_being_written_is_read_in_the_sqlite_shell_json_form_and_left_as_it_was(
     let before = state(folder);
     let names: Vec<_> = before.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(names, ["agent.db", "agent.db-shm", "agent.db-wal"]);
-    let shm = fs_ops::open_read(&sidecar(&path, "-shm")).unwrap();
-    assert!(matches!(published(&shm), Some(End::Published { frames, .. }) if frames > 0));
     let sql = "PRAGMA query_only=ON;\nPRAGMA trusted_schema=OFF;\nSELECT * FROM t; -- done\n";
     let bytes = checked_query(executable(), &path, sql, WAIT).unwrap();
     assert_eq!(
@@ -162,28 +164,28 @@ fn a_torn_frame_or_a_frame_from_another_log_ends_the_log_at_the_commit_before_it
     assert_eq!(db, db0, "the fixture checkpointed");
     let page = usize::try_from(be32(&wal, 8)).unwrap();
     let frame = FRAME_HEADER + page;
-    let earlier = fold(db.clone(), &wal0, End::Recovered, MAX_SNAPSHOT).unwrap();
-    let whole = fold(db.clone(), &wal, End::Recovered, MAX_SNAPSHOT).unwrap();
+    let earlier = fold(db.clone(), &wal0, MAX_SNAPSHOT, later()).unwrap();
+    let whole = fold(db.clone(), &wal, MAX_SNAPSHOT, later()).unwrap();
     assert!(whole != earlier);
 
     let first_new = WAL_HEADER + (wal0.len() - WAL_HEADER) / frame * frame;
     let mut torn = wal.clone();
     torn[first_new + FRAME_HEADER] ^= 1;
-    assert_eq!(fold(db.clone(), &torn, End::Recovered, MAX_SNAPSHOT).unwrap(), earlier);
+    assert_eq!(fold(db.clone(), &torn, MAX_SNAPSHOT, later()).unwrap(), earlier);
     let mut foreign = wal.clone();
     foreign[first_new + 8] ^= 1;
-    assert_eq!(fold(db.clone(), &foreign, End::Recovered, MAX_SNAPSHOT).unwrap(), earlier);
-    assert!(fold(db.clone(), &wal, End::Recovered, whole.len() as u64 - 1).is_none());
+    assert_eq!(fold(db.clone(), &foreign, MAX_SNAPSHOT, later()).unwrap(), earlier);
+    assert!(fold(db.clone(), &wal, whole.len() as u64 - 1, later()).is_none());
     let mut rollback = db.clone();
     rollback[18] = 1;
     rollback[19] = 1;
-    assert_eq!(fold(rollback.clone(), &wal, End::Recovered, MAX_SNAPSHOT).unwrap(), rollback);
+    assert_eq!(fold(rollback.clone(), &wal, MAX_SNAPSHOT, later()).unwrap(), rollback);
     let mut version = wal.clone();
     version[4..8].copy_from_slice(&3_007_001_u32.to_be_bytes());
     let sum = checksum((0, 0), &version[..24], false);
     version[24..28].copy_from_slice(&sum.0.to_be_bytes());
     version[28..32].copy_from_slice(&sum.1.to_be_bytes());
-    assert!(fold(db.clone(), &version, End::Recovered, MAX_SNAPSHOT).is_none(), "an unknown log version was skipped");
+    assert!(fold(db.clone(), &version, MAX_SNAPSHOT, later()).is_none(), "an unknown log version was skipped");
 }
 
 /// A valid log in little-endian checksum order with the given frames: page number, the database's
@@ -221,47 +223,37 @@ fn small_db() -> Vec<u8> {
     db
 }
 
-const SALTS: [u8; 8] = [0, 0, 0, 7, 0, 0, 0, 9];
-
 #[test]
 fn a_crafted_log_is_folded_only_to_its_end_and_never_past_its_bounds() {
     let db = small_db();
     let three = log(512, &[(2, 0, 0xaa), (3, 3, 0xbb), (2, 3, 0xcc)]);
-    let all = fold(db.clone(), &three, End::Recovered, MAX_SNAPSHOT).unwrap();
+    let all = fold(db.clone(), &three, MAX_SNAPSHOT, later()).unwrap();
     assert!(all[512..1024].iter().all(|&b| b == 0xcc) && all[1024..].iter().all(|&b| b == 0xbb));
     assert_eq!((all[18], all[19]), (1, 1));
-    let first = fold(db.clone(), &three, End::Published { frames: 2, salts: SALTS }, MAX_SNAPSHOT).unwrap();
-    assert!(first[512..1024].iter().all(|&b| b == 0xaa), "a frame after the published end was used");
-    assert!(fold(db.clone(), &three, End::Published { frames: 1, salts: SALTS }, MAX_SNAPSHOT).is_none());
-    assert!(fold(db.clone(), &three, End::Published { frames: 4, salts: SALTS }, MAX_SNAPSHOT).is_none());
-    assert!(fold(db.clone(), &three, End::Published { frames: 2, salts: [1; 8] }, MAX_SNAPSHOT).is_none());
-    assert_eq!(
-        fold(db.clone(), &three, End::Published { frames: 0, salts: [1; 8] }, MAX_SNAPSHOT).unwrap()[100..],
-        db[100..]
-    );
     let uncommitted = log(512, &[(2, 3, 0xaa), (3, 0, 0xbb)]);
-    let folded = fold(db.clone(), &uncommitted, End::Recovered, MAX_SNAPSHOT).unwrap();
+    let folded = fold(db.clone(), &uncommitted, MAX_SNAPSHOT, later()).unwrap();
     assert!(folded[512..1024].iter().all(|&b| b == 0xaa) && folded[1024..].iter().all(|&b| b == 0));
 
-    let shrunk = fold(db.clone(), &log(512, &[(3, 2, 0xbb)]), End::Recovered, MAX_SNAPSHOT).unwrap();
+    let shrunk = fold(db.clone(), &log(512, &[(3, 2, 0xbb)]), MAX_SNAPSHOT, later()).unwrap();
     assert_eq!(shrunk.len(), 2 * 512, "a page past the committed size is dropped");
-    assert!(fold(db.clone(), &log(512, &[(0, 1, 0xbb)]), End::Recovered, MAX_SNAPSHOT).is_none());
-    assert!(fold(db.clone(), &log(512, &[(2, u32::MAX, 0xbb)]), End::Recovered, MAX_SNAPSHOT).is_none());
-    assert!(fold(db.clone(), &log(1024, &[(2, 3, 0xbb)]), End::Recovered, MAX_SNAPSHOT).is_none());
-    assert_eq!(fold(db.clone(), &log(512, &[])[..20], End::Recovered, MAX_SNAPSHOT).unwrap()[100..], db[100..]);
-    assert!(fold(db.clone(), &log(512, &[(1, 3, 0x11)]), End::Recovered, MAX_SNAPSHOT).is_none());
-    assert!(fold(db[..99].to_vec(), &[], End::Recovered, MAX_SNAPSHOT).is_none());
+    assert!(fold(db.clone(), &log(512, &[(0, 1, 0xbb)]), MAX_SNAPSHOT, later()).is_none());
+    assert!(fold(db.clone(), &log(512, &[(2, u32::MAX, 0xbb)]), MAX_SNAPSHOT, later()).is_none());
+    assert!(fold(db.clone(), &log(1024, &[(2, 3, 0xbb)]), MAX_SNAPSHOT, later()).is_none());
+    assert_eq!(fold(db.clone(), &log(512, &[])[..20], MAX_SNAPSHOT, later()).unwrap()[100..], db[100..]);
+    assert!(fold(db.clone(), &log(512, &[(1, 3, 0x11)]), MAX_SNAPSHOT, later()).is_none());
+    assert!(fold(db[..99].to_vec(), &[], MAX_SNAPSHOT, later()).is_none());
+    assert!(fold(db.clone(), &three, MAX_SNAPSHOT, Instant::now()).is_none(), "a passed deadline still folded");
 
     let mut write_only = db.clone();
     write_only[19] = 1;
-    assert_eq!(fold(write_only, &three, End::Recovered, MAX_SNAPSHOT).unwrap()[100..], db[100..]);
+    assert_eq!(fold(write_only, &three, MAX_SNAPSHOT, later()).unwrap()[100..], db[100..]);
     let mut unknown = db.clone();
     unknown[19] = 3;
-    assert!(fold(unknown, &three, End::Recovered, MAX_SNAPSHOT).is_none());
+    assert!(fold(unknown, &three, MAX_SNAPSHOT, later()).is_none());
     let mut sixty_four = vec![0; 65536];
     sixty_four[..100].copy_from_slice(&db[..100]);
     sixty_four[16..18].copy_from_slice(&1_u16.to_be_bytes());
-    let grown = fold(sixty_four, &log(65536, &[(2, 2, 0x5a)]), End::Recovered, MAX_SNAPSHOT).unwrap();
+    let grown = fold(sixty_four, &log(65536, &[(2, 2, 0x5a)]), MAX_SNAPSHOT, later()).unwrap();
     assert!(grown.len() == 2 * 65536 && grown[65536..].iter().all(|&b| b == 0x5a));
 }
 
@@ -320,6 +312,25 @@ fn a_log_without_its_index_or_a_database_closed_cleanly_is_read_and_nothing_is_m
     assert_eq!(before.len(), 1, "the writer left its sidecars");
     assert_eq!(count(&path), "[{\"c\":2}]\n");
     assert!(state(folder) == before, "a query made a file beside a closed database");
+}
+
+/// An index left behind by a process that stopped describes an older state than its log; the
+/// copy follows the log, as SQLite's recovery does, and never trusts the index.
+#[test]
+fn a_stale_index_beside_a_later_log_is_not_trusted() {
+    let f = Fixture::folder();
+    let (path, writer) = busy(&f);
+    let stale = fs::read(sidecar(&path, "-shm")).unwrap();
+    writer.exec(&rows(30, 500));
+    let copied = f.root.join("stale");
+    fs::create_dir(&copied).unwrap();
+    let copy = copied.join("copy.db");
+    fs::write(&copy, fs::read(&path).unwrap()).unwrap();
+    fs::write(sidecar(&copy, "-wal"), fs::read(sidecar(&path, "-wal")).unwrap()).unwrap();
+    fs::write(sidecar(&copy, "-shm"), &stale).unwrap();
+    let before = state(&copied);
+    assert_eq!(count(&copy), "[{\"c\":31}]\n");
+    assert!(state(&copied) == before, "a query changed the copied files");
 }
 
 #[test]

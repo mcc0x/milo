@@ -340,10 +340,6 @@ fn be32(bytes: &[u8], at: usize) -> u32 {
     u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 
-fn le32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-}
-
 /// SQLite's running checksum over 8-byte steps, in the byte order the log's magic number names.
 fn checksum(mut sum: (u32, u32), bytes: &[u8], big_endian: bool) -> (u32, u32) {
     let word = |raw: [u8; 4]| if big_endian { u32::from_be_bytes(raw) } else { u32::from_le_bytes(raw) };
@@ -371,30 +367,19 @@ fn header_valid(db: &[u8]) -> bool {
         && matches!((db[18], db[19]), (1 | 2, 1 | 2))
 }
 
-/// Where the log's committed content ends.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub(super) enum End {
-    /// The frame count a live writer published in the WAL index, with the salts of its log.
-    Published { frames: u32, salts: [u8; 8] },
-    /// No WAL index exists and none appeared during the copy, so no connection has the database
-    /// open: every committed frame counts, as SQLite's own recovery counts them.
-    Recovered,
-}
-
-/// The database as of the end of its log's committed content, with the log folded in and the header
-/// marked as having none, so SQLite reads the copy on its own. As SQLite does, a log is used only for
-/// a database whose read version is 2; one with an unknown version or a different page size leaves
-/// the database unread, and one with a foreign magic number or header checksum counts as empty.
-/// Nothing grows past `limit`.
-pub(super) fn fold(mut db: Vec<u8>, wal: &[u8], end: End, limit: u64) -> Option<Vec<u8>> {
+/// The database as of the last commit in its log, with the log folded in and the header marked as
+/// having none, so SQLite reads the copy on its own. This is SQLite's own recovery: every frame that
+/// carries the log's salts and continues its checksum counts, up to the last that commits. A live
+/// writer publishes a commit only after writing it, so the copy can be ahead of a live reader by a
+/// commit whose publication is moments away; it never mixes two states. As SQLite does, a log is used
+/// only for a database whose read version is 2; one with an unknown version or a different page size
+/// leaves the database unread, and one with a foreign magic number or header checksum counts as
+/// empty. Nothing grows past `limit`, and work stops at the deadline.
+pub(super) fn fold(mut db: Vec<u8>, wal: &[u8], limit: u64, deadline: Instant) -> Option<Vec<u8>> {
     if !header_valid(&db) {
         return None;
     }
     let page = page_size(&db)?;
-    let published = match end {
-        End::Published { frames, .. } => Some(usize::try_from(frames).ok()?),
-        End::Recovered => None,
-    };
     let magic = if wal.len() >= WAL_HEADER { be32(wal, 0) } else { 0 };
     let big_endian = magic & 1 == 1;
     let log = db[19] == 2
@@ -402,22 +387,19 @@ pub(super) fn fold(mut db: Vec<u8>, wal: &[u8], end: End, limit: u64) -> Option<
         && usize::try_from(be32(wal, 8)).is_ok_and(|size| size.is_power_of_two() && (512..=65536).contains(&size))
         && checksum((0, 0), &wal[..24], big_endian) == (be32(wal, 24), be32(wal, 28));
     if !log {
-        return (published.unwrap_or(0) == 0).then(|| normalized(db));
+        return Some(normalized(db));
     }
     if be32(wal, 4) != 3_007_000 || usize::try_from(be32(wal, 8)).ok()? != page {
-        return None;
-    }
-    if let End::Published { frames, salts } = end
-        && frames > 0
-        && salts[..] != wal[16..24]
-    {
         return None;
     }
     let mut sum = (be32(wal, 24), be32(wal, 28));
     let (mut frames, mut committed) = (Vec::new(), 0);
     for frame in wal[WAL_HEADER..].chunks_exact(FRAME_HEADER + page) {
-        if published.is_some_and(|end| frames.len() == end) || frame[8..16] != wal[16..24] {
+        if frame[8..16] != wal[16..24] {
             break;
+        }
+        if frames.len() % 64 == 0 && Instant::now() >= deadline {
+            return None;
         }
         sum = checksum(checksum(sum, &frame[..8], big_endian), &frame[FRAME_HEADER..], big_endian);
         if sum != (be32(frame, 16), be32(frame, 20)) {
@@ -427,10 +409,6 @@ pub(super) fn fold(mut db: Vec<u8>, wal: &[u8], end: End, limit: u64) -> Option<
         if be32(frame, 4) != 0 {
             committed = frames.len();
         }
-    }
-    // A published end is a commit whose frames are all in the copy; anything else is a torn copy.
-    if published.is_some_and(|end| end != committed) {
-        return None;
     }
     if committed > 0 {
         let size = u64::from(be32(frames[committed - 1], 4)).checked_mul(page as u64).filter(|&size| size <= limit)?;
@@ -450,21 +428,6 @@ fn normalized(mut db: Vec<u8>) -> Vec<u8> {
     db[18] = 1;
     db[19] = 1;
     db
-}
-
-/// The end a live writer published in the WAL index, read from the index's first 48 bytes as SQLite
-/// reads them: two identical copies, initialised, the known version, and a matching checksum.
-fn published(shm: &File) -> Option<End> {
-    let index = start(shm, 96)?;
-    if index.len() < 96 || index[..48] != index[48..] || index[12] != 1 || le32(&index, 0) != 3_007_000 {
-        return None;
-    }
-    if checksum((0, 0), &index[..40], false) != (le32(&index, 40), le32(&index, 44)) {
-        return None;
-    }
-    let mut salts = [0; 8];
-    salts.copy_from_slice(&index[32..40]);
-    Some(End::Published { frames: le32(&index, 16), salts })
 }
 
 #[repr(C)]
@@ -513,7 +476,7 @@ fn hold(file: &File, offset: u32, len: u32) -> Option<Held<'_>> {
     // SAFETY: The handle is open, the OVERLAPPED only names the range, and the call never waits.
     let locked =
         unsafe { LockFileEx(file.as_raw_handle(), LOCKFILE_FAIL_IMMEDIATELY, 0, len, 0, &raw mut overlapped) } != 0;
-    locked.then_some(Held { file, offset, len })
+    locked.then(|| Held { file, offset, len })
 }
 
 /// SQLite's shared lock on a database, taken as SQLite takes it: through a brief shared pending lock,
@@ -565,7 +528,6 @@ pub(super) enum Attempt {
     Copied {
         db: Vec<u8>,
         wal: Vec<u8>,
-        end: End,
     },
     /// A writer was busy; a later attempt may find the files settled.
     Again,
@@ -577,7 +539,9 @@ pub(super) enum Attempt {
 /// file for the copy: a rollback writer needs the exclusive database lock and a checkpoint needs slot 0
 /// exclusively. The log can still grow, or be emptied or restarted once fully checkpointed, so the copy
 /// stands only if its header is unchanged, every file at its name is the one read, and no WAL index or
-/// log appeared. Only frames up to the end the writer published count.
+/// log appeared. The WAL index itself is never read: it is SQLite's shared memory, and neither its
+/// freshness nor whether a live process still owns it can be learned from outside without a mapping
+/// or a lock that SQLite would notice.
 pub(super) fn copy(path: &Path, limit: u64, deadline: Instant) -> Attempt {
     use Attempt::{Again, Unreadable};
     let Ok(Some(db)) = open(path) else { return Unreadable };
@@ -599,13 +563,6 @@ pub(super) fn copy(path: &Path, limit: u64, deadline: Instant) -> Attempt {
             None => return Again,
         },
         None => None,
-    };
-    let end = match &shm {
-        Some(shm) => match published(shm) {
-            Some(end) => end,
-            None => return Again,
-        },
-        None => End::Recovered,
     };
     let identities = |file: &Option<File>| match file {
         Some(file) => identity(file).map(Some).ok_or(()),
@@ -640,7 +597,7 @@ pub(super) fn copy(path: &Path, limit: u64, deadline: Instant) -> Attempt {
     if !settled {
         return Again;
     }
-    Attempt::Copied { db: bytes, wal: frames, end }
+    Attempt::Copied { db: bytes, wal: frames }
 }
 
 /// A coherent copy, or None once the deadline passes or a writer keeps every attempt from settling.
@@ -654,7 +611,7 @@ pub(super) fn snapshot(path: &Path, limit: u64, deadline: Instant) -> Option<Vec
             return None;
         }
         match copy(path, limit, deadline) {
-            Attempt::Copied { db, wal, end } => return fold(db, &wal, end, limit),
+            Attempt::Copied { db, wal } => return fold(db, &wal, limit, deadline),
             Attempt::Again => {}
             Attempt::Unreadable => return None,
         }
@@ -672,6 +629,9 @@ pub(in crate::usage) fn too_large(path: &Path) -> bool {
 pub(super) fn query(path: &Path, sql: &str, deadline: Instant, max: usize) -> Option<Vec<u8>> {
     let sql = CString::new(sql).ok()?;
     let mut image = snapshot(path, MAX_SNAPSHOT, deadline)?;
+    if Instant::now() >= deadline {
+        return None;
+    }
     let size = i64::try_from(image.len()).ok()?;
     let connection = Connection::open(c":memory:", OPEN_READWRITE | OPEN_CREATE)?;
     // SAFETY: The image outlives the connection, which only reads it; SQLite is not asked to free it.
