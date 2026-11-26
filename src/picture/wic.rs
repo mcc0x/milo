@@ -474,8 +474,9 @@ mod tests {
     #[test]
     fn damaged_image_data_is_unreadable_rather_than_partly_shown() {
         let mut png = Picture::sample_png(8, 8);
+        // The first compressed block claims the reserved type, so it cannot be inflated.
         let data = png.windows(4).position(|kind| kind == b"IDAT").unwrap() + 4;
-        png[data..data + 2].copy_from_slice(&[0xff, 0xff]);
+        png[data + 2] = 0b111;
         let cancel = AtomicBool::new(false);
         let control = DecodeControl::new(&cancel);
         assert!(matches!(decode(&png, "png", (8, 8), &control), Err(Refusal::Unreadable)));

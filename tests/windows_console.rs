@@ -538,10 +538,10 @@ fn pictures_are_drawn_as_cells_and_what_cannot_be_shown_says_so() {
     fs::write(project.join("mark.png"), include_bytes!("../src/usage/marks/codex.png")).unwrap();
     fs::write(project.join("dusk.jpg"), include_bytes!("rex_lab/river-dusk.jpg")).unwrap();
     fs::write(project.join("river.mp4"), include_bytes!("rex_lab/river-motion.mp4")).unwrap();
-    // Whole chunks whose compressed data cannot be inflated, and a header past the size limit.
+    // Whole chunks whose first compressed block has the reserved type, and a header past the size limit.
     let mut damaged = include_bytes!("../src/usage/marks/codex.png").to_vec();
     let data = damaged.windows(4).position(|kind| kind == b"IDAT").unwrap() + 4;
-    damaged[data..data + 2].copy_from_slice(&[0xff, 0xff]);
+    damaged[data + 2] = 0b111;
     fs::write(project.join("damaged.png"), damaged).unwrap();
     let mut huge = include_bytes!("../src/usage/marks/codex.png").to_vec();
     huge[16..20].copy_from_slice(&20_000_u32.to_be_bytes());
