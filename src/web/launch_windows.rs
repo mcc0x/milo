@@ -285,17 +285,47 @@ mod tests {
         let (wake, writer) = io::pipe().unwrap();
 
         let chromium = std::env::var_os("MILO_TEST_CHROMIUM").expect("set MILO_TEST_CHROMIUM");
+        // DIAGNOSTIC: can headless Chrome read a private page and a plain one?
+        {
+            let private = folder.root.join("diag-private.html");
+            let mut file = crate::sys::private_file(&private, crate::sys::Existing::Refuse).unwrap();
+            file.write_all(b"<p>diag-readable</p>").unwrap();
+            drop(file);
+            let plain = folder.root.join("diag-plain.html");
+            fs::write(&plain, "<p>diag-readable</p>").unwrap();
+            for page in [&private, &plain] {
+                let mut dump = std::ffi::OsString::from("--user-data-dir=");
+                dump.push(folder.root.join("diag-profile"));
+                let output = Command::new(&chromium)
+                    .args(["--headless", "--no-first-run", "--no-default-browser-check", "--dump-dom"])
+                    .arg(dump)
+                    .arg(page)
+                    .output()
+                    .unwrap();
+                let out = String::from_utf8_lossy(&output.stdout);
+                eprintln!(
+                    "DIAG {} status={} readable={} stdout={}",
+                    page.display(),
+                    output.status,
+                    out.contains("diag-readable"),
+                    out.chars().take(300).collect::<String>()
+                );
+            }
+        }
         let mut profile = std::ffi::OsString::from("--user-data-dir=");
         profile.push(folder.root.join("chromium-profile"));
         let (started, chrome) = mpsc::channel();
+        let log_path = folder.root.join("chrome.log");
+        let log = log_path.clone();
         let open = move |page: &Path| {
             let child = Command::new(chromium)
                 .args(["--headless", "--no-first-run", "--no-default-browser-check", "--disable-background-networking"])
                 .arg(profile)
+                .args(["--enable-logging=stderr", "--v=1"])
                 .arg(page)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(fs::File::create(log).unwrap())
                 .spawn()?;
             started.send(child).map_err(io::Error::other)
         };
@@ -319,6 +349,13 @@ mod tests {
             connected
         });
         serve(listener, &wake, &access, editor, Some(launch)).unwrap();
-        assert!(watcher.join().unwrap(), "Chromium did not authenticate before the handoff expired");
+        let connected = watcher.join().unwrap();
+        if !connected {
+            let text = fs::read_to_string(&log_path).unwrap_or_default();
+            for line in text.lines().filter(|line| !line.contains(&token)).take(150) {
+                eprintln!("CHROME {line}");
+            }
+        }
+        assert!(connected, "Chromium did not authenticate before the handoff expired");
     }
 }
