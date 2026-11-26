@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       recipient:
-        description: Optional public X.509 PEM certificate (base64, one line) to retain the tested main candidates encrypted
+        description: Optional public X.509 PEM certificate (base64, one line) to retain tested main or release/prepare-* candidates encrypted
         required: false
         type: string
 
@@ -74,7 +74,7 @@ jobs:
           sh tests/linux-install.sh
           sh tests/linux-candidate.sh "$RUNNER_TEMP/assets"
       - name: Seal the tested Linux release files for offline qualification
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.recipient != ''
+        if: github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/prepare-')) && inputs.recipient != ''
         env:
           RECIPIENT: ${{ inputs.recipient }}
         run: |
@@ -86,7 +86,7 @@ jobs:
           cat SHA256SUMS
           (cd "$RUNNER_TEMP" && sha256sum milo-linux.tar)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.recipient != ''
+        if: github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/prepare-')) && inputs.recipient != ''
         with:
           name: milo-linux-x86_64-${{ github.sha }}
           path: ${{ runner.temp }}/milo-linux.tar.p7m
@@ -235,21 +235,29 @@ jobs:
           export PLAYWRIGHT_BROWSERS_PATH="$smoke_dir/browsers"
           node "$smoke_dir/node_modules/playwright-core/cli.js" install --only-shell chromium
           NODE_PATH="$smoke_dir/node_modules" node tests/web-smoke.cjs target/local-menu/milo
-      - name: Seal the tested binary for offline qualification
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.recipient != ''
+      - name: Stage and verify the installer for the tested Mac binary
+        run: |
+          sh .github/ci/stage-macos.sh target/local-menu/milo "$RUNNER_TEMP/assets"
+          cmp target/local-menu/milo "$RUNNER_TEMP/assets/milo-aarch64-apple-darwin"
+          (cd "$RUNNER_TEMP/assets" && shasum -a 256 -c SHA256SUMS)
+      - name: Seal the tested Mac release files for offline qualification
+        if: github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/prepare-')) && inputs.recipient != ''
         env:
           RECIPIENT: ${{ inputs.recipient }}
         run: |
           printf '%s' "$RECIPIENT" | /usr/bin/base64 -D > "$RUNNER_TEMP/recipient.pem"
-          openssl smime -encrypt -aes256 -binary -outform DER -in target/local-menu/milo \
-            -out "$RUNNER_TEMP/milo.p7m" "$RUNNER_TEMP/recipient.pem"
+          (cd "$RUNNER_TEMP/assets" && COPYFILE_DISABLE=1 tar -cf "$RUNNER_TEMP/milo-macos.tar" milo-aarch64-apple-darwin install.sh SHA256SUMS)
+          openssl smime -encrypt -aes256 -binary -outform DER -in "$RUNNER_TEMP/milo-macos.tar" \
+            -out "$RUNNER_TEMP/milo-macos.tar.p7m" "$RUNNER_TEMP/recipient.pem"
           swiftc --version
           xcrun --sdk macosx --show-sdk-version
-          shasum -a 256 target/local-menu/milo target/local-menu/menu.tar.gz
+          shasum -a 256 target/local-menu/menu.tar.gz
+          cat "$RUNNER_TEMP/assets/SHA256SUMS"
+          (cd "$RUNNER_TEMP" && shasum -a 256 milo-macos.tar)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.recipient != ''
+        if: github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/prepare-')) && inputs.recipient != ''
         with:
           name: milo-arm64-${{ github.sha }}
-          path: ${{ runner.temp }}/milo.p7m
+          path: ${{ runner.temp }}/milo-macos.tar.p7m
           if-no-files-found: error
           retention-days: 14

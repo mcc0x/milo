@@ -1,6 +1,6 @@
-# Qualify the Apple Silicon release
+# Qualify release packages
 
-Merge the version and packaging changes first. Keep the hosted installer, tap and public download links on the previous release until the new assets are live. The release binary cannot contain a pin to its own checksum.
+Build from the intended versioned release commit. Keep the hosted installer, tap and public download links on the previous release until the new assets are live. The release binary cannot contain a pin to its own checksum.
 
 ## Keep qualification out of installation counts
 
@@ -10,7 +10,7 @@ When testing **exact released bytes**, set `MILO_TELEMETRY=0` in the lab environ
 
 ## Retain the bytes the Mac job tested
 
-The usual **Release tests** runs retain no installer. To qualify a release from `main`, dispatch that workflow with a one-time **public** recipient certificate. This repository is public, so the jobs upload only encrypted candidates. The workflow creates no tag or release.
+The usual **Release tests** runs retain no installer. Dispatch that workflow on `main` or a `release/prepare-*` branch with a one-time **public** recipient certificate. Branch source in this repository is public; the jobs upload only encrypted candidates. The workflow creates no tag or release. A new source SHA, including a merge commit, needs its own qualification; see [the exact-commit tag check](../CONTRIBUTING.md#tagging-a-release).
 
 In a private directory **outside the checkout**, on a Mac with OpenSSL and GitHub CLI:
 
@@ -18,30 +18,35 @@ In a private directory **outside the checkout**, on a Mac with OpenSSL and GitHu
 umask 077
 openssl req -x509 -newkey rsa:3072 -nodes -days 30 -subj /CN=milo-qualification \
   -keyout recipient.key -out recipient.pem
-gh workflow run release-tests.yml --repo mcc0x/milo --ref main \
+gh workflow run release-tests.yml --repo mcc0x/milo --ref "${ref:?set the release source branch}" \
   -f recipient="$(base64 < recipient.pem | tr -d '\n')"
 ```
 
-Never send the private key, a personal certificate or a password as an input. Check the dispatch's **head SHA** against the intended merged commit. Require a successful run with a non-skipped **Apple Silicon release tests** job on that SHA. Record the run ID and attempt, artifact ID, and the two SHA-256 values printed by **Seal the tested binary**: the plaintext CLI (`plaintext_sha256` below) and its embedded menu archive. A rerun or a different commit is a new candidate.
+Never send the private key, a personal certificate or a password as an input. Check the dispatch's **head SHA** against the intended commit. Require a successful run with a non-skipped **Apple Silicon release tests** job on that SHA. Record the run ID and attempt, artifact ID, and the plaintext hashes printed by **Seal the tested Mac release files**: the tar (`mac_tar_sha256` below), the two package files, and the embedded menu archive. A rerun or a different commit is a new candidate.
 
 Using the recorded run ID and full source SHA:
 
 ```sh
-gh run download "$run_id" --repo mcc0x/milo --name "milo-arm64-$source_sha"
-openssl smime -decrypt -binary -inform DER -in milo.p7m -inkey recipient.key \
-  -out milo-aarch64-apple-darwin
-printf '%s  %s\n' "$plaintext_sha256" milo-aarch64-apple-darwin | shasum -a 256 -c -
-chmod 755 milo-aarch64-apple-darwin
+gh run download "$run_id" --repo mcc0x/milo --name "milo-arm64-$source_sha" --dir mac
+(
+  cd mac || exit 1
+  set -e
+  openssl smime -decrypt -binary -inform DER -in milo-macos.tar.p7m \
+    -inkey ../recipient.key -out milo-macos.tar
+  printf '%s  milo-macos.tar\n' "$mac_tar_sha256" | shasum -a 256 -c -
+  tar -xf milo-macos.tar
+  shasum -a 256 -c SHA256SUMS
+)
 ```
 
-The Actions artifact expires after 14 days. Retain the verified bytes privately until the release decision. Its envelope and GitHub's artifact ZIP have different hashes from the executable; neither is a valid installer pin.
+The Actions artifact expires after 14 days. Compare the two manifest entries to the job log and retain the verified files privately until the release decision. The tar, its envelope, and GitHub's artifact ZIP have different hashes from the executable; none is a valid installer pin.
 
 ## Test, then promote without rebuilding
 
 1. Inspect the archive embedded in the **downloaded** executable, including member ownership, metadata and paths. Check the outer CLI, extracted app and nested CLI signatures, architecture, minimum OS and version. Do not qualify a source build in their place.
-2. Take `site/public/install.sh` from the recorded source SHA and change only its version and expected binary SHA-256 in staging. Generate `SHA256SUMS` for this installer and this executable. Use these three files for qualification and publication; the repository-root installer is for building from source.
+2. Check that the retained `install.sh` pins the tested version and executable digest. Staging changes only these two values from `site/public/install.sh` at the recorded source SHA. Exercise the retained installer and executable together; do not recreate either for publication. The repository-root installer is for building from source.
 3. Exercise fresh install, a checksum-verified upgrade from the preceding release with a saved preference, checksum refusal without replacement, and receipt-based removal. Test the installed menu, browser settings, standalone Reader and managed floating actions against a disposable Rex server. Use test profiles and stand-ins for outside services.
-4. Obtain approval for the exact source SHA and asset digests. Create the new tag at that SHA only; never move an existing tag. Publish the verified executable, installer and sums together. Download the published files, verify their hashes and compare them to the staged bytes **before** updating the hosted installer, release links or tap. Updating the hosted installer on main can deploy the website immediately.
+4. Keep the verified executable and installer together for the combined release manifest below. Updating the hosted installer on main can deploy the website immediately, so wait until after publication and verification.
 
 ## Qualify standalone Linux separately
 
@@ -95,6 +100,37 @@ gh run download "$run_id" --repo mcc0x/milo --name "milo-linux-x86_64-$source_sh
 )
 ```
 
-Compare the two entries in `linux/SHA256SUMS` to the job log. Keep those three extracted files privately; there is no installer to regenerate. Smoke-test the downloaded bytes on Ubuntu. Combine the verified Linux entries with the Mac entries in a **separate** release `SHA256SUMS` and check it against all four staged assets. Seek approval for the exact source SHA and these five files. Publish only to a **new** tag, compare fresh release downloads to staging, then update public links. No PR or ordinary push uploads a candidate.
+Compare the two entries in `linux/SHA256SUMS` to the job log. Keep those three extracted files privately; there is no installer to regenerate. Smoke-test the downloaded bytes on Ubuntu. No PR or ordinary push uploads a candidate.
 
 This slice covers standalone text terminals and local, headless settings. Repeat the install and terminal smoke on a fresh Ubuntu amd64 guest, using a non-root user and a local candidate mirror. A plain SSH terminal can exercise standalone panes; it does not qualify a remote Rex desktop. This procedure does not qualify a graphical desktop or browser, tray, Linux-hosted Rex, live providers, arm64, 32-bit Linux, musl, WSL or Windows.
+
+## Include Windows when the release source has the native installer
+
+Dispatch the **Windows** workflow on the same branch with the same recipient certificate. Require the non-skipped **Native Windows x86-64 tests** job on the same full source SHA; the separate counts workflow produces a test fixture, not a release package.
+
+```sh
+gh workflow run windows.yml --repo mcc0x/milo --ref "${ref:?set the release source branch}" \
+  -f recipient="$(base64 < recipient.pem | tr -d '\n')"
+```
+
+Record the Windows run ID, attempt, artifact ID and the plaintext ZIP, executable and installer hashes printed by **Seal the tested installer package for its recipient**. Download before the one-day retention limit. Use the plaintext ZIP hash from the job log as `windows_zip_sha256`.
+
+```sh
+gh run download "$windows_run_id" --repo mcc0x/milo \
+  --name "milo-windows-x86_64-release-$source_sha" --dir windows
+(
+  cd windows || exit 1
+  set -e
+  openssl smime -decrypt -binary -inform DER -in milo-windows.zip.p7m \
+    -inkey ../recipient.key -out milo-windows.zip
+  printf '%s  milo-windows.zip\n' "$windows_zip_sha256" | shasum -a 256 -c -
+  unzip milo-windows.zip
+  shasum -a 256 -c SHA256SUMS
+)
+```
+
+Compare the two manifest entries to the log. Copy those same package files to a clean Windows x64 guest. As a standard user, exercise `install-windows.ps1`, the installed executable, a new shell's user PATH, and the installed uninstaller. Check that reinstalling adds no duplicate PATH entry and removing the package leaves settings intact. There was no public v0.1.8 Windows package; use a known prior private package for an upgrade check and label it as such.
+
+## Assemble one release manifest
+
+Copy only the verified executables and their installers into a fresh staging directory. Concatenate the per-platform manifests for included platforms into a separate release `SHA256SUMS`; do not put a manifest's own digest in it. From the staging directory, require `shasum -a 256 -c SHA256SUMS` to verify every file, with one line per asset. Record that combined manifest's own digest in the private sign-off. Seek approval for the exact source SHA and the exact staged file set. Create the new tag at that SHA only; never move an existing tag. Compare fresh release downloads to the verified files before updating public links.
