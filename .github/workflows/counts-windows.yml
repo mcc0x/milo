@@ -3,7 +3,7 @@ name: Installed Windows anonymous counts
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [qualify/anonymous-counts-windows]
     paths:
       - .github/workflows/counts-windows.yml
       - .github/ci/stage-windows.ps1
