@@ -249,16 +249,19 @@ pub(super) fn read_pipe(mut input: impl AsRawFd + Read, max: usize, deadline: In
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 8192];
     while Instant::now() < deadline {
-        let waiting = match crate::sys::available(input.as_raw_fd()) {
+        match crate::sys::available(input.as_raw_fd()) {
             Available::Closed => return Some(bytes),
             Available::Unknown => return None,
             Available::Bytes(0) => {
                 std::thread::sleep(Duration::from_millis(2));
                 continue;
             }
-            Available::Bytes(waiting) => usize::try_from(waiting).ok()?,
-        };
-        let cap = (max + 1 - bytes.len()).min(buffer.len()).min(waiting);
+            Available::Bytes(_) => {}
+        }
+        // A whole buffer is asked for even when less is waiting: a buffered reader such as stdin
+        // then reads straight into it and keeps nothing back, and a read cannot block once bytes
+        // are waiting.
+        let cap = (max + 1 - bytes.len()).min(buffer.len());
         match input.read(&mut buffer[..cap]) {
             Ok(0) => return Some(bytes),
             Ok(n) if bytes.len() + n > max => return None,

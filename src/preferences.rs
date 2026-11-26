@@ -615,13 +615,21 @@ fn worktree_key(root: &Path) -> u64 {
 }
 
 /// The checkout path as settings files name it. Git writes a Windows path with forward slashes and
-/// Windows itself with backslashes, so both spellings of one folder are named the way Git writes it.
+/// an upper-case drive, while a typed path may use backslashes, a lower-case drive or the \\?\
+/// prefix, so every spelling of one folder is named the way Git writes it.
 pub(crate) fn worktree_bytes(root: &Path) -> std::borrow::Cow<'_, [u8]> {
-    let bytes = root.as_os_str().as_encoded_bytes();
-    if cfg!(windows) && bytes.contains(&b'\\') {
-        return bytes.iter().map(|&byte| if byte == b'\\' { b'/' } else { byte }).collect();
+    #[cfg(windows)]
+    {
+        let plain = crate::sys::plain_path(root.to_path_buf());
+        let mut bytes: Vec<u8> =
+            plain.as_os_str().as_encoded_bytes().iter().map(|&byte| if byte == b'\\' { b'/' } else { byte }).collect();
+        if bytes.get(1) == Some(&b':') {
+            bytes[0].make_ascii_uppercase();
+        }
+        bytes.into()
     }
-    bytes.into()
+    #[cfg(not(windows))]
+    root.as_os_str().as_encoded_bytes().into()
 }
 
 pub(crate) fn read(path: &Path, limit: u64) -> io::Result<Option<String>> {
@@ -748,6 +756,21 @@ fn decode_folds(text: &str) -> BTreeMap<String, bool> {
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
+
+    #[cfg(windows)]
+    #[test]
+    fn every_spelling_of_one_windows_checkout_names_the_same_settings() {
+        let config = Path::new(r"C:\Users\me\AppData\Roaming\milo");
+        let git = Path::new("C:/Users/me/src/milo");
+        for typed in
+            [r"C:\Users\me\src\milo", r"c:\Users\me\src\milo", r"\\?\C:\Users\me\src\milo", "c:/Users/me/src/milo"]
+        {
+            assert_eq!(worktree_bytes(Path::new(typed)), worktree_bytes(git), "{typed}");
+            assert_eq!(config_file(config, Some(Path::new(typed))), config_file(config, Some(git)), "{typed}");
+        }
+        assert_eq!(&*worktree_bytes(git), b"C:/Users/me/src/milo");
+        assert_ne!(worktree_bytes(Path::new(r"C:\Users\me\src\other")), worktree_bytes(git));
+    }
 
     #[test]
     fn usage_tool_choices_save_only_what_changed_and_files_without_them_stay_automatic() {

@@ -97,7 +97,14 @@ pub(super) fn get(request: &Request<'_>, wait: Duration) -> Option<Reply> {
 
     // Allow curl its own limit, then a moment to exit, before it is killed.
     let deadline = Instant::now() + wait + Duration::from_secs(1);
-    let mut child = Command::new(executable())
+    let program = executable();
+    let mut command = Command::new(&program);
+    // On Windows curl runs from its own folder, so nothing in the project's folder is looked up.
+    #[cfg(windows)]
+    if let Some(folder) = program.parent() {
+        command.current_dir(folder);
+    }
+    let mut child = command
         // `-q` must come first: it keeps the user's curlrc from adding options.
         .args(["-q", "--config", "-"])
         .stdin(Stdio::piped())
