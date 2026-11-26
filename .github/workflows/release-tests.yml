@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       recipient:
-        description: Optional public X.509 PEM certificate (base64, one line) to retain the tested main binary encrypted
+        description: Optional public X.509 PEM certificate (base64, one line) to retain the tested main binaries encrypted
         required: false
         type: string
 
@@ -54,6 +54,38 @@ jobs:
           sh tests/standalone-tmux.sh target/debug/milo
       - name: Verify the source package builds
         run: cargo +1.91.0 package --locked
+
+  linux-candidate:
+    name: Standalone Linux x86-64 release candidate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Reproduce in pinned Jammy containers and install without a compiler or network
+        run: sh .github/ci/qualify-linux.sh "$RUNNER_TEMP/assets"
+      - name: Exercise the installed executable in tmux and headless settings
+        run: |
+          sh tests/linux-install.sh
+          sh tests/linux-candidate.sh "$RUNNER_TEMP/assets"
+      - name: Seal the tested Linux binary for offline qualification
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.recipient != ''
+        env:
+          RECIPIENT: ${{ inputs.recipient }}
+        run: |
+          printf '%s' "$RECIPIENT" | base64 -d > "$RUNNER_TEMP/recipient.pem"
+          cd "$RUNNER_TEMP/assets"
+          openssl smime -encrypt -aes256 -binary -outform DER -in milo-x86_64-unknown-linux-gnu \
+            -out "$RUNNER_TEMP/milo-linux.p7m" "$RUNNER_TEMP/recipient.pem"
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.recipient != ''
+        with:
+          name: milo-linux-x86_64-${{ github.sha }}
+          path: ${{ runner.temp }}/milo-linux.p7m
+          if-no-files-found: error
+          retention-days: 14
 
   dashboard:
     name: Dashboard production export

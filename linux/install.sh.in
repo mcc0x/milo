@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+case "$#:${1-}" in
+    0:|1:--uninstall) ;;
+    *) fail 'Usage: sh install-linux.sh [--uninstall]' ;;
+esac
+
+expected=@SHA256@
+asset=milo-x86_64-unknown-linux-gnu
+dir=${MILO_BIN_DIR:-${HOME:?Set HOME or MILO_BIN_DIR first.}/.local/bin}
+case "$dir" in /*) ;; *) dir=$PWD/$dir ;; esac
+
+if [ "${1-}" != --uninstall ]; then
+    [ "$(uname -s):$(uname -m)" = Linux:x86_64 ] && [ "$(getconf LONG_BIT)" = 64 ] ||
+        fail 'This binary requires 64-bit x86 Linux.'
+    getconf GNU_LIBC_VERSION 2>/dev/null | awk '
+        $1 == "glibc" && $2 ~ /^[0-9]+\.[0-9]+$/ && NF == 2 {
+            split($2, v, "."); ok = v[1]+0 > 2 || (v[1]+0 == 2 && v[2]+0 >= 35)
+        }
+        END { exit !ok }' || fail 'This binary requires glibc 2.35 or later (not musl).'
+    mkdir -p -- "$dir"
+elif [ ! -d "$dir" ]; then
+    printf 'Nothing installed in %s.\n' "$dir"
+    exit 0
+fi
+
+dir=$(CDPATH= cd -P -- "$dir" && pwd -P)
+binary=${dir%/}/milo
+receipt=${dir%/}/.milo-install-receipt
+digest() {
+    sum=$(sha256sum < "$1") || return 1
+    printf '%s\n' "${sum%% *}"
+}
+for file in "$binary" "$receipt"; do
+    [ ! -L "$file" ] && { [ ! -e "$file" ] || [ -f "$file" ]; } ||
+        fail "Not changing $file: it is not a regular file."
+done
+if [ -e "$binary" ] || [ -e "$receipt" ]; then
+    [ -f "$binary" ] && [ -f "$receipt" ] && previous=$(digest "$binary") &&
+        printf '%s\n%s\n' "$previous" "$binary" | cmp -s - "$receipt" ||
+        fail "Not changing $binary: no matching installer receipt."
+fi
+
+if [ "${1-}" = --uninstall ]; then
+    rm -f -- "$binary" "$receipt"
+    printf 'Removed any receipted binary in %s. Settings were left in place.\n' "$dir"
+    exit 0
+fi
+
+case "$0" in /*) script=$0 ;; *) script=$PWD/$0 ;; esac
+source=${script%/*}/$asset
+[ -f "$source" ] || fail "Place $asset beside this installer first."
+umask 077
+stage=$(mktemp -d -- "${dir%/}/.milo.XXXXXXXX")
+trap 'rm -rf -- "$stage"' EXIT
+trap 'exit 1' HUP INT TERM
+cp -- "$source" "$stage/milo"
+[ "$(digest "$stage/milo")" = "$expected" ] || fail "SHA-256 mismatch for $asset. Nothing installed."
+chmod 755 "$stage/milo"
+printf '%s\n%s\n' "$expected" "$binary" > "$stage/.milo-install-receipt"
+mv -fT -- "$stage/milo" "$binary"
+mv -fT -- "$stage/.milo-install-receipt" "$receipt"
+printf 'Installed Milo at %s.\n' "$binary"
