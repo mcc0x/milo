@@ -123,7 +123,12 @@ fn launch_browser(url: &str, viewers: Option<Viewers>) -> Option<Launch> {
         return None;
     }
     match Launch::start(url) {
-        Ok(launcher) => Some(launcher),
+        Ok(launcher) => {
+            eprintln!(
+                "milo web: if your browser says \"File not found\" (a snap or sandboxed browser), paste the URL above into it."
+            );
+            Some(launcher)
+        }
         Err(error) => {
             eprintln!("milo web: could not open the browser ({error}); open the URL above");
             None
