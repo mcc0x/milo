@@ -1,7 +1,8 @@
 #![cfg(windows)]
 //! Drives the built Milo executable through a Windows pseudoconsole, the way Windows Terminal
 //! runs it: open a working text file, edit and save it, refuse to write over a change another
-//! program made, quit, and leave the console's modes as they were.
+//! program made, quit, and leave the console's modes as they were. The Home, Outline, History and
+//! Usage panes open the same way, draw what they should, move on a key and quit with exit code 0.
 
 use std::ffi::{OsStr, c_void};
 use std::fs;
@@ -9,6 +10,7 @@ use std::io::{self, Read as _, Write as _};
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -143,9 +145,12 @@ impl Console {
 
         let mut block = Vec::new();
         for (name, value) in std::env::vars_os().filter(|(name, _)| {
-            !["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "TERM"]
-                .iter()
-                .any(|isolated| name.eq_ignore_ascii_case(isolated))
+            ![
+                "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "CODEX_HOME",
+                "CLAUDE_CONFIG_DIR", "TERM",
+            ]
+            .iter()
+            .any(|isolated| name.eq_ignore_ascii_case(isolated))
         }) {
             block.extend(name.encode_wide().chain("=".encode_utf16()).chain(value.encode_wide()).chain([0]));
         }
@@ -362,4 +367,173 @@ fn edits_save_and_refuse_an_external_change_then_restore_the_console() {
         text[at..].split('.').next().unwrap().to_owned()
     };
     assert_eq!(modes("before"), modes("after"), "Milo left the console in different modes");
+}
+
+const DOWN: &[u8] = b"\x1b[B";
+const ENTER: &[u8] = b"\r";
+
+fn git(project: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(project)
+        .args(["-c", "user.name=Milo Test", "-c", "user.email=milo@example.invalid", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// A repository with two commits: README.md, docs/guide.md and src/lib.rs, then a change to the guide.
+fn repository(scratch: &Scratch) {
+    let project = scratch.0.join("project");
+    git(&project, &["init", "-q", "--template=", "-b", "main"]);
+    fs::create_dir_all(project.join("docs")).unwrap();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("README.md"), "# Notes\n").unwrap();
+    fs::write(project.join("docs").join("guide.md"), "guide\n").unwrap();
+    fs::write(project.join("src").join("lib.rs"), "fn main() {}\n").unwrap();
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-q", "-m", "Add the project files"]);
+    fs::write(project.join("docs").join("guide.md"), "guide\nmore\n").unwrap();
+    git(&project, &["commit", "-q", "-a", "-m", "Extend the guide"]);
+}
+
+/// Runs Milo with the arguments in the project folder, between the console mode reports, and
+/// reports Milo's own exit code. Returns the console and where the first report ended.
+fn open_pane(scratch: &Scratch, arguments: &str) -> (Console, usize) {
+    let milo = env!("CARGO_BIN_EXE_milo");
+    let probe = std::env::current_exe().unwrap();
+    let probe = format!("\"{}\" print_console_modes --exact --ignored --nocapture --quiet", probe.display());
+    let command = format!(
+        "cmd.exe /d /v:on /s /c \"set MILO_CONSOLE_PROBE=before& {probe} & \"{milo}\" {arguments}& echo milo-exit=!ERRORLEVEL!& set MILO_CONSOLE_PROBE=after& {probe}\""
+    );
+    let console = Console::start(&command, &scratch.0.join("project"), &scratch.environment());
+    let at = console.see("console-modes before=", 0);
+    (console, at)
+}
+
+/// After the pane quits: Milo exited with 0, and the console is in the modes it started in.
+fn finish(console: &Console, from: usize) {
+    let exit = console.see("milo-exit=", from);
+    let ended = console.see("console-modes after=", exit);
+    console.see(".", ended);
+    let text = console.text();
+    assert_eq!(&text[exit..exit + 1], "0", "Milo exited with another code; the console drew:\n{text}");
+    assert_eq!(console.exit_code(Duration::from_secs(30)), Some(0), "the console drew:\n{text}");
+    let modes = |when: &str| {
+        let label = format!("console-modes {when}=");
+        let at = text.find(&label).unwrap() + label.len();
+        text[at..].split('.').next().unwrap().to_owned()
+    };
+    assert_eq!(modes("before"), modes("after"), "Milo left the console in different modes");
+}
+
+#[test]
+fn outline_lists_the_files_opens_a_folder_and_quits() {
+    let scratch = Scratch::new("outline");
+    repository(&scratch);
+    let (mut console, at) = open_pane(&scratch, "outline");
+    console.see("docs", at);
+    console.see("README.md", at);
+    console.see("q quit", at);
+
+    // The first row is docs; one step down is src, and Enter opens it.
+    let mark = console.text().len();
+    console.keys(DOWN);
+    console.keys(ENTER);
+    console.see("lib.rs", mark);
+    console.keys(b"q");
+    finish(&console, mark);
+}
+
+#[test]
+fn history_lists_the_commits_shows_the_files_of_one_and_quits() {
+    let scratch = Scratch::new("history");
+    repository(&scratch);
+    let (mut console, at) = open_pane(&scratch, "history");
+    let at = console.see("Extend the guide", at);
+    console.see("Add the project files", at);
+    console.see("q quit", at);
+
+    let mark = console.text().len();
+    console.keys(DOWN);
+    console.keys(ENTER);
+    console.see("lib.rs", mark);
+    console.keys(b"q");
+    finish(&console, mark);
+}
+
+#[test]
+fn home_lists_the_panes_opens_history_and_quits() {
+    let scratch = Scratch::new("home");
+    repository(&scratch);
+    let (mut console, at) = open_pane(&scratch, "");
+    let at = console.see("Outline", at);
+    let at = console.see("Git history", at);
+    let at = console.see("Usage", at);
+    console.see("q quit", at);
+
+    // One step down is Git history; q comes back from it to Home, and q again leaves.
+    let mark = console.text().len();
+    console.keys(DOWN);
+    console.keys(ENTER);
+    console.see("Extend the guide", mark);
+    let mark = console.text().len();
+    console.keys(b"q");
+    console.see("Git history", mark);
+    console.keys(b"q");
+    finish(&console, mark);
+}
+
+/// The seconds since the epoch as the UTC timestamp Codex and Claude Code write.
+fn utc(seconds: u64) -> String {
+    let (days, rest) = (i64::try_from(seconds / 86_400).unwrap(), seconds % 86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 { shifted + 3 } else { shifted - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rest / 3600, rest % 3600 / 60, rest % 60)
+}
+
+#[test]
+fn usage_reads_local_codex_sessions_and_quits() {
+    let scratch = Scratch::new("usage");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let profile = scratch.0.join("profile");
+    let rollout = profile.join(".codex").join("sessions").join("2026").join("11").join("18");
+    fs::create_dir_all(&rollout).unwrap();
+    fs::write(
+        rollout.join("rollout-a.jsonl"),
+        format!(
+            "{{\"timestamp\":\"{}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\"rate_limits\":{{\"primary\":{{\"used_percent\":23,\"window_minutes\":10080,\"resets_at\":{}}},\"secondary\":null}}}}}}\n",
+            utc(now),
+            now + 7200
+        ),
+    )
+    .unwrap();
+    let transcripts = profile.join(".claude").join("projects").join("project");
+    fs::create_dir_all(&transcripts).unwrap();
+    fs::write(
+        transcripts.join("session.jsonl"),
+        format!(
+            "{{\"timestamp\":\"{}\",\"type\":\"assistant\",\"message\":{{\"usage\":{{\"input_tokens\":21000,\"output_tokens\":25000,\"cache_creation_input_tokens\":2000,\"cache_read_input_tokens\":0}},\"model\":\"Claude Test\"}}}}\n",
+            utc(now)
+        ),
+    )
+    .unwrap();
+    let (mut console, at) = open_pane(&scratch, "usage");
+    let at = console.see("Codex", at);
+    console.see("resets in", at);
+    console.see("q quit", at);
+
+    let mark = console.text().len();
+    console.keys(b"r");
+    console.keys(b"q");
+    finish(&console, mark);
 }
