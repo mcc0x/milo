@@ -1,0 +1,7 @@
+*
+!server.ts
+!db.ts
+!page.ts
+!schema.sql
+!assets/*.webp
+!assets/*.png

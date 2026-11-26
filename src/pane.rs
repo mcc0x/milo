@@ -553,7 +553,7 @@ fn with_loading<T>(
     (value, focused)
 }
 
-pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
+pub fn run(start: Start<'_>, open: &Open<'_>, count_launch: bool) -> Result<(), String> {
     let mut terminal = match Session::open() {
         Ok(terminal) => terminal,
         Err(e) => {
@@ -562,7 +562,16 @@ pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
             return Err(format!("cannot use this terminal: {e}{}", without_a_terminal()));
         }
     };
-    let result = run_entered(start, open, &mut terminal);
+    let first = count_launch.then(crate::telemetry::First::start).flatten().map(std::rc::Rc::new);
+    let result = (|| {
+        if let Some(first) = &first {
+            run_entered(Start::Loaded, &|| Ok(Box::new(crate::telemetry::Notice::new(first.clone()))), &mut terminal)?;
+            if !first.proceed.get() {
+                return Ok(());
+            }
+        }
+        run_entered(start, open, &mut terminal)
+    })();
     terminal.restore();
     // The terminal is the shell's again, so this line stays on screen. It
     // holds a file's name, and it must not wait for a terminal that has stopped reading.
