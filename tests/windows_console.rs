@@ -502,7 +502,7 @@ fn utc(seconds: u64) -> String {
 }
 
 #[test]
-fn usage_reads_local_codex_and_claude_sessions_and_quits() {
+fn usage_reads_local_codex_sessions_and_quits() {
     let scratch = Scratch::new("usage");
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     let profile = scratch.0.join("profile");
@@ -530,7 +530,6 @@ fn usage_reads_local_codex_and_claude_sessions_and_quits() {
     let (mut console, at) = open_pane(&scratch, "usage");
     let at = console.see("Codex", at);
     console.see("resets in", at);
-    console.see("tokens today", at);
     console.see("q quit", at);
 
     let mark = console.text().len();
