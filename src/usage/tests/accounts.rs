@@ -775,6 +775,20 @@ fn unreachable_attempts_retry_after_one_minute_and_keep_the_last_reading() {
 }
 
 #[test]
+fn a_missing_curl_is_told_apart_from_a_provider_that_does_not_answer() {
+    let f = Fixture::folder();
+    let me = std::env::current_exe().unwrap();
+    assert_eq!(Failure::without_reply(f.root.join("no-such-curl").as_os_str()), Failure::NoCurl);
+    assert_eq!(Failure::without_reply(me.as_os_str()), Failure::Unreachable);
+
+    let devin = UsageAccount::Devin;
+    let sources = Sources::test(&[], f.root.join("none.conf"), f.root.join("state/accounts"), 9);
+    let mut usage = pane(&f, sources, &[(devin, Show::Always)]);
+    usage.accounts.set(devin, None, Some(Failure::NoCurl), NOW);
+    assert_eq!(text(&mut usage, 60, 2), "Devin · curl not installed\nInstall curl");
+}
+
+#[test]
 fn an_unreachable_provider_keeps_the_last_answer_until_it_is_a_day_old_or_its_period_ends() {
     let f = Fixture::folder();
     // A port nothing listens on: the listener is closed before any look.

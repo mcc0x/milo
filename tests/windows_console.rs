@@ -538,10 +538,9 @@ fn pictures_are_drawn_as_cells_and_what_cannot_be_shown_says_so() {
     fs::write(project.join("mark.png"), include_bytes!("../src/usage/marks/codex.png")).unwrap();
     fs::write(project.join("dusk.jpg"), include_bytes!("rex_lab/river-dusk.jpg")).unwrap();
     fs::write(project.join("river.mp4"), include_bytes!("rex_lab/river-motion.mp4")).unwrap();
-    // Whole chunks whose compressed data cannot be inflated, and a header past the size limit.
+    // A bit depth PNG does not have, which only the decoder reads, and a header past the size limit.
     let mut damaged = include_bytes!("../src/usage/marks/codex.png").to_vec();
-    let data = damaged.windows(4).position(|kind| kind == b"IDAT").unwrap() + 4;
-    damaged[data..data + 2].copy_from_slice(&[0xff, 0xff]);
+    damaged[24] = 3;
     fs::write(project.join("damaged.png"), damaged).unwrap();
     let mut huge = include_bytes!("../src/usage/marks/codex.png").to_vec();
     huge[16..20].copy_from_slice(&20_000_u32.to_be_bytes());
@@ -551,6 +550,28 @@ fn pictures_are_drawn_as_cells_and_what_cannot_be_shown_says_so() {
         b"RIFF\x22\0\0\0WEBPVP8 \x16\0\0\0\x30\x01\0\x9d\x01\x2a\x01\0\x01\0\x0e\xc0\xfe\x25\xa4\0\x03\x70\0\0\0\0",
     )
     .unwrap();
+    // Solid red, as 16 by 8 24-bit rows; every cell is red over red.
+    let mut red = vec![0_u8; 54 + 16 * 8 * 3];
+    red[..2].copy_from_slice(b"BM");
+    for (at, value) in [(2, 54 + 16 * 8 * 3), (10, 54), (14, 40), (18, 16), (22, 8)] {
+        red[at..at + 4].copy_from_slice(&u32::to_le_bytes(value));
+    }
+    red[26..30].copy_from_slice(&[1, 0, 24, 0]);
+    for pixel in red[54..].as_chunks_mut::<3>().0 {
+        *pixel = [0, 0, 255];
+    }
+    fs::write(project.join("red.bmp"), red).unwrap();
+    let (mut console, at) = open_pane(&scratch, "view red.bmp");
+    let drawn = console.see("\u{2580}", at);
+    let shown = console.text();
+    // The pseudoconsole may send the two colours as one sequence or two.
+    let red =
+        |layer: &str| ["5;196", "2;255;0;0"].iter().any(|red| shown[at..drawn].contains(&format!("{layer};{red}")));
+    assert!(red("38") && red("48"), "no red cells:\n{shown}");
+    let mark = console.text().len();
+    console.keys(b"q");
+    finish(&console, mark);
+
     for (file, shown) in [
         ("mark.png", "\u{2580}"),
         ("dusk.jpg", "\u{2580}"),

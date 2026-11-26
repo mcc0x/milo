@@ -138,6 +138,9 @@ impl Capabilities {
         let colors = if !no_color.is_empty() || legacy_vt {
             Colors::None
         } else if matches!(host, Host::Rex | Host::Graphics)
+            // Windows' own console sets no TERM, and once Milo turns on its VT processing it draws
+            // 24-bit colour, as Windows Terminal does.
+            || cfg!(windows) && term.is_empty()
             || term.ends_with(b"-direct")
             || matches!(colorterm.as_encoded_bytes(), b"truecolor" | b"24bit")
         {
@@ -786,6 +789,9 @@ mod tests {
         assert!(!generic.asks_background());
         assert!(!generic.graphics);
         assert_eq!(caps("xterm", "", "", "", "").colors, Colors::Ansi);
+        let console = if cfg!(windows) { Colors::Rgb } else { Colors::Ansi };
+        assert_eq!(caps("", "", "", "", "").colors, console);
+        assert_eq!(caps("", "", "", "1", "").colors, Colors::None);
         assert_eq!(caps("vt100", "", "truecolor", "", "").colors, Colors::None);
         assert_eq!(caps("vte-256color", "", "", "", "").colors, Colors::Indexed);
         assert_eq!(caps("xterm-256color", "rex", "truecolor", "0", "").colors, Colors::None);

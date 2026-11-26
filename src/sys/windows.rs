@@ -284,6 +284,8 @@ const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
 /// One process, a commit limit, and no error dialog or debugger wait after a crash.
 const JOB_OBJECT_LIMIT_CONFINED: u32 = 0x0008 | 0x0100 | 0x0400;
+/// Permission for a process in the job to start one outside it.
+const JOB_OBJECT_LIMIT_BREAKAWAY: u32 = 0x0800 | 0x1000;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -350,8 +352,10 @@ impl Job {
                 std::ptr::null_mut(),
             )
         };
+        let required = JOB_OBJECT_LIMIT_CONFINED | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         found != 0
-            && limits.flags & JOB_OBJECT_LIMIT_CONFINED == JOB_OBJECT_LIMIT_CONFINED
+            && limits.flags & required == required
+            && limits.flags & JOB_OBJECT_LIMIT_BREAKAWAY == 0
             && limits.active_processes == 1
             && (1..=memory).contains(&limits.process_memory)
     }
@@ -421,6 +425,47 @@ struct SecurityAttributes {
 }
 
 const TOKEN_QUERY: u32 = 0x8;
+const TOKEN_ADJUST_DEFAULT: u32 = 0x80;
+const TOKEN_INTEGRITY_LEVEL: i32 = 25;
+const SE_GROUP_INTEGRITY: u32 = 0x20;
+
+/// S-1-16-4096, the low mandatory level.
+#[repr(C)]
+struct LowLabel {
+    revision: u8,
+    count: u8,
+    authority: [u8; 6],
+    level: u32,
+}
+
+#[repr(C)]
+struct MandatoryLabel {
+    sid: *const LowLabel,
+    attributes: u32,
+}
+
+/// Lowers this process to low integrity, so that Windows refuses it write access to anything at
+/// the user's usual level: their files, settings and other processes. Handles already open keep
+/// the access they were opened with, and reading is not restricted.
+pub(crate) fn lower_integrity() -> io::Result<()> {
+    let mut token = std::ptr::null_mut();
+    // SAFETY: The pseudo handle names this process and the output is writable.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_DEFAULT, &raw mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: The token was just opened for this call and is closed with the value.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let sid = LowLabel { revision: 1, count: 1, authority: [0, 0, 0, 0, 0, 16], level: 0x1000 };
+    let label = MandatoryLabel { sid: &raw const sid, attributes: SE_GROUP_INTEGRITY };
+    let size = u32::try_from(size_of::<MandatoryLabel>() + size_of::<LowLabel>()).expect("a label fits in a u32");
+    // SAFETY: The label and the SID it points to live for the call.
+    let set =
+        unsafe { SetTokenInformation(token.as_raw_handle(), TOKEN_INTEGRITY_LEVEL, (&raw const label).cast(), size) };
+    if set == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
 const TOKEN_USER: i32 = 1;
 const SDDL_REVISION_1: u32 = 1;
 const OWNER_SECURITY_INFORMATION: u32 = 0x1;
@@ -443,6 +488,7 @@ const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 unsafe extern "system" {
     fn OpenProcessToken(process: *mut c_void, access: u32, token: *mut *mut c_void) -> i32;
     fn GetTokenInformation(token: *mut c_void, class: i32, info: *mut c_void, size: u32, needed: *mut u32) -> i32;
+    fn SetTokenInformation(token: *mut c_void, class: i32, info: *const c_void, size: u32) -> i32;
     fn ConvertSidToStringSidW(sid: *mut c_void, text: *mut *mut u16) -> i32;
     fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
         text: *const u16,

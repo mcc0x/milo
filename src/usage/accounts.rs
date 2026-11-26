@@ -202,7 +202,9 @@ pub(super) enum Failure {
     /// The key is valid but may not read this, or the plan does not offer it.
     Denied,
     Limited,
-    /// No answer: no network, no curl, a timeout or a server error.
+    /// `/usr/bin/curl` is not installed, so nothing could be asked.
+    NoCurl,
+    /// No answer: no network, a timeout or a server error.
     Unreachable,
     /// An answer in a form Milo does not know.
     Unexpected,
@@ -211,7 +213,7 @@ pub(super) enum Failure {
 }
 
 impl Failure {
-    const NAMES: [(Self, &'static str, &'static str); 10] = [
+    const NAMES: [(Self, &'static str, &'static str); 11] = [
         (Self::NoKey, "no_key", "no key is set"),
         (Self::NoScope, "no_scope", "the account to ask about is not set"),
         (Self::OpenFile, "open_file", "the settings file is not private"),
@@ -219,10 +221,16 @@ impl Failure {
         (Self::Refused, "refused", "the provider refused the key"),
         (Self::Denied, "denied", "the provider denied access to this figure"),
         (Self::Limited, "limited", "the provider rate limited the request"),
+        (Self::NoCurl, "no_curl", "curl is not installed at /usr/bin/curl"),
         (Self::Unreachable, "unreachable", "the provider could not be reached"),
         (Self::Unexpected, "unexpected", "the reply was not understood"),
         (Self::Nothing, "nothing", "the provider reported no usage for this period"),
     ];
+
+    /// Why a question got no answer at all: no curl to ask with, or no one answering.
+    pub(super) fn without_reply(curl: &std::ffi::OsStr) -> Self {
+        if std::path::Path::new(curl).is_file() { Self::Unreachable } else { Self::NoCurl }
+    }
 
     fn name(self) -> &'static str {
         Self::NAMES.iter().find(|(failure, ..)| *failure == self).map_or("", |(_, name, _)| name)
@@ -729,7 +737,7 @@ impl Sources {
             http::RetryAfter::At(date) => date.saturating_sub(now),
         });
         let (answer, rest) = match reply {
-            None => (Err(Failure::Unreachable), UNREACHABLE_REST),
+            None => (Err(Failure::without_reply(http::executable().as_os_str())), UNREACHABLE_REST),
             Some(reply) => match reply.status {
                 200 => (account.parse(&reply.body, now, until).unwrap_or(Err(Failure::Unexpected)), interval),
                 401 => (Err(Failure::Refused), REFUSED_REST),

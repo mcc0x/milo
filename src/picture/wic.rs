@@ -5,14 +5,17 @@
 //! decoder neither reads nor writes the project. The copy has no console and
 //! runs in a job that ends it with Milo, holds it to 384 MiB of committed
 //! memory and keeps it from starting any other program; it refuses to decode
-//! outside such a job. Only the decoders Windows registers for its own formats
+//! outside such a job, and lowers itself to low integrity first, so Windows
+//! refuses it write access to the user's files. Only the decoders Windows registers for its own formats
 //! are created, by their fixed class ids, so an installed codec cannot claim
 //! the file. Windows itself has no WebP decoder, so WebP is refused.
 
 use std::ffi::{OsString, c_void};
 use std::io::{self, Read as _};
 use std::ptr::{NonNull, null, null_mut};
+use std::sync::atomic::AtomicBool;
 
+use super::headers::gif_layout;
 use super::{DecodeControl, FILE_LIMIT, RASTER_SIDE, Raster, Refusal, over_gray, source_size, write_png_pixels};
 
 /// The internal command that runs the decoder. Not for people to run.
@@ -128,7 +131,7 @@ fn wait(child: &mut std::process::Child, control: &DecodeControl<'_>) -> Result<
 fn run(bytes: &[u8], format: &str, size: (u32, u32), control: &DecodeControl<'_>) -> Result<(i32, Vec<u8>), Refusal> {
     control.check()?;
     let mut answer = Vec::new();
-    let status = respond(bytes, format, size, &mut answer);
+    let status = respond(&mut bytes.to_vec(), format, size, &mut answer);
     Ok((status, answer))
 }
 
@@ -144,10 +147,13 @@ pub fn command(args: &[OsString]) -> i32 {
     if read.is_err() || bytes.len() as u64 > FILE_LIMIT || !crate::sys::Job::confined(MEMORY_LIMIT) {
         return REFUSED;
     }
-    respond(&bytes, format, (width, height), &mut io::stdout().lock())
+    if crate::sys::lower_integrity().is_err() {
+        return REFUSED;
+    }
+    respond(&mut bytes, format, (width, height), &mut io::stdout().lock())
 }
 
-fn respond(bytes: &[u8], format: &str, size: (u32, u32), out: &mut impl io::Write) -> i32 {
+fn respond(bytes: &mut [u8], format: &str, size: (u32, u32), out: &mut impl io::Write) -> i32 {
     match pixels(bytes, format, size) {
         Ok(((width, height), bgra)) => {
             let header = [width.to_le_bytes(), height.to_le_bytes()].concat();
@@ -199,17 +205,31 @@ fn decoder_class(format: &str) -> Result<&'static Guid, Refusal> {
 }
 
 /// Decodes the one image in `bytes`, which must be `size` pixels, to BGRA no larger than the raster.
-fn pixels(bytes: &[u8], format: &str, size: (u32, u32)) -> Result<((u32, u32), Vec<u8>), Refusal> {
+/// The bytes are the decoder's own, so a codec that wrote to them would harm nothing else.
+fn pixels(bytes: &mut [u8], format: &str, size: (u32, u32)) -> Result<((u32, u32), Vec<u8>), Refusal> {
     use Refusal::{TooLarge, Unreadable};
     if !source_size(size) {
         return Err(TooLarge);
     }
     let class = decoder_class(format)?;
+    // A GIF's one image can sit anywhere on its canvas; Windows decodes only the image.
+    let [left, top, width, height] = if format == "gif" {
+        let cancel = AtomicBool::new(false);
+        let (canvas, image) = gif_layout(bytes, &DecodeControl::new(&cancel))?;
+        if canvas != size {
+            return Err(Unreadable);
+        }
+        image
+    } else {
+        [0, 0, size.0, size.1]
+    };
     let length = u32::try_from(bytes.len()).map_err(|_| TooLarge)?;
     // SAFETY: The reserved argument is null; a repeated call on this thread only adds a count.
     if unsafe { CoInitializeEx(null_mut(), COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE) } < 0 {
         return Err(Unreadable);
     }
+    // Made before every object below, so it is dropped after all of them.
+    let _apartment = Apartment;
     // SAFETY: The imaging factory class is created for IWICImagingFactory, whose table is `Factory`.
     let factory = unsafe { create::<Factory>(&IMAGING_FACTORY, &FACTORY_INTERFACE) }?;
     // SAFETY: The class is a Windows decoder, created for IWICBitmapDecoder, whose table is `Decoder`.
@@ -220,8 +240,8 @@ fn pixels(bytes: &[u8], format: &str, size: (u32, u32)) -> Result<((u32, u32), V
     let result = unsafe { (factory.table().create_stream)(factory.raw(), &raw mut raw) };
     // SAFETY: CreateStream hands over an IWICStream.
     let stream = unsafe { Com::<Stream>::adopt(result, raw) }?;
-    // SAFETY: The stream only reads the bytes, which outlive it and every object that reads it.
-    check(unsafe { (stream.table().initialize_from_memory)(stream.raw(), bytes.as_ptr().cast_mut(), length) })?;
+    // SAFETY: The bytes are borrowed exclusively for longer than the stream and every object that reads it.
+    check(unsafe { (stream.table().initialize_from_memory)(stream.raw(), bytes.as_mut_ptr(), length) })?;
     // SAFETY: Both objects are live; the decoder reads metadata only if asked, and it is not.
     check(unsafe { (decoder.table().initialize)(decoder.raw(), stream.raw(), DECODE_METADATA_ON_DEMAND) })?;
     let mut frames = 0;
@@ -235,10 +255,10 @@ fn pixels(bytes: &[u8], format: &str, size: (u32, u32)) -> Result<((u32, u32), V
     let result = unsafe { (decoder.table().get_frame)(decoder.raw(), 0, &raw mut raw) };
     // SAFETY: GetFrame hands over an IWICBitmapFrameDecode, whose table begins with `Source`.
     let frame = unsafe { Com::<Source>::adopt(result, raw) }?;
-    let (mut width, mut height) = (0, 0);
+    let (mut decoded_width, mut decoded_height) = (0, 0);
     // SAFETY: The frame is live and both outputs are writable.
-    check(unsafe { (frame.table().get_size)(frame.raw(), &raw mut width, &raw mut height) })?;
-    if (width, height) != size {
+    check(unsafe { (frame.table().get_size)(frame.raw(), &raw mut decoded_width, &raw mut decoded_height) })?;
+    if (decoded_width, decoded_height) != (width, height) {
         return Err(Unreadable);
     }
 
@@ -251,17 +271,17 @@ fn pixels(bytes: &[u8], format: &str, size: (u32, u32)) -> Result<((u32, u32), V
     check(unsafe {
         (converter.table().initialize)(converter.raw(), frame.raw(), &raw const BGRA, 0, null_mut(), 0.0, 0)
     })?;
+
+    // The raster covers the canvas; the image keeps its place and share of it.
     let (columns, rows) = scaled(size);
-    let mut bgra = vec![0; 4 * columns as usize * rows as usize];
-    let stride = 4 * columns;
-    let total = u32::try_from(bgra.len()).expect("a raster fits in a u32");
-    if (columns, rows) == size {
-        // SAFETY: The converter is live, a null rectangle is the whole picture, and the buffer
-        // holds `rows` rows of `stride` bytes.
-        let result = unsafe {
-            (converter.table().source.copy_pixels)(converter.raw(), null(), stride, total, bgra.as_mut_ptr())
-        };
-        check(result)?;
+    let share = |n: u32, whole: u32, room: u32| {
+        let shared = (u64::from(n) * u64::from(room) + u64::from(whole) / 2) / u64::from(whole);
+        u32::try_from(shared).expect("no longer than the raster")
+    };
+    let (x, y) = (share(left, size.0, columns).min(columns - 1), share(top, size.1, rows).min(rows - 1));
+    let shown = (share(width, size.0, columns).clamp(1, columns - x), share(height, size.1, rows).clamp(1, rows - y));
+    let image = if shown == (width, height) {
+        copy_bgra(&converter, shown)?
     } else {
         let mut raw = null_mut();
         // SAFETY: The factory is live and the output is writable.
@@ -269,14 +289,65 @@ fn pixels(bytes: &[u8], format: &str, size: (u32, u32)) -> Result<((u32, u32), V
         // SAFETY: CreateBitmapScaler hands over an IWICBitmapScaler.
         let scaler = unsafe { Com::<Scaler>::adopt(result, raw) }?;
         // SAFETY: Both objects are live.
-        check(unsafe { (scaler.table().initialize)(scaler.raw(), converter.raw(), columns, rows, INTERPOLATE_FANT) })?;
-        // SAFETY: The scaler is live, a null rectangle is the whole picture, and the buffer holds
-        // `rows` rows of `stride` bytes.
-        let result =
-            unsafe { (scaler.table().source.copy_pixels)(scaler.raw(), null(), stride, total, bgra.as_mut_ptr()) };
-        check(result)?;
+        check(unsafe {
+            (scaler.table().initialize)(scaler.raw(), converter.raw(), shown.0, shown.1, INTERPOLATE_FANT)
+        })?;
+        copy_bgra(&scaler, shown)?
+    };
+    if shown == (columns, rows) {
+        return Ok(((columns, rows), image));
     }
-    Ok(((columns, rows), bgra))
+    // Uncovered canvas is transparent, as browsers draw it; they ignore the GIF background colour.
+    let mut canvas = vec![0; 4 * columns as usize * rows as usize];
+    for (row, line) in image.chunks_exact(4 * shown.0 as usize).enumerate() {
+        let at = 4 * ((y as usize + row) * columns as usize + x as usize);
+        canvas[at..at + line.len()].copy_from_slice(line);
+    }
+    Ok(((columns, rows), canvas))
+}
+
+/// A converter or scaler, whose table begins with `Source`.
+trait Bitmap {
+    fn source(&self) -> &Source;
+}
+
+impl Bitmap for Converter {
+    fn source(&self) -> &Source {
+        &self.source
+    }
+}
+
+impl Bitmap for Scaler {
+    fn source(&self) -> &Source {
+        &self.source
+    }
+}
+
+/// Copies all of a bitmap of `size` pixels, which must give straight BGRA.
+fn copy_bgra<T: Bitmap>(bitmap: &Com<T>, (columns, rows): (u32, u32)) -> Result<Vec<u8>, Refusal> {
+    let table = bitmap.table().source();
+    let mut format = guid(0, 0, 0, [0; 8]);
+    // SAFETY: The bitmap is live and the format output is writable.
+    check(unsafe { (table.get_pixel_format)(bitmap.raw(), &raw mut format) })?;
+    if format != BGRA {
+        return Err(Refusal::Unreadable);
+    }
+    let mut bgra = vec![0; 4 * columns as usize * rows as usize];
+    let total = u32::try_from(bgra.len()).expect("a raster fits in a u32");
+    // SAFETY: The bitmap is live, a null rectangle is all of it, and the buffer holds `rows` rows
+    // of `4 * columns` bytes.
+    check(unsafe { (table.copy_pixels)(bitmap.raw(), null(), 4 * columns, total, bgra.as_mut_ptr()) })?;
+    Ok(bgra)
+}
+
+/// This thread's use of COM, ended once every object made in it is released.
+struct Apartment;
+
+impl Drop for Apartment {
+    fn drop(&mut self) {
+        // SAFETY: Balances the successful CoInitializeEx made just before this value.
+        unsafe { CoUninitialize() };
+    }
 }
 
 fn check(result: i32) -> Result<(), Refusal> {
@@ -331,6 +402,7 @@ impl<T> Drop for Com<T> {
 }
 
 #[repr(C)]
+#[derive(PartialEq, Eq)]
 struct Guid {
     data1: u32,
     data2: u16,
@@ -406,7 +478,8 @@ struct Decoder {
 struct Source {
     unknown: Unknown,
     get_size: unsafe extern "system" fn(*mut c_void, *mut u32, *mut u32) -> Hresult,
-    _format_resolution_palette: [Unused; 3],
+    get_pixel_format: unsafe extern "system" fn(*mut c_void, *mut Guid) -> Hresult,
+    _resolution_and_palette: [Unused; 2],
     copy_pixels: unsafe extern "system" fn(*mut c_void, *const c_void, u32, u32, *mut u8) -> Hresult,
 }
 
@@ -427,6 +500,7 @@ struct Scaler {
 #[link(name = "ole32")]
 unsafe extern "system" {
     fn CoInitializeEx(reserved: *mut c_void, flags: u32) -> Hresult;
+    fn CoUninitialize();
     fn CoCreateInstance(
         class: *const Guid,
         outer: *mut c_void,
@@ -464,20 +538,70 @@ mod tests {
     #[test]
     fn the_decoder_refuses_a_picture_whose_size_is_not_the_one_checked() {
         let png = Picture::sample_png(4, 2);
-        assert!(pixels(&png, "png", (4, 2)).is_ok());
-        assert!(matches!(pixels(&png, "png", (2, 4)), Err(Refusal::Unreadable)));
-        assert!(matches!(pixels(&png, "png", (16_385, 1)), Err(Refusal::TooLarge)));
-        assert!(matches!(pixels(&png, "jpeg", (4, 2)), Err(Refusal::Unreadable)));
-        assert!(matches!(pixels(&png, "webp", (4, 2)), Err(Refusal::UnsupportedPlatform)));
+        assert!(pixels(&mut png.clone(), "png", (4, 2)).is_ok());
+        assert!(matches!(pixels(&mut png.clone(), "png", (2, 4)), Err(Refusal::Unreadable)));
+        assert!(matches!(pixels(&mut png.clone(), "png", (16_385, 1)), Err(Refusal::TooLarge)));
+        assert!(matches!(pixels(&mut png.clone(), "jpeg", (4, 2)), Err(Refusal::Unreadable)));
+        assert!(matches!(pixels(&mut png.clone(), "webp", (4, 2)), Err(Refusal::UnsupportedPlatform)));
     }
 
     #[test]
-    fn damaged_image_data_is_unreadable_rather_than_partly_shown() {
-        let mut png = Picture::sample_png(8, 8);
-        let data = png.windows(4).position(|kind| kind == b"IDAT").unwrap() + 4;
-        png[data..data + 2].copy_from_slice(&[0xff, 0xff]);
+    fn an_impossible_header_is_unreadable_and_damaged_data_stays_within_its_checked_size() {
         let cancel = AtomicBool::new(false);
         let control = DecodeControl::new(&cancel);
+        let mut png = Picture::sample_png(8, 8);
+        png[24] = 3; // a bit depth PNG does not have
         assert!(matches!(decode(&png, "png", (8, 8), &control), Err(Refusal::Unreadable)));
+        // Windows draws what it can of data that cannot be inflated, like a truncated download.
+        let mut png = Picture::sample_png(8, 8);
+        let data = png.windows(4).position(|kind| kind == b"IDAT").unwrap() + 4;
+        png[data + 2] = 0b111; // the first block claims the reserved type
+        let raster = decode(&png, "png", (8, 8), &control).unwrap();
+        assert_eq!((raster.width, raster.height, raster.rgb.len()), (8, 8, 8 * 8 * 3));
+    }
+
+    #[test]
+    fn colors_come_through_bmp_and_tiff_exactly() {
+        let mut bmp = vec![0_u8; 62];
+        bmp[..2].copy_from_slice(b"BM");
+        for (at, value) in [(2, 62_u32), (10, 54), (14, 40), (18, 2), (22, 1), (34, 8)] {
+            bmp[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bmp[26..30].copy_from_slice(&[1, 0, 24, 0]);
+        bmp[54..60].copy_from_slice(&[0, 0, 255, 255, 0, 0]); // red, then blue
+        let mut tiff = b"II\x2a\0\x08\0\0\0\x0a\0".to_vec();
+        let short = |tag: u16, count: u32, value: u32| (tag, 3_u16, count, value);
+        for (tag, kind, count, value) in [
+            short(256, 1, 2),
+            short(257, 1, 1),
+            short(258, 3, 134),
+            short(259, 1, 1),
+            short(262, 1, 2),
+            (273, 4, 1, 140),
+            short(277, 1, 3),
+            short(278, 1, 1),
+            (279, 4, 1, 6),
+            short(284, 1, 1),
+        ] {
+            tiff.extend([tag.to_le_bytes(), kind.to_le_bytes()].concat());
+            tiff.extend([count.to_le_bytes(), value.to_le_bytes()].concat());
+        }
+        tiff.extend([0, 0, 0, 0, 8, 0, 8, 0, 8, 0, 255, 0, 0, 0, 0, 255]);
+        for (data, name) in [(bmp, "bmp"), (tiff, "tiff")] {
+            let picture = Picture::decode(data).unwrap();
+            assert_eq!(picture.raster().unwrap(), (&[255, 0, 0, 0, 0, 255][..], 2, 1), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_gif_image_keeps_its_place_on_the_canvas() {
+        let screen = b"GIF89a\x03\0\x02\0\x80\0\0\0\0\0\xff\xff\xff!\xfe\x02,;\0";
+        let image = b",\x02\0\x01\0\x01\0\x01\0\0\x02\x02D\x01\0";
+        let picture = Picture::decode([screen.as_slice(), image, b";"].concat()).unwrap();
+        let (rgb, width, height) = picture.raster().unwrap();
+        assert_eq!((width, height), (3, 2));
+        // Black in the lower right; the rest of the canvas is transparent, drawn gray.
+        assert_eq!(rgb[..15], [128; 15]);
+        assert_eq!(rgb[15..], [0, 0, 0]);
     }
 }
