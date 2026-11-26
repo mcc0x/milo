@@ -402,6 +402,9 @@ impl Hint {
                 Self { full: "access was denied", short: "access denied", state: "denied", next: DOCTOR }
             }
             Failure::Limited => Self { full: "rate limited", short: "rate limited", state: "limited", next: None },
+            Failure::NoCurl => {
+                Self { full: "curl not installed", short: "no curl", state: "no curl", next: Some("Install curl") }
+            }
             Failure::Unreachable => Self {
                 full: "could not reach provider",
                 short: "unreachable",
