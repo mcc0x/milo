@@ -467,33 +467,47 @@ fn final_name(file: &File) -> Option<OsString> {
     written(&buffer, got)?.file_name().map(ToOwned::to_owned)
 }
 
-/// The short (8.3) spelling of a path, when the volume keeps one that differs.
-fn short_spelling(path: &Path) -> Option<PathBuf> {
+/// Every spelling of a path's own name a writer could open it by: the name itself and, when the
+/// volume keeps one that differs, its short (8.3) spelling. An error is not taken to mean there is
+/// no short spelling.
+fn spellings(path: &Path) -> Result<Vec<PathBuf>, ()> {
     let long = wide(path);
     let mut buffer = vec![0u16; MAX_PATH_UNITS];
-    let len = u32::try_from(buffer.len()).ok()?;
+    let len = u32::try_from(buffer.len()).map_err(|_| ())?;
     // SAFETY: The name is NUL-terminated, and the buffer holds `len` units.
     let got = unsafe { GetShortPathNameW(long.as_ptr(), buffer.as_mut_ptr(), len) };
-    let short = written(&buffer, got)?;
-    let name = short.file_name()?;
-    (Some(name) != path.file_name()).then(|| path.with_file_name(name))
+    let short = written(&buffer, got).ok_or(())?;
+    let name = short.file_name().ok_or(())?;
+    let mut all = vec![path.to_owned()];
+    if Some(name) != path.file_name() {
+        all.push(path.with_file_name(name));
+    }
+    Ok(all)
 }
 
-/// Every name SQLite could give this database's log, index and journal: the name it is read by,
-/// which must be its own long name, and that name's short spelling. A database known by any other
-/// name, through a second link, could have a writer whose files are beside that name instead.
+/// The names to look for a database's log, index and journal beside: the name it is read by, which
+/// must be its only link and its own long name, and that name's short spelling. A writer that opens
+/// it through a file symbolic link keeps them beside the link instead, which cannot be found from
+/// the database, so a database is only read when its owner opens it by its own name.
 fn names(path: &Path, db: &File) -> Option<Vec<PathBuf>> {
     let name = path.file_name()?;
     if !one_name(db) || final_name(db)?.to_str()?.to_lowercase() != name.to_str()?.to_lowercase() {
         return None;
     }
-    Some([Some(path.to_owned()), short_spelling(path)].into_iter().flatten().collect())
+    spellings(path).ok()
 }
 
-/// Whether a log or an index is beside a database, as one is while any connection uses it through a
-/// write-ahead log. Only names are looked at.
+/// Whether a log or an index is beside a database under any name `copy` looks under, as one is while
+/// any connection uses it through a write-ahead log. Only names are looked at.
 pub(in crate::usage) fn in_use(path: &Path) -> bool {
-    ["-wal", "-shm"].into_iter().any(|suffix| std::fs::symlink_metadata(sidecar(path, suffix)).is_ok())
+    if std::fs::symlink_metadata(path).is_err() {
+        return false;
+    }
+    spellings(path).map_or(true, |names| {
+        names.iter().any(|name| {
+            ["-wal", "-shm"].into_iter().any(|suffix| std::fs::symlink_metadata(sidecar(name, suffix)).is_ok())
+        })
+    })
 }
 
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {

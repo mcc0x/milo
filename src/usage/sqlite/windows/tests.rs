@@ -227,11 +227,12 @@ fn a_database_is_read_only_by_its_own_name_and_a_log_beside_its_short_name_count
     let writer = Writer::open(&path);
     writer.exec("CREATE TABLE t(n); INSERT INTO t VALUES (1);");
     drop(writer);
-    let Some(short) = short_spelling(&path) else { return };
+    let Some(short) = spellings(&path).unwrap().get(1).cloned() else { return };
+    assert!(!in_use(&path));
     assert_eq!(count(&short), None, "a database was read by its short name");
     assert_eq!(count(&path).as_deref(), Some("[{\"c\":1}]\n"));
     fs::write(sidecar(&short, "-wal"), b"").unwrap();
-    assert!(in_use(&short));
+    assert!(in_use(&path), "the pane would not say why the database is unread");
     assert_eq!(count(&path), None, "a log beside the short name was missed");
 }
 
