@@ -1,8 +1,8 @@
 //! Hands the session URL to the default browser without putting its bearer in a process argument.
 //! The browser is told only the path of a private page that forwards it to the editor. The shell
 //! opens that page with the program registered for it, reading the path as a file name and never
-//! as a command line for cmd.exe, and the browser gets no share of Milo's console, so Ctrl-C in
-//! Milo does not reach it.
+//! as a command line for cmd.exe. The page is kept in a folder only this user and SYSTEM may
+//! change, held open until Milo is done with it, so nobody else can swap the page the browser opens.
 
 use std::ffi::{OsStr, c_void};
 use std::fmt;
@@ -23,23 +23,25 @@ const OPENER_CHECK: Duration = Duration::from_millis(100);
 pub(super) struct Launch {
     opener: Option<JoinHandle<io::Result<()>>>,
     handoff: Option<(Temp, Instant)>,
+    _folder: fs::File,
 }
 
 impl Launch {
     pub(super) fn start(url: &str) -> io::Result<Self> {
-        // Milo's state folder is in the user's own profile. The page itself is private to the user.
-        let root = crate::paths::state_dir().ok_or(io::ErrorKind::NotFound)?;
-        fs::create_dir_all(&root)?;
-        crate::fs_ops::open_dir(&root)?;
-        Self::spawn(&root, open_with_shell, url)
+        let state = crate::paths::state_dir().ok_or(io::ErrorKind::NotFound)?;
+        fs::create_dir_all(&state)?;
+        crate::fs_ops::open_dir(&state)?;
+        Self::spawn(&state.join("web"), open_with_shell, url)
     }
 
-    /// Writes the page and asks `open`, on a thread of its own, to show it.
+    /// Writes the page into the private folder `root`, made if it is missing, and asks `open`, on
+    /// a thread of its own, to show it.
     pub(super) fn spawn(
         root: &Path,
         open: impl FnOnce(&Path) -> io::Result<()> + Send + 'static,
         url: &str,
     ) -> io::Result<Self> {
+        let folder = crate::sys::private_dir(root)?;
         let name = super::random_token()?;
         let (handoff, mut file) = Temp::create(root.join(format!("milo-web-{name}.html")))?;
         // The editor URL is constructed from a numeric loopback address and a hex token.
@@ -54,7 +56,7 @@ impl Launch {
         let expires = Instant::now() + LIFETIME;
         let page = handoff.path().to_path_buf();
         let opener = std::thread::Builder::new().name("browser opener".into()).spawn(move || open(&page))?;
-        Ok(Self { opener: Some(opener), handoff: Some((handoff, expires)) })
+        Ok(Self { opener: Some(opener), handoff: Some((handoff, expires)), _folder: folder })
     }
 
     pub(super) fn connected(&mut self) {
@@ -108,8 +110,6 @@ struct ShellExecuteInfo {
 /// Finish before returning, since this thread pumps no messages.
 const SEE_MASK_NOASYNC: u32 = 0x100;
 const SEE_MASK_FLAG_NO_UI: u32 = 0x400;
-/// A console program started for the page gets a console of its own instead of Milo's.
-const SEE_MASK_NO_CONSOLE: u32 = 0x8000;
 const SW_SHOWNORMAL: i32 = 1;
 const COINIT_APARTMENTTHREADED: u32 = 0x2;
 const COINIT_DISABLE_OLE1DDE: u32 = 0x4;
@@ -135,7 +135,7 @@ fn open_with_shell(page: &Path) -> io::Result<()> {
     let null = std::ptr::null_mut;
     let mut info = ShellExecuteInfo {
         size: u32::try_from(size_of::<ShellExecuteInfo>()).expect("the record fits in a u32"),
-        mask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI | SEE_MASK_NO_CONSOLE,
+        mask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
         window: null(),
         verb: verb.as_ptr(),
         file: file.as_ptr(),
@@ -191,13 +191,18 @@ mod tests {
     #[test]
     fn opener_only_receives_the_private_page_path() {
         let folder = Fixture::folder();
+        let web = folder.root.join("web");
         let (send, receive) = mpsc::channel();
-        let mut launch = Launch::spawn(&folder.root, reading(send), PRIVATE_URL).unwrap();
+        let mut launch = Launch::spawn(&web, reading(send), PRIVATE_URL).unwrap();
         let (page, text) = receive.recv_timeout(Duration::from_secs(10)).unwrap();
         let (handoff, expires) = launch.handoff.as_ref().unwrap();
         let expires = *expires;
         assert_eq!(page, handoff.path());
-        assert_eq!(page.parent(), Some(folder.root.as_path()));
+        assert_eq!(page.parent(), Some(web.as_path()));
+        assert!(fs::rename(&web, folder.root.join("moved")).is_err(), "the page's folder was renamed");
+        let opened = crate::fs_ops::open_dir(&web).unwrap();
+        assert_eq!(crate::sys::file_security(&opened).unwrap(), crate::sys::private_security().unwrap());
+        drop(opened);
         let name = page.file_name().unwrap().to_str().unwrap();
         assert!(name.starts_with("milo-web-") && name.ends_with(".html"), "{name}");
         assert!(!name.contains("0123456789abcdef"));
@@ -217,7 +222,7 @@ mod tests {
     fn a_slow_browser_can_still_read_the_handoff() {
         let folder = Fixture::folder();
         let (send, receive) = mpsc::channel();
-        let mut launch = Launch::spawn(&folder.root, reading(send), PRIVATE_URL).unwrap();
+        let mut launch = Launch::spawn(&folder.root.join("web"), reading(send), PRIVATE_URL).unwrap();
         let (page, _) = receive.recv_timeout(Duration::from_secs(10)).unwrap();
         let started = launch.handoff.as_ref().unwrap().1 - LIFETIME;
         finish(&mut launch);
@@ -232,9 +237,10 @@ mod tests {
     #[test]
     fn deletes_handoff_on_connection_failure_and_shutdown() {
         let folder = Fixture::folder();
+        let web = folder.root.join("web");
         for cleanup in ["connection", "failure", "shutdown"] {
             let failing = |_: &Path| Err(io::Error::from(io::ErrorKind::NotFound));
-            let mut launch = Launch::spawn(&folder.root, failing, PRIVATE_URL).unwrap();
+            let mut launch = Launch::spawn(&web, failing, PRIVATE_URL).unwrap();
             let page = launch.handoff.as_ref().unwrap().0.path().to_path_buf();
             finish(&mut launch);
             match cleanup {
@@ -245,7 +251,18 @@ mod tests {
             }
             assert!(!page.exists(), "leftover handoff after {cleanup}");
         }
-        assert_eq!(fs::read_dir(&folder.root).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&web).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_page_folder_others_could_change_is_refused_before_anything_is_written() {
+        let folder = Fixture::folder();
+        let shared = folder.root.join("web");
+        fs::create_dir(&shared).unwrap();
+        let unused = |_: &Path| -> io::Result<()> { panic!("a page was opened from a shared folder") };
+        let error = Launch::spawn(&shared, unused, PRIVATE_URL).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read_dir(&shared).unwrap().count(), 0);
     }
 
     #[test]
@@ -299,7 +316,7 @@ mod tests {
                 .spawn()?;
             started.send(child).map_err(io::Error::other)
         };
-        let launch = Launch::spawn(&folder.root, open, &url).unwrap();
+        let launch = Launch::spawn(&folder.root.join("web"), open, &url).unwrap();
         let path = launch.handoff.as_ref().unwrap().0.path().to_path_buf();
         let mut chrome = chrome.recv_timeout(Duration::from_secs(10)).unwrap();
         // A browser's first start on a fresh computer can take well over ten seconds.

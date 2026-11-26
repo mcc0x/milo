@@ -76,20 +76,38 @@ fn through_a_file(path: &Path) -> bool {
 }
 
 /// The file to lock to hold a whole directory. Unix locks the directory itself. Windows can't
-/// lock a directory handle, so it locks a fixed file inside the directory instead.
+/// lock a directory handle, so it locks a fixed file inside the directory instead: one only this
+/// user and SYSTEM may open, which nobody can remove or replace while it is open.
 pub fn dir_lock(dir: &Path) -> io::Result<File> {
     #[cfg(unix)]
     return open_dir(dir);
     #[cfg(windows)]
     {
         open_dir(dir)?;
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        let file = refuse_reparse_point(options.open(dir.join(".milo.lock"))?)?;
-        if !file.metadata()?.is_file() {
-            return Err(io::ErrorKind::InvalidInput.into());
+        crate::sys::private_file(&dir.join(".milo.lock"), crate::sys::Existing::Open)
+    }
+}
+
+/// Waits for the lock on a [`dir_lock`] file. On Windows another user may hold a lock file in a
+/// shared folder, so the wait is bounded there rather than stalling a save for ever.
+pub fn lock_dir(lock: &File) -> io::Result<()> {
+    #[cfg(unix)]
+    return lock.lock();
+    #[cfg(windows)]
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(()),
+                Err(fs::TryLockError::Error(error)) => return Err(error),
+                Err(fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(fs::TryLockError::WouldBlock) => {
+                    return Err(io::Error::new(io::ErrorKind::WouldBlock, "another save is still holding the folder"));
+                }
+            }
         }
-        Ok(file)
     }
 }
 

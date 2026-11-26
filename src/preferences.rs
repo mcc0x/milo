@@ -563,7 +563,7 @@ fn remove_layer(path: &Path, check: impl FnOnce() -> io::Result<()>) -> io::Resu
         Err(e) if e.kind() == io::ErrorKind::NotFound => return check(),
         Err(e) => return Err(e),
     };
-    lock.lock()?;
+    fs_ops::lock_dir(&lock)?;
     check()?;
     if writable_mode(path)?.is_none() {
         return Ok(());
@@ -642,7 +642,7 @@ fn lock_directory(dir: &Path) -> io::Result<fs::File> {
     fs::create_dir_all(dir)?;
     // Lock the directory because the files themselves are atomically replaced.
     let lock = fs_ops::dir_lock(dir)?;
-    lock.lock()?;
+    fs_ops::lock_dir(&lock)?;
     Ok(lock)
 }
 

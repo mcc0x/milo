@@ -1,7 +1,8 @@
 //! Per-user process locks. A lock is the first byte of a file in Milo's state folder, taken with
 //! `LockFileEx` for as long as the returned file stays open, and given up when its process ends.
-//! Only this user and SYSTEM may open a lock file, and a lock file that anyone else could open is
-//! refused, so another user can neither take one of these locks nor make one look held.
+//! The lock files are kept in a folder of their own that only this user and SYSTEM may open or
+//! change, and a lock file or folder that anyone else could reach is refused, so another user can
+//! neither take one of these locks, make one look held, nor swap the file a lock is taken on.
 //!
 //! Windows does not name the process that holds a lock, and has no signal to send it. Whatever
 //! needs the holder, such as stopping it, still says it is not supported on Windows yet whenever
@@ -16,8 +17,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::fs_ops;
-use crate::sys::{Existing, private_file};
+use crate::sys::{Existing, private_dir, private_file};
 
+/// The private folder, inside the folder a caller names, that holds the lock files.
+const FOLDER: &str = "locks";
 const LISTENER_LOCK: &CStr = c"listener.lock";
 const ALERTS_LOCK: &CStr = c"alerts.lock";
 const ALERTS_SUPERVISOR_LOCK: &CStr = c"alerts-supervisor.lock";
@@ -57,13 +60,15 @@ fn unsupported<T>(what: &str) -> io::Result<T> {
 }
 
 fn path(dir: &Path, name: &CStr) -> io::Result<PathBuf> {
-    Ok(dir.join(name.to_str().map_err(|_| ErrorKind::InvalidInput)?))
+    Ok(dir.join(FOLDER).join(name.to_str().map_err(|_| ErrorKind::InvalidInput)?))
 }
 
-/// Never follows a link to the folder or the file, and refuses a lock file another user could open.
+/// Never follows a link to a folder or the file, and refuses a lock folder or file another user
+/// could reach.
 fn create(dir: &Path, name: &CStr) -> io::Result<File> {
     fs::create_dir_all(dir)?;
     fs_ops::open_dir(dir)?;
+    private_dir(&dir.join(FOLDER))?;
     private_file(&path(dir, name)?, Existing::Open)
 }
 
@@ -267,12 +272,24 @@ mod tests {
     #[test]
     fn a_lock_file_that_others_could_open_is_refused() {
         let f = Fixture::folder();
-        // Made with the folder's inherited access list, as a file another user could reach would be.
-        fs::write(f.root.join("request.lock"), "").unwrap();
-        fs::write(f.root.join("setup.lock"), "").unwrap();
+        drop(private_dir(&f.root.join(FOLDER)).unwrap());
+        // Made with an access list that is not exactly the private one, as a file another user
+        // could reach would be.
+        fs::write(f.root.join(FOLDER).join("request.lock"), "").unwrap();
+        fs::write(f.root.join(FOLDER).join("setup.lock"), "").unwrap();
         assert_eq!(hold(&f.root, REQUEST, Duration::ZERO).unwrap_err().kind(), ErrorKind::PermissionDenied);
         assert!(held(&f.root, REQUEST).is_err(), "an unknown holder is never reported as free");
         assert!(setup(&f.root).is_err());
+    }
+
+    #[test]
+    fn a_lock_folder_that_others_could_change_is_refused() {
+        let f = Fixture::folder();
+        fs::create_dir(f.root.join(FOLDER)).unwrap();
+        assert_eq!(hold(&f.root, REQUEST, Duration::ZERO).unwrap_err().kind(), ErrorKind::PermissionDenied);
+        assert!(held(&f.root, REQUEST).is_ok_and(|held| !held), "no lock file is there to be held");
+        assert!(setup(&f.root).is_err());
+        assert_eq!(fs::read_dir(f.root.join(FOLDER)).unwrap().count(), 0, "a lock file was made in a shared folder");
     }
 
     #[test]

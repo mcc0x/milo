@@ -389,9 +389,13 @@ const DACL_SECURITY_INFORMATION: u32 = 0x4;
 const SE_FILE_OBJECT: i32 = 1;
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
+const FILE_SHARE_READ_WRITE: u32 = 0x3;
 const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x7;
 const CREATE_NEW: u32 = 1;
+const OPEN_EXISTING: u32 = 3;
 const OPEN_ALWAYS: u32 = 4;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+const ERROR_ALREADY_EXISTS: i32 = 183;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
@@ -439,6 +443,7 @@ unsafe extern "system" {
         flags: u32,
         template: *mut c_void,
     ) -> *mut c_void;
+    fn CreateDirectoryW(name: *const u16, security: *const SecurityAttributes) -> i32;
 }
 
 /// Memory the system allocated for a result, freed with this value.
@@ -571,8 +576,10 @@ pub(crate) enum Existing {
 
 /// Opens a file for reading and writing that only this user and SYSTEM may open, creating it
 /// with that security in place from the start, so no other program can open it in between.
-/// A link or other reparse point is never followed, and a file that already exists is refused
-/// unless it is a plain file with exactly that security.
+/// A link or other reparse point is never followed, and the file is refused unless it is a plain
+/// file with exactly that security, so a new file on a volume that keeps no access lists is
+/// removed and refused too. A file that may already exist is a lock, and is opened sharing no
+/// deletion, so nobody can delete or rename it while it is held.
 pub(crate) fn private_file(path: &Path, existing: Existing) -> io::Result<File> {
     let descriptor = private_descriptor()?;
     let attributes = SecurityAttributes {
@@ -581,13 +588,16 @@ pub(crate) fn private_file(path: &Path, existing: Existing) -> io::Result<File> 
         inherit: 0,
     };
     let name: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-    let disposition = if existing == Existing::Open { OPEN_ALWAYS } else { CREATE_NEW };
+    let (disposition, share) = match existing {
+        Existing::Open => (OPEN_ALWAYS, FILE_SHARE_READ_WRITE),
+        Existing::Refuse => (CREATE_NEW, FILE_SHARE_READ_WRITE_DELETE),
+    };
     // SAFETY: The name is NUL-terminated, and the attributes and their descriptor live for the call.
     let raw = unsafe {
         CreateFileW(
             name.as_ptr(),
             GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ_WRITE_DELETE,
+            share,
             &raw const attributes,
             disposition,
             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
@@ -599,17 +609,67 @@ pub(crate) fn private_file(path: &Path, existing: Existing) -> io::Result<File> 
     }
     // SAFETY: The handle was just created for this call and is closed with the file.
     let file = File::from(unsafe { OwnedHandle::from_raw_handle(raw) });
-    if existing == Existing::Refuse {
-        return Ok(file);
-    }
-    let info = file.metadata()?;
-    if info.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !info.is_file() {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
-    if file_security(&file)? != security_text(&descriptor)? {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the file is not private to this user"));
+    if let Err(error) = private_as_made(&file, &descriptor, false) {
+        if existing == Existing::Refuse {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+        }
+        return Err(error);
     }
     Ok(file)
+}
+
+/// Whether an open file or folder is a plain one, not a reparse point, with exactly the security
+/// `descriptor` gives.
+fn private_as_made(file: &File, descriptor: &Local, folder: bool) -> io::Result<()> {
+    let info = file.metadata()?;
+    if info.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.is_dir() != folder {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    if file_security(file)? != security_text(descriptor)? {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "not private to this user"));
+    }
+    Ok(())
+}
+
+/// Opens a folder that only this user and SYSTEM may open, list or change, creating it with that
+/// security from the start. Nobody else can add, remove or replace a name in it. An existing
+/// folder must be a plain folder, not a link or junction, with exactly that security. The handle
+/// shares no deletion, so the folder cannot be removed or renamed while it is held.
+pub(crate) fn private_dir(path: &Path) -> io::Result<File> {
+    let descriptor = private_descriptor()?;
+    let attributes = SecurityAttributes {
+        length: u32::try_from(size_of::<SecurityAttributes>()).expect("security attributes fit in a u32"),
+        descriptor: descriptor.0,
+        inherit: 0,
+    };
+    let name: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: The name is NUL-terminated, and the attributes and their descriptor live for the call.
+    if unsafe { CreateDirectoryW(name.as_ptr(), &raw const attributes) } == 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_ALREADY_EXISTS) {
+            return Err(error);
+        }
+    }
+    // SAFETY: The name is NUL-terminated; no security or template is passed.
+    let raw = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if raw as RawFd == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: The handle was just opened for this call and is closed with the file.
+    let folder = File::from(unsafe { OwnedHandle::from_raw_handle(raw) });
+    private_as_made(&folder, &descriptor, true)?;
+    Ok(folder)
 }
 
 /// A verbatim drive path without its \\?\ prefix, when the plain form names the same file:
@@ -659,6 +719,40 @@ mod private_file_tests {
         assert_ne!(file_security(&File::open(&inherited).unwrap()).unwrap(), expected);
         let refused = private_file(&inherited, Existing::Open).unwrap_err();
         assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_private_folder_is_shut_to_everyone_else_and_held_in_place() {
+        let fixture = Fixture::folder();
+        let path = fixture.root.join("private");
+        let folder = private_dir(&path).unwrap();
+        let expected = private_security().unwrap();
+        assert_eq!(file_security(&folder).unwrap(), expected);
+        assert!(std::fs::rename(&path, fixture.root.join("moved")).is_err(), "a held folder was renamed");
+        assert_eq!(file_security(&private_dir(&path).unwrap()).unwrap(), expected, "a second open is refused");
+        drop(folder);
+
+        let inherited = fixture.root.join("inherited");
+        std::fs::create_dir(&inherited).unwrap();
+        assert_eq!(private_dir(&inherited).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        std::fs::write(fixture.root.join("file"), "").unwrap();
+        assert!(private_dir(&fixture.root.join("file")).is_err());
+        let junction = fixture.root.join("junction");
+        let made =
+            std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&junction).arg(&path).output().unwrap();
+        assert!(made.status.success(), "cannot make a junction");
+        assert_eq!(private_dir(&junction).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn a_lock_file_cannot_be_removed_while_it_is_open() {
+        let fixture = Fixture::folder();
+        let path = fixture.root.join("held.lock");
+        let lock = private_file(&path, Existing::Open).unwrap();
+        assert!(std::fs::remove_file(&path).is_err());
+        assert!(std::fs::rename(&path, fixture.root.join("moved.lock")).is_err());
+        drop(lock);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
