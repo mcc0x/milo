@@ -540,7 +540,7 @@ fn pictures_and_video_say_what_windows_cannot_show_yet() {
     fs::write(project.join("dusk.jpg"), include_bytes!("rex_lab/river-dusk.jpg")).unwrap();
     fs::write(project.join("river.mp4"), include_bytes!("rex_lab/river-motion.mp4")).unwrap();
     for (file, note) in [
-        ("mark.png", "Pictures in this terminal are not supported on Windows yet"),
+        ("mark.png", "Pictures need Kitty graphics here; a cell preview is not supported on Windows yet."),
         ("dusk.jpg", "Decoding this image is not supported on Windows yet"),
         ("river.mp4", "Video playback is not supported on Windows yet."),
     ] {

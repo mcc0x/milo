@@ -27,7 +27,7 @@ pub(super) fn picture(s: &mut Screen, rows: usize, picture: &Picture) -> Option<
 #[cfg(not(windows))]
 const NO_PICTURES: &str = "Kitty graphics and a cell preview are unavailable here.";
 #[cfg(windows)]
-const NO_PICTURES: &str = "Pictures in this terminal are not supported on Windows yet: they need Kitty graphics.";
+const NO_PICTURES: &str = "Pictures need Kitty graphics here; a cell preview is not supported on Windows yet.";
 
 pub(super) fn movie<'a>(s: &mut Screen, rows: usize, video: &'a Video) -> Option<&'a str> {
     if let Some(why) = video.error() {
