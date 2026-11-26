@@ -159,6 +159,10 @@ fn walk(
     None
 }
 
+pub(super) fn probe_list(root: &File) -> String {
+    format!("{:?}", list(root).map(|l| l.into_iter().map(|e| (e.name, e.attributes)).collect::<Vec<_>>()))
+}
+
 pub(super) fn version(root: &File, path: &Path) -> Option<FileVersion> {
     walk(root, path, |dir, name| {
         let file = open_at(dir, name, false).ok()?;

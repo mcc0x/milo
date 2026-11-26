@@ -1010,3 +1010,8 @@ mod tests {
         assert_eq!(sessions.files[0].path, Path::new(plain));
     }
 }
+
+#[cfg(windows)]
+pub(super) fn probe_list(root: &File) -> String {
+    windows::probe_list(root)
+}
