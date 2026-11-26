@@ -1088,6 +1088,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_app_report_names_what_is_in_front_only_in_whole_readable_fields() {
         use super::{AppActivity, Front};

@@ -354,6 +354,7 @@ mod tests {
         assert_eq!(tracked_page(&mut repo).add, 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn large_refresh_recounts_only_the_saved_path() {
         let f = Fixture::new();
@@ -428,6 +429,7 @@ mod tests {
         assert_eq!(warm.moved_from("new.txt"), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn single_path_counts_include_former_children_but_not_matching_siblings() {
         check_folder_to_file_count(":(top)page");
@@ -458,6 +460,7 @@ mod tests {
         assert!(local.next().is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_single_path_recount_does_not_report_an_unpushed_backslash_twin_as_dirty() {
         let f = Fixture::new();

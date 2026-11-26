@@ -1544,6 +1544,7 @@ mod tests {
         assert_eq!((patch.lines[0].kind, patch.lines[0].text.as_str()), (LineKind::Add, "page.txt"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_working_file_diff_detects_a_rename_from_a_former_child() {
         let f = Fixture::new();
@@ -1615,7 +1616,10 @@ mod tests {
         let f = Fixture::new();
         f.write(
             ".git/test-home/.gitconfig",
-            &format!("[core]\n\texcludesFile = ~/.global-ignore\n[safe]\n\tdirectory = {}\n", f.root.display()),
+            &format!(
+                "[core]\n\texcludesFile = ~/.global-ignore\n[safe]\n\tdirectory = {}\n",
+                f.root.display().to_string().replace('\\', "/")
+            ),
         );
         f.write(".git/test-home/.global-ignore", "*.scratch\n");
         f.write("ignored.scratch", "ignore this\n");

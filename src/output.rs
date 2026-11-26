@@ -145,6 +145,10 @@ impl Worktree {
                 || fs::symlink_metadata(self.root.join(dir).join(".git")).is_ok()
         });
         match relative.to_str().filter(|name| !nested && !name.chars().any(char::is_control)) {
+            // A place is named the way Git names it, with forward slashes.
+            #[cfg(windows)]
+            Some(name) => Lookup::Inside(name.replace('\\', "/")),
+            #[cfg(unix)]
             Some(name) => Lookup::Inside(name.to_owned()),
             None => Lookup::Outside,
         }

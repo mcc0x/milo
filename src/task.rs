@@ -369,5 +369,5 @@ fn options_text(cwd: &Path, search: &SearchPath) -> Result<String, &'static str>
     Ok(text)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

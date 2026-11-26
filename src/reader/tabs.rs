@@ -908,9 +908,11 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    #[cfg(unix)]
     use super::super::{Floated, Offer};
     use super::*;
     use crate::fixture::Fixture;
+    #[cfg(unix)]
     use crate::native::{Action, tests::with_fake};
 
     const BLOCK: &str = "block:11111111-1111-1111-1111-111111111111";
@@ -1024,6 +1026,7 @@ mod tests {
         assert!(drawn(&mut tabs, 64, 10).iter().any(|row| row.ends_with("saved in the gap")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pane_that_did_not_open_a_reader_reaches_it_only_for_the_readers_own_project() {
         use super::super::ask_reader;
@@ -1098,6 +1101,7 @@ mod tests {
         assert!(drawn(&mut tabs, 40, 8)[2].starts_with("  7   line 7"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn native_actions_use_the_shown_tab_even_while_another_has_a_draft() {
         let f = Fixture::folder();
@@ -1135,6 +1139,7 @@ mod tests {
         assert_eq!(fs::read_to_string(f.root.join("draft.txt")).unwrap(), "original\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn actions_capture_tab_keys_and_clicks_without_outliving_the_shown_tab() {
         let f = Fixture::folder();
@@ -1575,6 +1580,7 @@ mod tests {
         assert!(drawn(&mut tabs, 60, 6)[2].ends_with("second, changed"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_request_from_another_pane_opens_a_tab_and_the_block_is_marked_while_any_tab_is_unsaved() {
         let f = Fixture::folder();

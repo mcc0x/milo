@@ -112,6 +112,7 @@ fn reader_footer_clicks_only_work_where_the_hint_is_drawn() {
     assert_eq!(reader.key(Key::Click(column(&notice[5], "? help"), 5)), After::Help);
 }
 
+#[cfg(unix)]
 #[test]
 fn only_rendered_working_markdown_offers_tkmp_and_the_draft_keeps_its_keys() {
     let f = Fixture::new();
@@ -236,6 +237,7 @@ fn native_actions_refuse_commit_and_handed_over_views_of_a_working_file() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_native_action_keeps_the_original_root_even_when_its_path_is_reused() {
     let f = Fixture::folder();
@@ -830,7 +832,7 @@ fn a_file_replaced_with_the_same_length_and_mtime_refreshes_then_can_disappear()
     f.write("replacement", "edited");
     let replacement = f.root.join("replacement");
     let modified = path.metadata().unwrap().modified().unwrap();
-    fs::File::open(&replacement).unwrap().set_modified(modified).unwrap();
+    fs::OpenOptions::new().write(true).open(&replacement).unwrap().set_modified(modified).unwrap();
     fs::rename(replacement, &path).unwrap();
     assert!(reader.check());
     assert!(drawn(&mut reader, 60, 6)[1].ends_with("edited"));
@@ -1555,6 +1557,7 @@ fn watched_binary_status_changes_do_not_rebuild_the_preview() {
     assert_eq!(picture_id(&reader), id);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_movie_gets_worktree_status_without_starting_playback() {
     let f = Fixture::new();

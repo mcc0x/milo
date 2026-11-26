@@ -104,7 +104,7 @@ fn what_is_not_a_file_of_the_worktree_is_never_offered() {
 fn relative_paths_start_from_the_working_folder_and_stop_at_the_worktree() {
     let (f, _) = project();
     let tree = Worktree::of(&f.root.join("src")).unwrap();
-    assert_eq!(tree.root, f.root.canonicalize().unwrap());
+    assert_eq!(tree.root, crate::sys::canonicalize(&f.root).unwrap());
     let report = scan("main.rs:1 ../docs/migration.md ../../secret.txt src/main.rs\n", &tree);
     assert_eq!((titles(&report), report.outside), (vec!["src/main.rs:1".to_owned(), "docs/migration.md".into()], 1));
 

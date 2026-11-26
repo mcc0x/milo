@@ -259,7 +259,7 @@ impl Claims {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;

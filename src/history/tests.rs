@@ -876,6 +876,7 @@ fn setting_the_remote_default_branch_updates_a_clean_timeline() {
     assert!(rows[2].contains("── on origin") && rows[3].contains("already pushed"), "{rows:?}");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_project_name_can_contain_a_newline() {
     let mut f = Fixture::new();

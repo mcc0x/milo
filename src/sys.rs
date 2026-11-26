@@ -125,6 +125,15 @@ pub(crate) fn canonicalize(path: &Path) -> io::Result<PathBuf> {
     Ok(real)
 }
 
+/// A path inside a project, written with forward slashes as Git writes it.
+pub(crate) fn git_relative(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(text) = path.to_str() {
+        return PathBuf::from(text.replace('\\', "/"));
+    }
+    path
+}
+
 /// Whether a process with this ID is running. A process this user may not signal still counts.
 /// An ID can be reused once its process has ended, so this is a hint, not proof.
 pub(crate) fn process_alive(pid: u32) -> bool {

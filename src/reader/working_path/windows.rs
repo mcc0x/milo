@@ -276,9 +276,10 @@ impl Root {
     }
 
     /// Looks up a path below the project, opening each folder on the way relative to the one
-    /// above it. The folders stay open, without delete sharing, for as long as the entry lives,
-    /// so none of them can be renamed out of the project before the file is opened. A folder
-    /// that is a reparse point is `Outside`, so `base` and `links` are not needed here.
+    /// above it. The folders stay open for as long as the entry lives, so the file is opened in
+    /// the folder that was checked even if another program renames it; like every handle the
+    /// reader keeps, they share delete access, so that program is never blocked. A folder that
+    /// is a reparse point is `Outside`, so `base` and `links` are not needed here.
     pub(in crate::reader) fn entry(
         &self,
         _base: &Path,
@@ -296,8 +297,7 @@ impl Root {
         let name = names.pop().ok_or(LookupError::Gone)?;
         let mut dirs: Vec<File> = Vec::with_capacity(names.len());
         for part in &names {
-            let dir = directory(Some(dirs.last().unwrap_or(&self.dir)), part, FILE_SHARE_READ | FILE_SHARE_WRITE)
-                .map_err(LookupError::of)?;
+            let dir = directory(Some(dirs.last().unwrap_or(&self.dir)), part, SHARE_ALL).map_err(LookupError::of)?;
             dirs.push(dir);
         }
         let stat = lookup(dirs.last().unwrap_or(&self.dir), &name).map_err(LookupError::of)?;
@@ -859,14 +859,21 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_on_the_way_cannot_be_renamed_while_an_entry_holds_it() {
+    fn an_entry_opens_the_file_in_the_folder_it_checked_and_blocks_no_rename() {
         let fixture = Fixture::folder();
         fixture.write("docs/notes.md", "# Notes");
         let root = root(&fixture);
         let entry = find(&root, &fixture, "docs/notes.md").unwrap();
-        assert!(fs::rename(fixture.root.join("docs"), fixture.root.join("moved")).is_err());
-        drop(entry);
         fs::rename(fixture.root.join("docs"), fixture.root.join("moved")).unwrap();
+        fixture.write("docs/notes.md", "# Impostor");
+        let mut text = String::new();
+        entry.open_read().unwrap().read_to_string(&mut text).unwrap();
+        assert_eq!(text, "# Notes");
+        let file = fixture.root.join("moved/notes.md");
+        let held = entry.open_read().unwrap();
+        fs::rename(&file, fixture.root.join("moved/renamed.md")).unwrap();
+        fs::remove_file(fixture.root.join("moved/renamed.md")).unwrap();
+        drop(held);
     }
 
     #[test]

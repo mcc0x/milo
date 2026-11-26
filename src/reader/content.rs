@@ -50,12 +50,14 @@ impl Location {
                 let _ = enclosing_worktree(&lexical, &resolved)?;
             } else if let Some((logical, root)) = enclosing_worktree(dir, &resolved)? {
                 let repo = open(&root)?;
-                let relative = root.strip_prefix(&repo.root).ok()?.join(file.strip_prefix(logical).ok()?);
+                let relative = crate::sys::git_relative(
+                    root.strip_prefix(&repo.root).ok()?.join(file.strip_prefix(logical).ok()?),
+                );
                 return Some(Self { repo, relative });
             }
         }
         let repo = open(&resolved)?;
-        let relative = resolved.join(tail).strip_prefix(&repo.root).ok()?.to_path_buf();
+        let relative = crate::sys::git_relative(resolved.join(tail).strip_prefix(&repo.root).ok()?.to_path_buf());
         Some(Self { repo, relative })
     }
 }
@@ -235,7 +237,7 @@ impl CommittedTarget {
         let (repo, relative) = if let Some(repo) = cwd_repo.filter(|r| r.git)
             && let Ok(tail) = absolute.strip_prefix(&repo.root)
         {
-            (repo, tail.to_path_buf())
+            (repo, crate::sys::git_relative(tail.to_path_buf()))
         } else {
             const NOT_REPO: &str = "This file is not in a git repository.";
             let location = Location::find(&absolute, Repo::open).ok_or(NOT_REPO)?;
