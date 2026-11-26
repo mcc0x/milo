@@ -161,6 +161,8 @@ sh install.sh
 
 The shell installer downloads and checks the binary before placing it in `~/.local/bin` by default. Upgrade with `brew upgrade mcc0x/milo/milo` or rerun the shell installer from the newer release. If you installed the Rex integration, run `milo setup --repair` after upgrading. If you installed the macOS menu app, run `milo menubar install` again.
 
+Repair leaves saved layout profiles alone. If you added a temporary logging probe to Milo’s `rex.lua`, `milo doctor` reports the actions file as custom and repair won’t replace its action code. Undo just your probe to restore the shipped file, then run `milo setup --repair` again. If you want to keep custom actions, review the changes yourself.
+
 #### When Homebrew and Milo disagree
 
 ```sh

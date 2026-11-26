@@ -402,7 +402,7 @@ impl Lab {
         }
     }
 
-    /// Opens a shell tab in `dir`, as the app's New Tab does, and sees it get its rail.
+    /// Opens a CLI shell tab in `dir` and sees it get its rail.
     fn rail_tab(&self, session: &str, dir: &Path) -> String {
         let tab = self.new_tab(session, dir);
         self.get_rails(&[(&tab, dir)]);
@@ -437,7 +437,7 @@ impl Lab {
         tab
     }
 
-    /// Opens a shell tab as the app's New Tab does, without taking focus.
+    /// Opens a shell tab through the CLI without taking focus.
     fn new_tab(&self, session: &str, dir: &Path) -> String {
         self.unnamed(&self.rex(&[
             "window",
@@ -1386,3 +1386,6 @@ mod tab_sets;
 
 #[path = "rex_lab/ssh.rs"]
 mod ssh;
+
+#[path = "rex_lab/new_tab_width.rs"]
+mod new_tab_width;

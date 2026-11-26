@@ -312,6 +312,56 @@ sizes[shell.block_id] = { owner = "client:one", columns = 100, rows = 50,
 assert(apply(function() return true end) and #splits == split_count + 1)
 near(1 - splits[#splits].layout.ratio, 4 / 50)
 
+-- The app can commit a fresh divider at 0.5 despite the split request. The
+-- caller's shell, not the active tab, identifies the divider to correct.
+do
+  local new_split, call = rex.session.new_split, rex.call
+  local other = { window_id = "window:other", layers = { { kind = "tiled", blocks = { editor },
+    layout = leaf(editor) } } }
+  session.windows, session.active_window_id = { other, window }, other.window_id
+  for _, case in ipairs{
+    { "l", "100", 0.5, 1 }, { "r", "111", 0.5, 1 },
+    { "l", "100", 0.214686, 0 }, { "r", "100", 0.39, 0 },
+    { "l", "100", 0.5, 0, "moved" }, { "l", "100", 0.5, 0, "no ids" },
+    { "l", "100", 0.5, 1, "unsupported resize" },
+  } do
+    local side, panes, observed, expected, change = unpack(case)
+    local left = side == "l"
+    local ratio = left and 0.214686 or 1 - 0.214686
+    local calls = 0
+    local rail = panes == "100" and leaf(outline) or tree("vertical", 0.7, leaf(outline),
+      tree("vertical", 0.5, leaf(history), leaf(usage)))
+    tiled.layout, tiled.blocks = leaf(shell), { shell }
+    profile_reply.stdout = "v1 " .. side .. " 0.214686 0.70 2 ohu " .. panes
+    rex.session.new_split = function(args)
+      assert(args.anchor_id == shell.block_id and args.direction == "horizontal" and not args.focus)
+      near(args.ratio, ratio)
+      tiled.layout = tree("horizontal", observed, left and rail or leaf(shell), left and leaf(shell) or rail)
+      tiled.blocks = panes == "100" and { shell, outline } or { shell, outline, history, usage }
+      local ids = panes == "100" and { outline.block_id } or { outline.block_id, history.block_id, usage.block_id }
+      if change == "no ids" then return {} end
+      return { block_ids = ids, split_ids = { change == "moved" and "split:gone" or "split:root" } }
+    end
+    rex.call = function(method, args)
+      if method ~= "session.resize_pane" then return call(method, args) end
+      calls = calls + 1
+      assert(args.session_id == ctx.session_id and args.direction == "horizontal")
+      assert(args.before_block_id == (left and outline.block_id or shell.block_id))
+      assert(args.after_block_id == (left and shell.block_id or outline.block_id))
+      near(args.ratio, ratio)
+      if change == "unsupported resize" then return nil, "not_found" end
+      tiled.layout.split.ratio = args.ratio
+      return {}
+    end
+    assert(listener.prepare_arrangement(ctx, "/my project")(function() return true end))
+    assert(calls == expected, "expected " .. expected .. " divider corrections, got " .. calls)
+    if expected == 1 and not change then near(tiled.layout.split.ratio, ratio) end
+  end
+  rex.session.new_split, rex.call = new_split, call
+  session.windows, session.active_window_id = { window }, window.window_id
+  profile_reply.stdout = ""
+end
+
 -- An agent is recognised by its process name alone, also behind a path or under
 -- a command it started. The project is the shell's directory, not an editor's.
 local facts = listener.titles.facts

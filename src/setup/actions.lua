@@ -707,6 +707,27 @@ if ... == "listener" then
     end,
   }
   if arrange_new_tabs then
+    local function arrange_new_rail(ctx, selected, cwd, rows)
+      local shell = ctx.block_id
+      local made, order = make_rail(ctx, selected, cwd, shell, shell, rows)
+      local block = made and made.block_ids and made.block_ids[1]
+      local split_id = made and made.split_ids and made.split_ids[1]
+      if not block or not split_id or selected.width == 0.5 then return end
+
+      -- App-created tabs can land at Rex's default despite the requested ratio.
+      -- Check once after creation; later divider moves belong to the user.
+      local window = tab(ctx)
+      local layer = window and not window.zoomed_block_id and tiled(window)
+      local root = layer and layer.layout and layer.layout.split
+      if not root or root.split_id ~= split_id or root.ratio ~= 0.5 then return end
+      local rail = inspect_rail(layer)
+      if not rail or rail.side ~= selected.side or rail.work ~= shell or rail.present[order[1]] ~= block then return end
+      local left = rail.side == "l"
+      rex.call("session.resize_pane", { session_id = ctx.session_id, direction = "horizontal",
+        before_block_id = left and block or shell, after_block_id = left and shell or block,
+        ratio = left and selected.width or 1 - selected.width })
+    end
+
     local function uses_rows(selected)
       local wanted = selected.wanted
       return wanted.usage and (wanted.outline or wanted.history)
@@ -741,7 +762,7 @@ if ... == "listener" then
         -- The tab waits when its measuring client changed or its shell moved.
         local current, wait = still_current(owner)
         if wait then return false end
-        if current then make_rail(ctx, selected, cwd, ctx.block_id, ctx.block_id, rows) end
+        if current then arrange_new_rail(ctx, selected, cwd, rows) end
         return true
       end
     end
