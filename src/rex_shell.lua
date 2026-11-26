@@ -40,12 +40,15 @@ end
 
 -- The processes in front of the shell, nearest first, so that Milo can tell
 -- whether a program it started there, such as milo ssh, is still in front.
+-- None while the shell itself is in front.
 local front
 local function report_front(process)
-  local pids = {}
+  local shell = process and shell_of(process)
+  local pids, reached = {}, false
   local function add(entry)
+    reached = reached or same_process(entry, shell)
     local pid = entry and entry.pid
-    if type(pid) == "number" and pid > 0 and pid == math.floor(pid) and #pids < 64 then
+    if not reached and type(pid) == "number" and pid > 0 and pid == math.floor(pid) and #pids < 64 then
       pids[#pids + 1] = string.format("%d", pid)
     end
   end

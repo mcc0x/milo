@@ -92,6 +92,8 @@ const DISCOVERY_FAILED: &str = "Could not identify shell project";
 const CONNECTING: &str = "Opening";
 const UNFOLLOWED: &str = "Can't follow there";
 const ENDED: &str = "Its pane ended";
+/// How often a pane looks for a link while a program it hasn't found one for is in front of the shell.
+const LINK_LOOK: Duration = Duration::from_millis(500);
 
 /// Where the shell's folder comes from: Rex on this computer, or this
 /// computer's system for a shell that `milo ssh` started here.
@@ -218,9 +220,26 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Project<F> {
 
     /// Takes in which program is in front of the shell, and so whether a
     /// `milo ssh` there has taken it to another computer or brought it back.
+    /// A program that may still write its link gets a frame, which schedules
+    /// the looks for it.
     fn look_remote(&mut self, foreground: Vec<i32>) -> External {
+        let awaiting = self.awaiting_link();
         let Some(tab) = &mut self.tab else { return External::Unchanged };
         tab.foreground = foreground;
+        match self.relink() {
+            External::Unchanged if self.awaiting_link() != awaiting => External::Redraw,
+            moved => moved,
+        }
+    }
+
+    /// Whether a program in front of the shell may still write its link, as
+    /// `milo ssh` does only once it has reached the host.
+    fn awaiting_link(&self) -> bool {
+        self.tab.as_ref().is_some_and(|tab| matches!(tab.remote, Remote::Local) && !tab.foreground.is_empty())
+    }
+
+    fn relink(&mut self) -> External {
+        let Some(tab) = &mut self.tab else { return External::Unchanged };
         if matches!(tab.remote, Remote::Away(_)) {
             return External::Unchanged;
         }
@@ -270,6 +289,9 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Project<F> {
 
 impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
     fn draw(&mut self, screen: &mut Screen) {
+        if self.awaiting_link() {
+            self.relink();
+        }
         let (host, note) = (self.foot_host().map(str::to_owned), self.foot_note());
         self.notice_only = (host.is_some() || note.is_some()) && screen.h == 1;
         if host.is_none() && note.is_none() || screen.h == 0 {
@@ -416,7 +438,12 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
     }
 
     fn next_frame(&self) -> Option<Duration> {
-        if self.notice_only { None } else { self.pane.next_frame() }
+        let look = match &self.tab {
+            Some(Tab { remote: Remote::Due(_), .. }) => Some(Duration::ZERO),
+            _ => self.awaiting_link().then_some(LINK_LOOK),
+        };
+        let frame = if self.notice_only { None } else { self.pane.next_frame() };
+        frame.into_iter().chain(look).min()
     }
 
     fn editing(&self) -> bool {
@@ -709,7 +736,8 @@ mod tests {
             helper: Some("/opt/bin/milo".into()),
         };
         link.write(&state.root, "block:1").unwrap();
-        assert!(matches!(pane.look_remote(vec![1]), External::Unchanged), "another program is in front");
+        assert!(matches!(pane.look_remote(vec![1]), External::Redraw), "another program in front is only looked after");
+        assert_eq!(foot(&mut pane), "");
         assert!(pane.lend().is_none());
 
         assert!(matches!(pane.look_remote(vec![me.pid, 1]), External::Redraw));
@@ -755,6 +783,16 @@ mod tests {
         followed.remove(&state.root, "block:1");
         assert_eq!(pane.returned(false), After::Stay, "a logout or a lost connection brings it back");
         assert_eq!(foot(&mut pane), "");
+
+        assert!(matches!(pane.look_remote(Vec::new()), External::Redraw));
+        assert!(pane.next_frame().is_none(), "no look while the shell itself is in front");
+        assert!(matches!(pane.look_remote(vec![me.pid]), External::Redraw), "milo ssh is in front before its link");
+        assert!(pane.next_frame().is_some_and(|wait| wait <= LINK_LOOK));
+        let late = Link { token: "d".repeat(32), ..link.clone() };
+        late.write(&state.root, "block:1").unwrap();
+        assert_eq!(foot(&mut pane), format!("ub-1 · Opening · showing {project}"), "found without another report");
+        assert_eq!(pane.next_frame(), Some(Duration::ZERO), "the loop turns at once to open the pane there");
+        assert!(pane.lend().is_some());
     }
 
     #[test]
