@@ -47,6 +47,12 @@ impl Launch {
         let folder = crate::sys::private_dir(root)?;
         let name = super::random_token()?;
         let (handoff, mut file) = Temp::create(root.join(format!("milo-web-{name}.html")))?;
+        // The folder is held, so it cannot move while the page found by name is checked to be in it,
+        // and the browser is given the page's resolved path rather than the name it was made by.
+        if !crate::sys::inside(&file, &folder)? {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the page is not in Milo's private folder"));
+        }
+        let page = crate::sys::plain_path(crate::sys::final_path(&file)?);
         // The editor URL is constructed from a numeric loopback address and a hex token.
         // A zero-delay refresh replaces this local page in the tab's history.
         write!(
@@ -55,12 +61,6 @@ impl Launch {
              <meta http-equiv=refresh content=\"0;url={url}\"><title>Opening Milo</title>\
              <p>If Milo does not open, use the private URL printed in your terminal.</p>"
         )?;
-        // The folder is held, so it cannot move while the page found by name is checked to be in it,
-        // and the browser is given the page's resolved path rather than the name it was made by.
-        if !crate::sys::inside(&file, &folder)? {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the page is not in Milo's private folder"));
-        }
-        let page = crate::sys::plain_path(crate::sys::final_path(&file)?);
         drop(file);
         let expires = Instant::now() + LIFETIME;
         let opener = std::thread::Builder::new().name("browser opener".into()).spawn(move || open(&page))?;
