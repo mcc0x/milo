@@ -434,8 +434,8 @@ fn outline_lists_the_files_opens_a_folder_and_quits() {
     let scratch = Scratch::new("outline");
     repository(&scratch);
     let (mut console, at) = open_pane(&scratch, "outline");
-    let at = console.see("README.md", at);
     console.see("docs", at);
+    console.see("README.md", at);
     console.see("q quit", at);
 
     // The first row is docs; one step down is src, and Enter opens it.
@@ -528,7 +528,8 @@ fn usage_reads_local_codex_and_claude_sessions_and_quits() {
     )
     .unwrap();
     let (mut console, at) = open_pane(&scratch, "usage");
-    let at = console.see("77%", at);
+    let at = console.see("Codex", at);
+    console.see("resets in", at);
     console.see("tokens today", at);
     console.see("q quit", at);
 
