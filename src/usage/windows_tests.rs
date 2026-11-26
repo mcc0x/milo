@@ -253,6 +253,6 @@ fn zz_probe() {
         }
     }
     let root = fs_ops::open_dir(&f.root.join("codex")).unwrap();
-    report += &format!(" list={:?}", files::probe_list(&root));
+    report += &format!(" list={:?} {}", files::probe_list(&root), files::probe_open(&root));
     panic!("{report}");
 }

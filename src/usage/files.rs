@@ -1015,3 +1015,8 @@ mod tests {
 pub(super) fn probe_list(root: &File) -> String {
     windows::probe_list(root)
 }
+
+#[cfg(windows)]
+pub(super) fn probe_open(root: &File) -> String {
+    windows::probe_open(root)
+}

@@ -159,6 +159,13 @@ fn walk(
     None
 }
 
+pub(super) fn probe_open(root: &File) -> String {
+    match open_at(root, OsStr::new("2026"), true) {
+        Ok(child) => format!("opened; list={:?}", list(&child).map(|l| l.len())),
+        Err(error) => format!("open failed: {error:?}"),
+    }
+}
+
 pub(super) fn probe_list(root: &File) -> String {
     format!("{:?}", list(root).map(|l| l.into_iter().map(|e| (e.name, e.attributes)).collect::<Vec<_>>()))
 }
