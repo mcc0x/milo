@@ -1,18 +1,22 @@
-//! Windows form of the read-only query. Windows has no sqlite3 program, so the SQLite that ships
-//! with it, System32\winsqlite3.dll, runs the query on the reading thread. Its answer is written
-//! as the sqlite3 shell's `-json` output, so the readers parse one format on every system.
+//! Windows form of the read-only query. Windows has no sqlite3 program, and the SQLite that ships
+//! with it, System32\winsqlite3.dll, ignores `readonly_shm`: opened in place, it would write its
+//! shared-memory file and make missing sidecars. So the database is never opened in place. Its file
+//! and write-ahead log are read through handles that only read, the committed frames are applied to
+//! a private copy in memory, and that copy is queried. Nothing beside the database is opened, made
+//! or written, and the tool that owns it never waits on Milo.
 //!
-//! That build also ignores `readonly_shm`: opening a log whose sidecars are gone makes new ones.
-//! Only a database whose sidecars were both found is opened, so that happens only if the writer
-//! removes them between that look and the open.
+//! The answer is written as the sqlite3 shell's `-json` output, so the readers parse one format.
 
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use std::io::Write as _;
-use std::os::windows::fs::MetadataExt as _;
+use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
+use std::fs::File;
+use std::io::{self, Write as _};
+use std::os::windows::fs::FileExt as _;
 use std::path::Path;
 use std::ptr;
 use std::sync::OnceLock;
 use std::time::Instant;
+
+use crate::fs_ops;
 
 type Db = c_void;
 type Stmt = c_void;
@@ -25,14 +29,18 @@ const INTEGER: c_int = 1;
 const FLOAT: c_int = 2;
 const TEXT: c_int = 3;
 const BLOB: c_int = 4;
-const OPEN_READONLY: c_int = 0x1;
-const OPEN_URI: c_int = 0x40;
-/// Windows' SQLite accepts this flag but still follows a link, so links are refused before opening.
-const OPEN_NOFOLLOW: c_int = 0x0100_0000;
+const OPEN_READWRITE: c_int = 0x2;
+const OPEN_CREATE: c_int = 0x4;
+const DESERIALIZE_READONLY: c_uint = 4;
 const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 /// Virtual machine steps between looks at the clock.
 const STEPS: c_int = 1000;
+/// The most a database and its log may hold together before it is left unread.
+pub(super) const MAX_SNAPSHOT: u64 = 64 << 20;
+/// A writer that restarts its log during every copy leaves the database unread.
+const ATTEMPTS: usize = 3;
+const WAL_HEADER: usize = 32;
+const FRAME_HEADER: usize = 24;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -42,7 +50,7 @@ unsafe extern "system" {
 
 type Open = unsafe extern "system" fn(*const c_char, *mut *mut Db, c_int, *const c_char) -> c_int;
 type Close = unsafe extern "system" fn(*mut Db) -> c_int;
-type BusyTimeout = unsafe extern "system" fn(*mut Db, c_int) -> c_int;
+type Deserialize = unsafe extern "system" fn(*mut Db, *const c_char, *mut u8, i64, i64, c_uint) -> c_int;
 type ProgressHandler = unsafe extern "system" fn(*mut Db, c_int, Option<Progress>, *mut c_void);
 type Prepare = unsafe extern "system" fn(*mut Db, *const c_char, c_int, *mut *mut Stmt, *mut *const c_char) -> c_int;
 type Step = unsafe extern "system" fn(*mut Stmt) -> c_int;
@@ -57,7 +65,7 @@ type Blob = unsafe extern "system" fn(*mut Stmt, c_int) -> *const c_void;
 struct Sqlite {
     open: Open,
     close: Close,
-    busy_timeout: BusyTimeout,
+    deserialize: Deserialize,
     progress_handler: ProgressHandler,
     prepare: Prepare,
     step: Step,
@@ -96,7 +104,7 @@ fn load() -> Option<Sqlite> {
     Some(Sqlite {
         open: symbol!("sqlite3_open_v2" as Open),
         close: symbol!("sqlite3_close" as Close),
-        busy_timeout: symbol!("sqlite3_busy_timeout" as BusyTimeout),
+        deserialize: symbol!("sqlite3_deserialize" as Deserialize),
         progress_handler: symbol!("sqlite3_progress_handler" as ProgressHandler),
         prepare: symbol!("sqlite3_prepare_v2" as Prepare),
         step: symbol!("sqlite3_step" as Step),
@@ -263,32 +271,172 @@ unsafe extern "system" fn past(deadline: *mut c_void) -> c_int {
     c_int::from(Instant::now() >= *deadline)
 }
 
-/// Whether the file at `path` with `suffix` added is a link, junction or other reparse point.
-/// A name that cannot be looked at counts as one.
-fn linked(path: &Path, suffix: &str) -> bool {
-    let mut name = path.as_os_str().to_owned();
-    name.push(suffix);
-    match std::fs::symlink_metadata(name) {
-        Ok(metadata) => metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0,
-        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+/// Up to `limit` bytes of a file from its start; None past the limit or on any error.
+fn read_all(file: &File, limit: u64) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut buffer = vec![0; 1 << 16];
+    loop {
+        match file.seek_read(&mut buffer, bytes.len() as u64) {
+            Ok(0) => return Some(bytes),
+            Ok(n) if (bytes.len() + n) as u64 <= limit => bytes.extend_from_slice(&buffer[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            _ => return None,
+        }
     }
 }
 
-/// Bound output and wall time; a busy database waits only until the deadline.
-pub(super) fn query(path: &Path, uri: &str, sql: &str, deadline: Instant, max: usize) -> Option<Vec<u8>> {
-    // SQLite would follow a link and keep its own sidecars beside it.
-    if ["", "-wal", "-shm"].iter().any(|suffix| linked(path, suffix)) {
+fn header(file: &File) -> Option<Vec<u8>> {
+    let mut header = vec![0; WAL_HEADER];
+    let mut read = 0;
+    while read < WAL_HEADER {
+        match file.seek_read(&mut header[read..], read as u64) {
+            Ok(0) => break,
+            Ok(n) => read += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    header.truncate(read);
+    Some(header)
+}
+
+fn be32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+/// SQLite's running checksum over 8-byte steps, in the byte order the log's magic number names.
+fn checksum(mut sum: (u32, u32), bytes: &[u8], big_endian: bool) -> (u32, u32) {
+    let word = |raw: [u8; 4]| if big_endian { u32::from_be_bytes(raw) } else { u32::from_le_bytes(raw) };
+    for &[a, b, c, d, e, f, g, h] in bytes.as_chunks::<8>().0 {
+        sum.0 = sum.0.wrapping_add(word([a, b, c, d])).wrapping_add(sum.1);
+        sum.1 = sum.1.wrapping_add(word([e, f, g, h])).wrapping_add(sum.0);
+    }
+    sum
+}
+
+/// The database as of the last transaction committed in its log, with the log folded in and the
+/// header marked as having none, so SQLite reads the copy on its own. A frame after the last commit,
+/// a torn frame and any frame after one are left out, as SQLite itself leaves them out.
+pub(super) fn fold(mut db: Vec<u8>, wal: &[u8]) -> Option<Vec<u8>> {
+    if db.len() < 100 || &db[..16] != b"SQLite format 3\0" || !matches!((db[18], db[19]), (1 | 2, 1 | 2)) {
         return None;
     }
-    let (uri, sql) = (CString::new(uri).ok()?, CString::new(sql).ok()?);
-    let connection = Connection::open(&uri, OPEN_READONLY | OPEN_URI | OPEN_NOFOLLOW)?;
-    let wait = c_int::try_from(deadline.saturating_duration_since(Instant::now()).as_millis()).ok()?;
-    // SAFETY: The connection is live.
-    unsafe { (connection.sqlite.busy_timeout)(connection.db, wait) };
+    if wal.len() >= WAL_HEADER {
+        let magic = be32(wal, 0);
+        let page = usize::try_from(be32(wal, 8)).ok()?;
+        let header_sum = (be32(wal, 24), be32(wal, 28));
+        let big_endian = magic & 1 == 1;
+        let db_page = match u16::from_be_bytes([db[16], db[17]]) {
+            1 => 65536,
+            size => usize::from(size),
+        };
+        let valid = magic & !1 == 0x377f_0682
+            && page == db_page
+            && be32(wal, 4) == 3_007_000
+            && page.is_power_of_two()
+            && (512..=65536).contains(&page)
+            && checksum((0, 0), &wal[..24], big_endian) == header_sum;
+        if valid {
+            let mut sum = header_sum;
+            let (mut pages, mut committed) = (Vec::new(), None);
+            for frame in wal[WAL_HEADER..].chunks_exact(FRAME_HEADER + page) {
+                if frame[8..16] != wal[16..24] {
+                    break;
+                }
+                sum = checksum(checksum(sum, &frame[..8], big_endian), &frame[FRAME_HEADER..], big_endian);
+                if sum != (be32(frame, 16), be32(frame, 20)) {
+                    break;
+                }
+                pages.push(frame);
+                if be32(frame, 4) != 0 {
+                    committed = Some(pages.len());
+                }
+            }
+            if let Some(count) = committed {
+                let size = usize::try_from(be32(pages[count - 1], 4)).ok()?.checked_mul(page)?;
+                db.resize(size, 0);
+                for frame in &pages[..count] {
+                    let number = usize::try_from(be32(frame, 0)).ok()?.checked_sub(1)?;
+                    let at = number.checked_mul(page)?;
+                    if let Some(target) = db.get_mut(at..at + page) {
+                        target.copy_from_slice(&frame[FRAME_HEADER..]);
+                    }
+                }
+            }
+        }
+    }
+    if db.len() < 100 || &db[..16] != b"SQLite format 3\0" {
+        return None;
+    }
+    db[18] = 1;
+    db[19] = 1;
+    Some(db)
+}
+
+/// A coherent copy of the database and its log. A writer that restarts the log changes its header
+/// first, so an unchanged header around the copy means every committed frame the copy needs is in it.
+/// A checkpoint during the copy only moves frames the log still holds. The handles share reading,
+/// writing and deletion, so the writer is never held back.
+pub(super) fn snapshot(path: &Path, limit: u64, deadline: Instant) -> Option<Vec<u8>> {
+    let mut log = path.as_os_str().to_owned();
+    log.push("-wal");
+    for _ in 0..ATTEMPTS {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        let wal = match fs_ops::open_read(Path::new(&log)) {
+            Ok(file) => Some(file),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(_) => return None,
+        };
+        let before = match &wal {
+            Some(file) => Some(header(file)?),
+            None => None,
+        };
+        let db = read_all(&fs_ops::open_read(path).ok()?, limit)?;
+        let frames = match &wal {
+            Some(file) => read_all(file, limit.saturating_sub(db.len() as u64))?,
+            None => Vec::new(),
+        };
+        let after = match &wal {
+            Some(file) => Some(header(file)?),
+            None => std::fs::symlink_metadata(&log).is_ok().then(Vec::new),
+        };
+        let start = &frames[..WAL_HEADER.min(frames.len())];
+        if before == after && before.as_deref().unwrap_or_default() == start {
+            return fold(db, &frames);
+        }
+    }
+    None
+}
+
+/// Bound memory, output and wall time; the database's own files are only ever read.
+pub(super) fn query(path: &Path, sql: &str, deadline: Instant, max: usize) -> Option<Vec<u8>> {
+    let sql = CString::new(sql).ok()?;
+    let mut image = snapshot(path, MAX_SNAPSHOT, deadline)?;
+    let size = i64::try_from(image.len()).ok()?;
+    let connection = Connection::open(c":memory:", OPEN_READWRITE | OPEN_CREATE)?;
+    // SAFETY: The image outlives the connection, which only reads it; SQLite is not asked to free it.
+    let loaded = unsafe {
+        (connection.sqlite.deserialize)(
+            connection.db,
+            c"main".as_ptr(),
+            image.as_mut_ptr(),
+            size,
+            size,
+            DESERIALIZE_READONLY,
+        )
+    };
+    if loaded != OK {
+        return None;
+    }
     let handed = (&raw const deadline).cast_mut().cast();
     // SAFETY: The connection is live, and the deadline outlives it.
     unsafe { (connection.sqlite.progress_handler)(connection.db, STEPS, Some(past), handed) };
+    connection.run(c"PRAGMA temp_store=MEMORY;", 0)?;
     let out = connection.run(&sql, max)?;
+    drop(connection);
+    drop(image);
     (Instant::now() < deadline).then_some(out)
 }
 
@@ -298,11 +446,9 @@ pub(in crate::usage) struct Writer(Connection);
 
 #[cfg(test)]
 impl Writer {
-    const OPEN_READWRITE_CREATE: c_int = 0x2 | 0x4;
-
     pub(in crate::usage) fn open(path: &Path) -> Self {
         let name = CString::new(path.to_str().unwrap()).unwrap();
-        Self(Connection::open(&name, Self::OPEN_READWRITE_CREATE).expect("cannot open a fixture database"))
+        Self(Connection::open(&name, OPEN_READWRITE | OPEN_CREATE).expect("cannot open a fixture database"))
     }
 
     pub(in crate::usage) fn exec(&self, sql: &str) {

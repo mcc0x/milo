@@ -215,6 +215,7 @@ pub(super) fn is_database(path: &Path) -> bool {
 }
 
 /// Skip incomplete WAL file sets rather than opening an unusable database.
+#[cfg(unix)]
 fn readable(path: &Path) -> bool {
     let Some(header) = header(path) else { return false };
     match (header[18], header[19]) {
@@ -229,6 +230,7 @@ fn readable(path: &Path) -> bool {
 }
 
 /// Keep SQLite's URI syntax separate from literal path bytes, including non-UTF-8 names.
+#[cfg(unix)]
 fn read_only_uri(path: &Path) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     const OPTIONS: &str = "?mode=ro&readonly_shm=1";
@@ -250,7 +252,7 @@ fn read_only_uri(path: &Path) -> String {
 }
 
 /// Bound both child output and wall time so a busy database cannot keep a worker alive.
-/// Windows has no sqlite3 program; its own SQLite library answers there instead.
+/// Windows has no sqlite3 program; a private copy read with its own SQLite library answers there.
 pub(super) fn query(
     #[cfg_attr(windows, allow(unused_variables))] executable: &OsStr,
     path: &Path,
@@ -262,12 +264,13 @@ pub(super) fn query(
     }
     // `-nofollow` also rejects links in ancestors, including /tmp on macOS.
     let path = crate::sys::canonicalize(path.parent()?).ok()?.join(path.file_name()?);
+    let deadline = Instant::now() + wait;
+    #[cfg(windows)]
+    return windows::query(&path, sql, deadline, MAX_OUTPUT);
+    #[cfg(unix)]
     if !readable(&path) {
         return None;
     }
-    let deadline = Instant::now() + wait;
-    #[cfg(windows)]
-    return windows::query(&path, &read_only_uri(&path), sql, deadline, MAX_OUTPUT);
     #[cfg(unix)]
     let child = Command::new(executable)
         // The database operand always starts with "file:". Older SQLite CLIs reject "--".
