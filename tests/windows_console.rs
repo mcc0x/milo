@@ -564,8 +564,10 @@ fn pictures_are_drawn_as_cells_and_what_cannot_be_shown_says_so() {
     let (mut console, at) = open_pane(&scratch, "view red.bmp");
     let drawn = console.see("\u{2580}", at);
     let shown = console.text();
-    let colored = ["38;5;196;48;5;196m", "38;2;255;0;0;48;2;255;0;0m"];
-    assert!(colored.iter().any(|sgr| shown[at..drawn].contains(sgr)), "no red cells:\n{shown}");
+    // The pseudoconsole may send the two colours as one sequence or two.
+    let red =
+        |layer: &str| ["5;196", "2;255;0;0"].iter().any(|red| shown[at..drawn].contains(&format!("{layer};{red}")));
+    assert!(red("38") && red("48"), "no red cells:\n{shown}");
     let mark = console.text().len();
     console.keys(b"q");
     finish(&console, mark);
