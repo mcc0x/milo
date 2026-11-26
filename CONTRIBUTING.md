@@ -69,7 +69,7 @@ On pushes and pull requests, website-, docs-, relay- and Railway-only changes sk
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, the login shell that is asked for its search path through `src/task/harness.rs`, `/usr/bin/sips` through `src/picture/sips.rs`, FFmpeg and FFprobe through `src/reader/video/decode.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, the login shell that is asked for its search path through `src/task/harness.rs`, `/usr/bin/sips` through `src/picture/sips.rs`, FFmpeg and FFprobe through `src/reader/video/decode.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, `ssh` through `src/ssh.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
 **It writes to a project only when the user saves or starts a task.** Every git command milo runs only reads, except the `git worktree add` of `milo task new`, which goes through `change` in `src/git/run.rs` and has no other caller. The one thing that changes a project's files is `Ctrl-S` in the reader's editor, and it goes through `src/reader/disk.rs`: the file is opened without following a link, read again, and written only if it is still what the edit started from or the user says to overwrite it. Do not add a second way to write, and do not let anything else (a formatter, a cache, a temporary file) write into the project. What milo keeps for itself, such as a draft from a reader that was ended, goes in its state folder.
 
@@ -195,6 +195,22 @@ The output is untrusted. `src/output.rs` only looks paths up: it runs nothing, o
 It never costs a draft. The action closes no pane. A reader is reused only if it noted the same project beside its pipe (`src/reader/inbox.rs`), and a request with a place moves the reader's view or a draft's cursor, never its text.
 
 `cargo test --bin milo output:: reader::` runs the unit tests, and the Lua fixtures cover the action with a stand-in for Rex. With Rex installed, `cargo test --test rex_lab -- --ignored files_named` runs it in shell panes of a disposable server. That test loads this checkout's `actions.lua` with `rex do FILE --action`, so with `MILO_TEST_BINARY` it checks that build's `output-files` and reader under this checkout's action. No palette is shown there: check the list itself in a Rex app, on a disposable session.
+
+### Changing SSH following
+
+[Following a shell over SSH](docs/setup.md#follow-a-shell-to-another-computer-over-ssh) says what a person sees. Keep these true.
+
+It is asked for, once. Only `milo ssh HOST`, typed in a Rex shell, takes a tab's panes to another computer. Never intercept plain `ssh`, read a prompt, a title, an OSC 7 report or any other terminal output for a host or a folder, or follow a second hop. A *link* in the state folder (`src/ssh/link.rs`) names the host and the connection, and counts only while the `milo ssh` that wrote it leads the program Rex reports in front of that one shell. Its words reach a remote shell unquoted, so keep the host, token and helper path checks.
+
+It logs in once, as the person. `src/ssh.rs` runs the person's `ssh` with their configuration and prompts, as a master holding one connection with agent forwarding off. Every other session (the probe, the shell, each pane) goes over that connection with `ControlMaster=no`, and those that are not the shell with `BatchMode=yes`, so none can ask for or carry a credential. Do not copy keys, tokens or usage between the computers, add a forwarding, or change an SSH or shell setting on either side.
+
+It installs nothing. Milo on the host is the helper, found by a probe in a session with no terminal. `ssh-helper shell` notes its own process in the host's state folder and becomes the login shell, so the noted process is the shell; panes on the host read its folder from the system (`src/ssh/process.rs`). Without Milo there the shell starts as plain ssh would start it.
+
+Panes on the host only read. `ssh-helper pane` calls `reader::forbid_edits` before anything opens. Usage never moves on its own: Tab asks for the host's.
+
+It gives back what it borrowed. A pane lends its terminal (`Pane::lend`, `Session::lend`) and keeps everything it held. The link is removed before the connection is closed, so a pane whose lent session ends can tell a logout or a lost connection from a person quitting the host's pane.
+
+`cargo test --bin milo ssh:: workflow:: term::` runs the unit tests. With Rex and sshd installed, `cargo test --test rex_lab -- --ignored ssh::` starts an sshd of its own on 127.0.0.1 with its own keys and a host home in the lab, and never uses your SSH files or agent. It runs both computers' sides on this one, so check a real second host by hand before claiming one. Set `MILO_TEST_SSH_EVIDENCE` to a folder to keep its frames as HTML.
 
 ### Changing alert mirroring
 
@@ -489,7 +505,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/rex_reader.lua` | Opens a floating reader in Rex and closes the one it replaces only after the new one exists. |
 | `src/rex_reader_test.lua` | Checks that script with a stand-in for Rex. |
 | `src/rex_reader_show.lua` | Brings a floating reader forward for a file it was asked to show in a tab, and names it after that file. |
-| `src/rex_shell.lua` | Reports the directory of the one shell a managed pane follows, and nothing from other terminals. |
+| `src/rex_shell.lua` | Reports the directory of the one shell a managed pane follows and the processes in front of it, and nothing from other terminals. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Runs the setup screen: its choices, layout trials, scoped saves, and maintenance. |
 | `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes, name a session for its project, open a file named in a pane's recent output, ask for a new agent task, or open the lists of Reader tabs. |
@@ -571,7 +587,13 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/when.rs` | Works out local dates and wording for ages and durations. |
 | `src/width.rs` | Measures and shortens text in terminal columns. |
 | `src/width/data.rs` | Lists the Unicode 17.0.0 ranges of nonspacing marks and wide characters. |
-| `src/workflow.rs` | Retargets a pane to the worktree of the shell it was opened beside, when the user chose to follow it. |
+| `src/workflow.rs` | Retargets a pane to the worktree of the shell it was opened beside, when the user chose to follow it, and lends its terminal to the same pane on the host that shell reached with `milo ssh`. |
+| `src/ssh.rs` | Runs `milo ssh`: logs in with the person's ssh, holds one connection for the tab, asks the host where Milo is, and starts the shell's and panes' sessions over that connection. |
+| `src/ssh/link.rs` | Keeps the private note that tells a tab's panes which host its shell reached, and checks that its `milo ssh` still leads what is in front of that shell. |
+| `src/ssh/helper.rs` | Milo's side on the host: says where it is, notes the shell's process and becomes the login shell, and opens a read-only pane that follows that shell. |
+| `src/ssh/process.rs` | Names a process by its ID and start time, finds its parents, and reads its folder from the system. |
+| `src/ssh/watch.rs` | Follows the folder of a shell on this computer for a pane on the host. |
+| `src/ssh/usage.rs` | Labels Usage beside a shell on another host, offers that host's usage on Tab, and labels the host's usage. |
 | `tests/alerts.rs` | Starts real workers with disposable Rex and destination stand-ins; checks flaps, crashes, pause during retries, isolated providers, cancellations and notice counts. |
 | `tests/alerts/real_rex.rs` | Repeats the disconnect/reconnect scenario with a disposable Rex server, private Unix socket and a loopback destination. With Rex installed, run `cargo test --test alerts real_rex -- --ignored`. |
 | `tests/backend_reader.py` | Profiles reader tabs, large handed patches, memory and input during a held Git read in a disposable terminal. |
@@ -608,6 +630,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
 | `tests/rex_lab/tab_sets.rs` | Saves, reopens, replaces, renames and deletes Reader tab sets in panes of that server, in two worktrees, over a draft and with a deleted file and a dropped commit. |
+| `tests/rex_lab/ssh.rs` | Logs in with `milo ssh` to a disposable sshd on the loopback address and follows the shell from B to C in panes of that server, beside an unchanged second tab, a reader draft and Usage, through a logout, a dropped connection and a host without Milo. |
 | `tests/web.rs` | Runs `milo web` beside a Rex stand-in that answers late: the link first, the state only once whole, a clean end in between. |
 | `tests/web_bench.rs` | Times the settings link and the first state, outside Rex and beside a slow one. |
 | `tests/web_bench/baseline-fa34ca4.tsv` | Records those times beside that revision's, on the machine named in its header. |

@@ -38,6 +38,26 @@ local function emit(cwd)
   io.stdout:flush()
 end
 
+-- The processes in front of the shell, nearest first, so that Milo can tell
+-- whether a program it started there, such as milo ssh, is still in front.
+local front
+local function report_front(process)
+  local pids = {}
+  local function add(entry)
+    local pid = entry and entry.pid
+    if type(pid) == "number" and pid > 0 and pid == math.floor(pid) and #pids < 64 then
+      pids[#pids + 1] = string.format("%d", pid)
+    end
+  end
+  add(process and process.foreground)
+  for _, ancestor in ipairs(process and process.ancestors or {}) do add(ancestor) end
+  local line = #pids > 0 and table.concat(pids, " ") or "-"
+  if line == front then return end
+  front = line
+  io.stdout:write("milo-fg ", line, "\n")
+  io.stdout:flush()
+end
+
 local function sample(process, report)
   local shell = process and shell_of(process)
   if not same_process(reporter, shell) then reporter = nil end
@@ -57,6 +77,7 @@ rex.on("terminal.process_changed", function(ctx)
   if ctx.block_id == anchor then
     local current = rex.call(terminal .. "process", target)
     sample(current, rex.call(terminal .. "pwd", target))
+    report_front(current)
   end
 end)
 rex.on("terminal.child_exited", function(ctx)
@@ -69,3 +90,4 @@ end)
 local initial = rex.call(terminal .. "process", target)
 if not initial then rex.stop() end
 sample(initial, rex.call(terminal .. "pwd", target))
+report_front(initial)

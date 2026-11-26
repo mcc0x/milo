@@ -32,6 +32,7 @@ mod review;
 mod rex;
 mod screen;
 mod setup;
+mod ssh;
 mod syntax;
 mod task;
 mod term;
@@ -57,6 +58,7 @@ use history::History;
 use outline::Outline;
 use pane::{Open, Pane, Start};
 use reader::{Reader, Spot, Tabs};
+use ssh::helper::Role;
 
 const USAGE: &str = "\
 milo — file, history, usage, and reader panes for your terminal
@@ -112,6 +114,8 @@ milo settings copies chosen pane settings to another host as a file, shows what
   an import would change, and undoes it.
 milo task new starts Claude Code, Codex, oh-my-pi or OpenCode on a task, in a
   Git worktree and a background Rex session of its own. See milo task --help.
+milo ssh HOST logs in to HOST and lets this tab's Outline and History follow the
+  shell there until you log out. See milo ssh --help.
 milo listen and milo claude-status are used by Rex and Claude Code.
 To open a directory named like a command, use a path such as ./history.
 In a git repository the outline shows the whole project and history shows
@@ -243,6 +247,7 @@ fn command_help(name: &str) -> Option<&'static str> {
         "presence" => presence::HELP,
         "settings" => setup::transfer::HELP,
         "task" => task::HELP,
+        "ssh" => ssh::HELP,
         "listen" => {
             "Usage: milo listen [--stop]\n\nStart or stop the Rex listener that remembers sidebar sizes, arranges new tabs and titles tabs."
         }
@@ -253,9 +258,9 @@ fn command_help(name: &str) -> Option<&'static str> {
 }
 
 /// Every word `command_help` knows, in the order `--help` lists them.
-const COMMANDS: [&str; 16] = [
+const COMMANDS: [&str; 17] = [
     "outline", "history", "usage", "menubar", "setup", "web", "settings", "doctor", "presence", "view", "review",
-    "tabs", "task", "listen", "alerts", "claude-status",
+    "tabs", "task", "ssh", "listen", "alerts", "claude-status",
 ];
 const OPTIONS: [&str; 3] = ["--help", "--version", "--skip-onboarding"];
 
@@ -346,6 +351,9 @@ enum Command<'a> {
     History(Option<&'a OsStr>),
     ShellOutline(&'a OsStr),
     ShellHistory(&'a OsStr),
+    ShellUsage(&'a OsStr),
+    Ssh(ssh::Request<'a>),
+    SshHelper(ssh::helper::Request<'a>),
     PeekOutline { origin: &'a OsStr, shell: Option<&'a OsStr> },
     View { file: &'a OsStr, commit: Option<CommitId<'a>>, spot: Option<Spot> },
     Review { patch: &'a OsStr, from: Option<&'a str>, float: bool },
@@ -374,6 +382,10 @@ enum Command<'a> {
     Version,
 }
 
+/// Commands that take more words than a command and an option.
+const TAKES_WORDS: [&str; 10] =
+    ["view", "review", "web", "alerts", "presence", "settings", "menubar", "task", "ssh", "ssh-helper"];
+
 /// Only known command words are text; a path can hold arbitrary bytes.
 fn command<'a>(
     first: Option<&'a OsStr>,
@@ -384,7 +396,7 @@ fn command<'a>(
     let option = second.and_then(OsStr::to_str);
     if matches!(
         (name, option),
-        (Some("outline" | "history"), Some("--shell")) | (Some("outline"), Some("--peek-origin"))
+        (Some("outline" | "history" | "usage"), Some("--shell")) | (Some("outline"), Some("--peek-origin"))
     ) {
         let (block, shell) = match rest {
             [block] => (block, None),
@@ -404,12 +416,14 @@ fn command<'a>(
             Command::PeekOutline { origin: block, shell: shell.map(OsString::as_os_str) }
         } else if name == Some("history") {
             Command::ShellHistory(block)
+        } else if name == Some("usage") {
+            Command::ShellUsage(block)
         } else {
             Command::ShellOutline(block)
         });
     }
     if !rest.is_empty()
-        && !matches!(name, Some("view" | "review" | "web" | "alerts" | "presence" | "settings" | "menubar" | "task"))
+        && !name.is_some_and(|name| TAKES_WORDS.contains(&name))
     {
         return Err(format!("too many arguments; see {}", guide(name)));
     }
@@ -538,6 +552,13 @@ fn command<'a>(
         (Some("presence"), action) => Command::Presence(presence::Request::parse(action, rest)?),
         (Some("settings"), action) => Command::Settings(setup::transfer::Request::parse(action, rest)?),
         (Some("task"), action) => Command::Task(task::Request::parse(action, rest)?),
+        (Some("ssh"), first) => Command::Ssh(ssh::Request::parse(first, rest)?),
+        (Some("ssh-helper"), Some(first)) => {
+            let words: Option<Vec<&str>> =
+                std::iter::once(first).chain(rest.iter().map(OsString::as_os_str)).map(OsStr::to_str).collect();
+            let words = words.ok_or("expected an internal ssh-helper request")?;
+            Command::SshHelper(ssh::helper::Request::parse(&words).ok_or("expected an internal ssh-helper request")?)
+        }
         (Some("listen"), None) => Command::Listen(false),
         (Some("listen"), Some(flag)) if flag == "--stop" => Command::Listen(true),
         (Some("listen"), _) => return Err("expected milo listen [--stop]".to_string()),
@@ -598,18 +619,33 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         }),
         Command::ShellOutline(shell) => {
             rex::preview_anchor(shell);
-            run(Start::Reading(Path::new(".")), &|| Ok(workflow::project(open_repo(None)?, Some(shell), outline)))
+            run(Start::Reading(Path::new(".")), &|| {
+                Ok(workflow::project(open_repo(None)?, Some(shell), Role::Outline, outline))
+            })
         }
         Command::History(path) => run(Start::Reading(project_path(path)), &|| open_history(path)),
-        Command::ShellHistory(shell) => {
-            run(Start::Reading(Path::new(".")), &|| Ok(workflow::project(open_repo(None)?, Some(shell), history)))
-        }
+        Command::ShellHistory(shell) => run(Start::Reading(Path::new(".")), &|| {
+            Ok(workflow::project(open_repo(None)?, Some(shell), Role::History, history))
+        }),
+        Command::ShellUsage(shell) => run(Start::Check, &|| {
+            let anchor = shell.to_str().unwrap_or_default().to_owned();
+            Ok(Box::new(ssh::usage::Scoped::new(Box::new(usage::Usage::open()), anchor, paths::state_dir())))
+        }),
+        Command::Ssh(request) => exit(ssh::connect(&request)?),
+        Command::SshHelper(request) => match request {
+            ssh::helper::Request::Probe => exit(ssh::helper::probe()),
+            ssh::helper::Request::Shell(token) => exit(ssh::helper::shell(token)),
+            ssh::helper::Request::Pane { role, token, host } => {
+                let make = if role == Role::History { history } else { outline };
+                run(Start::Reading(Path::new(".")), &|| ssh::helper::pane(role, token, host, make))
+            }
+        },
         Command::PeekOutline { origin, shell } => {
             if let Some(shell) = shell {
                 rex::preview_anchor(shell);
             }
             let result = run(Start::Reading(Path::new(".")), &|| {
-                Ok(workflow::project(open_repo(None)?, None, |repo, prefs| {
+                Ok(workflow::project(open_repo(None)?, None, Role::Outline, |repo, prefs| {
                     Box::new(Outline::with_preferences(repo, rex::inside(), prefs).into_peek().refreshing_away())
                 }))
             });
@@ -730,11 +766,11 @@ fn print_line(text: &str) -> Result<(), String> {
 }
 
 fn open_outline(path: Option<&OsStr>) -> Result<Box<dyn Pane>, String> {
-    Ok(workflow::project(open_repo(path)?, None, outline))
+    Ok(workflow::project(open_repo(path)?, None, Role::Outline, outline))
 }
 
 fn open_history(path: Option<&OsStr>) -> Result<Box<dyn Pane>, String> {
-    Ok(workflow::project(open_repo(path)?, None, history))
+    Ok(workflow::project(open_repo(path)?, None, Role::History, history))
 }
 
 fn outline(repo: Repo, prefs: &preferences::Preferences) -> Box<dyn Pane> {
