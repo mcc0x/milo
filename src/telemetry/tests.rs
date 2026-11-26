@@ -14,6 +14,12 @@ fn enter(root: &Path) -> io::Result<Visit> {
 }
 
 #[test]
+fn the_build_settings_choose_only_an_authorized_endpoint() {
+    let url = option_env!("MILO_COUNTS_ENDPOINT");
+    assert_eq!(endpoint(), url.filter(|value| crate::usage::counts_protocol(value).is_some()));
+}
+
+#[test]
 fn utc_dates_agree_across_centuries_and_reject_corrupt_values() {
     for (day, expected) in [
         (0, "1970-01-01"),
@@ -186,9 +192,13 @@ fn corrupt_or_untrusted_state_and_endpoints_fail_closed() {
         "https://example.test/v1/counts?key=bad",
         "https://{host1,host2}/v1/counts",
     ] {
-        assert!(transport::protocol(url).is_none(), "{url}");
+        assert!(crate::usage::counts_protocol(url).is_none(), "{url}");
     }
-    assert_eq!(transport::protocol("https://counts.example.test/v1/counts"), Some("=https"));
+    assert_eq!(
+        crate::usage::counts_protocol("https://counts.example.test/v1/counts"),
+        cfg!(milo_distribution_counts).then_some("=https"),
+    );
+    assert_eq!(crate::usage::counts_protocol("http://127.0.0.1:12345/v1/counts"), Some("=http"));
     assert!(enabled(Path::new("relative")).is_err());
     let f = Fixture::folder();
     let visit = enter(&f.root).unwrap();

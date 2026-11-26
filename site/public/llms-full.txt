@@ -190,7 +190,7 @@ An active installation is a user-level Milo installation that opens an eligible 
 
 Milo remembers the last day it attempted locally and marks it *before* sending. Offline launches, crashes and lost requests can undercount; Milo doesn't queue missed days or retry an uncertain delivery. If the clock goes back, or a launch had its clock set far into the future, counting waits for a day later than the saved day. Turning counts off stops new attempts without forgetting an earlier one; a request already started cannot be recalled. Replacing the binary does not start a new install if you keep your Milo state. Deleting that state can count the install again; copying it to another account can undercount. Cumulative new installs are not the number still installed.
 
-The receiving application stores aggregate counters, not individual requests. Like other HTTPS connections, a report exposes network metadata to infrastructure along its route. For example, Railway's public edge logs source IP and exact request time independently of the application. Direct public collection there doesn't meet the project's requirements. See the [operator's pre-deployment privacy checks](https://github.com/mcc0x/milo/blob/main/hosted/counts/README.md) before configuring an endpoint.
+The receiving application stores aggregate counters, not individual requests. Like other HTTPS connections, a report exposes network metadata to infrastructure along its route. Railway's public edge logs source IP and request time independently of Milo; these are not used to calculate counts. See the [operator's pre-deployment privacy checks](https://github.com/mcc0x/milo/blob/main/hosted/counts/README.md) for the distinction between application data and hosting logs.
 
 ## In Rex
 

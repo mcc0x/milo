@@ -10,7 +10,6 @@ mod platform;
 mod platform;
 #[cfg(test)]
 mod tests;
-mod transport;
 
 use std::cell::Cell;
 use std::fs::{self, File};
@@ -31,7 +30,15 @@ pub(crate) fn configured() -> bool {
 }
 
 fn endpoint() -> Option<&'static str> {
-    option_env!("MILO_COUNTS_ENDPOINT").filter(|url| transport::protocol(url).is_some())
+    // Evaluate this gate at compile time so an ordinary binary does not embed a
+    // production URL even when the packaging environment accidentally sets one.
+    const BUILD_URL: Option<&str> = match option_env!("MILO_COUNTS_ENDPOINT") {
+        Some(url) if cfg!(milo_distribution_counts) || matches!(url.as_bytes(), [b'h', b't', b't', b'p', b':', ..]) => {
+            Some(url)
+        }
+        _ => None,
+    };
+    BUILD_URL.filter(|url| crate::usage::counts_protocol(url).is_some())
 }
 
 pub(crate) fn suppressed() -> bool {
@@ -171,7 +178,7 @@ impl Visit {
             return None;
         }
         save(&self.state, HIGH_WATER, &format!("{day}\n")).ok()?;
-        transport::start(url, &date, previous.is_none(), monthly)
+        crate::usage::post_anonymous_counts(url, &date, previous.is_none(), monthly)
     }
 }
 
@@ -205,10 +212,10 @@ pub(crate) struct First {
 
 impl First {
     pub(crate) fn start() -> Option<Self> {
-        let url = endpoint()?;
         if suppressed() {
             return None;
         }
+        let url = endpoint()?;
         let visit = Visit::enter(paths::config_dir()?, paths::state_dir()?).ok()?;
         let Some(last) = visit.last().ok()? else { return Some(Self { visit, proceed: Cell::new(false) }) };
         let _ = std::thread::Builder::new().spawn(move || {

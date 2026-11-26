@@ -3,7 +3,6 @@ use std::fs::{self, File};
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::Path;
-use std::process::Command;
 
 use crate::fs_ops;
 
@@ -35,10 +34,4 @@ pub(super) fn lock_file(dir: &Path, name: &CStr) -> io::Result<File> {
 pub(super) fn publish(temp: fs_ops::Temp, dir: &Path, name: &str) -> io::Result<()> {
     temp.replace(&dir.join(name))?;
     fs_ops::open_dir(dir)?.sync_all()
-}
-
-pub(super) fn curl() -> Option<Command> {
-    let mut command = Command::new("/usr/bin/curl");
-    command.env_clear().current_dir("/");
-    Some(command)
 }

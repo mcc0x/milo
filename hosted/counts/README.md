@@ -27,8 +27,8 @@ Other routes: `GET /healthz` (process is up), `GET /readyz` (database answers), 
 
 - One fixed global token bucket limits `POST /v1/counts` (200 burst, 50 per second). The service keeps no per-client state and never reads the client address.
 - The dashboard checks HTTP Basic credentials, compared in constant time, before reading the database. There is no attempt limiter, so its protection is the length of the two random credentials; do not shorten them. Because it keeps no per-client state, it cannot rate-limit guessing by source.
-- The application logs startup or a generic startup failure. Even a failed write produces no per-request log: a series of timestamped errors could otherwise reveal activity during an outage. Use `/readyz` to check the database connection.
-- **Public-edge blocker.** Railway's managed HTTP logs record `srcIp`, `requestId` and a timestamp for every request to a public domain, with no per-service way to disable or redact them, and keep them for 90 days ([Railway support](https://station.railway.com/questions/can-http-request-logging-be-disabled-or-30c1f581), [logs](https://docs.railway.com/observability/logs)). The application cannot change that. Under the requirement that no IP, request record or timestamp is collected, a Railway public domain for `POST /v1/counts` must not receive client traffic. Any other ingress, proxy or CDN in front of it needs its own review for the same fields, including copies and backups, before a client build reports here.
+- The application logs startup or a generic startup failure. Even a failed write produces no per-request log. Use `/readyz` to check the database connection.
+- **Hosting logs are separate.** Railway's public HTTP edge records metadata including `srcIp`, `requestId`, path and request time. This happens independently of the application. Do not export, join or query these logs to count installations. Railway [documents plan-specific log windows](https://docs.railway.com/observability/logs) and notes that upgrading can restore earlier logs. Confirm underlying retention, access and copies with the provider for the actual service; do not promise that a dashboard visibility window is a deletion deadline.
 - The dashboard is served with `Cache-Control: no-store, private`, a CSP with no scripts, `X-Frame-Options: DENY`, `noindex` and no referrer. HTTP Basic credentials are only as private as the connection, so use it only over TLS, which Railway's ingress terminates.
 
 ## Configuration
@@ -48,7 +48,7 @@ The service refuses to start unless both credentials are set and well formed. Th
 Follow [railway-template.md](railway-template.md). It is the only deployment procedure; do not provision by hand. Requirements that hold whatever the procedure:
 
 - The Postgres service is private: no public TCP proxy and no public domain. The receiver reaches it over Railway's private network.
-- **No public domain for end-user counts.** Railway's edge keeps request logs this service cannot disable (see the blocker above), so no Milo client may report to a Railway public domain. A domain may be attached only to inspect the dashboard with synthetic data in a staging environment, and removed afterwards.
+- A separate Railway HTTPS domain can serve submissions and the authenticated dashboard. No admin credential belongs in the Milo binary or public website. Do not change the existing site or pairing relay.
 - Applying a template or changing production needs the maintainer's explicit approval of a reviewed plan (see the [Railway skill](../../skills/milo-railway/SKILL.md)).
 
 ## Abuse limitation
@@ -59,11 +59,11 @@ The receiver cannot tell one client from another, so it cannot stop a determined
 
 Run these in a staging environment with synthetic data first and record the result in the pull request.
 
-1. Map the real HTTPS path: DNS, TLS terminator, CDN/WAF, load balancer, reverse proxy and service. Send only synthetic success, rejection and outage requests in staging. Inspect access/error logs, traces, metrics labels and drains at each hop; confirm none stores source IP (including forwarded headers), request ID, exact request time, body, authorization header or query string. Confirm no hop retries POST on timeout or upstream failure. A quiet application console alone proves none of this.
+1. Map the HTTPS path. Send only synthetic success, rejection and outage requests in staging. Inspect the application's output, metric labels and traces: no client addresses, forwarded headers, credentials, request bodies or individual events. Inspect provider HTTP logs separately and document their fields and access. Confirm proxies don't retry POST on timeout or upstream failure.
 2. Review Postgres statement, duration, error and bind-parameter logging, auditing, query tracing and replication/backup exports. Postgres needs WAL to recover transactions; aggregate tables do **not** guarantee that infrastructure has no transaction-level history. Record who can access each copy (including WAL archives and snapshots), its retention and deletion policy. Verify the provider's actual retention in writing, not just the time range visible in its console.
 3. Confirm the Postgres service has no public TCP proxy or public domain, and that the receiver is the only service holding its connection URL.
 4. Confirm an unauthenticated request to the dashboard gets `401` and shows nothing, and that the admin variables are set on this service only.
-5. Stop if any hop records client data. The client must not ship a build that reports here until each one is cleared.
+5. Stop if the application or its database records individual requests, if a service logs credentials or bodies, or if the observed hosting behavior differs from the disclosure. Obtain approval before provisioning, assigning a domain, enabling a reporting endpoint in a build, or releasing it.
 
 ## Test
 

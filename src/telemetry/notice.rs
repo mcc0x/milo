@@ -9,7 +9,7 @@ use crate::setup::wrap;
 use crate::ui::{self, FAINT, HEADING};
 
 const TITLE: &str = "Anonymous usage counts";
-const BODY: &str = "Starting next launch, Milo can count this install once per UTC day and month. It sends the date and whether this install is new or active this month. No IDs, files or account details.";
+const BODY: &str = "Starting next launch, Milo can send the UTC date and two flags: first report from this install, and first this month. No ID, files or account details. Milo stores only totals. The hosting provider can log your IP and request time.";
 const SETTING: &str = "Change this in Settings or set MILO_TELEMETRY=0.";
 const CHOICES: &str = "Enter keep on   o turn off";
 

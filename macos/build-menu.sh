@@ -1,6 +1,8 @@
 #!/bin/sh
 # Build a self-contained, ad-hoc signed macOS app. Does not install or launch it.
 set -eu
+unset MILO_COUNTS_ENDPOINT
+export MILO_TELEMETRY=0
 case "${1-}:$#" in
     :0|--release:1) ;;
     *) echo 'Usage: sh macos/build-menu.sh [--release]' >&2; exit 2 ;;
