@@ -27,6 +27,7 @@ try {
     & ./.github/ci/stage-windows.ps1 -Executable 'target\release\milo.exe' -Destination "$work\package"
     Copy-Item hosted\counts "$work\counts" -Recurse
     Copy-Item tests\windows-counts\installed.py $work
+    Copy-Item tests\windows-counts\no-helpers.py $work
     Copy-Item (Get-Command bun.exe).Source "$work\bun.exe"
     $pg = Get-ChildItem "$env:ProgramFiles\PostgreSQL\*\bin\initdb.exe" | Sort-Object FullName -Descending | Select-Object -First 1
     if (-not $pg) { throw 'Postgres is missing from the hosted runner.' }

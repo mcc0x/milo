@@ -22,7 +22,7 @@ include = [
 libc = "0.2"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(milo_menu_payload)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(milo_menu_payload)', 'cfg(milo_distribution_counts)'] }
 unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]

@@ -6,7 +6,7 @@ server=$(command -v tmux)
 root=$(mktemp -d /tmp/milo-tmux.XXXXXX)
 socket=$root/tmux.sock
 mux() {
-    env -i HOME="$root" PATH=/usr/bin:/bin SHELL=/bin/sh TERM=xterm-256color \
+    env -i HOME="$root" PATH=/usr/bin:/bin SHELL=/bin/sh TERM=xterm-256color MILO_TELEMETRY=0 \
         MILO="$binary" "$server" -f /dev/null -S "$socket" "$@"
 }
 cleanup() {

@@ -75,6 +75,8 @@
   /* A title, its timing note and an action do not fit one line of a narrow panel. */
   .integration-heading { flex-wrap: wrap; }
   .integrations:has(.integrations-list) { gap: .6rem; }
+  .integrations:has(.telemetry-settings) { gap: .55rem; }
+  .telemetry-settings > p { margin-block-start: .45rem; }
   .integration-row { padding: .375rem .1rem; column-gap: .35rem; }
   .integration-state[data-state="unavailable"] { grid-column: 2/-1; justify-self: start; }
   .integration-row[data-kind="telemetry"] { grid-template-columns: auto minmax(0, 1fr) auto; row-gap: .18rem; }

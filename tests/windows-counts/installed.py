@@ -11,8 +11,10 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 
@@ -125,14 +127,14 @@ def meter(backend):
 
 
 @contextmanager
-def pane(profile, git, *, choice=None, no_git=False, **overrides):
+def pane(profile, git, *, no_git=False, confined=False, **overrides):
     native = Path(os.environ['SystemRoot']) / 'System32'
     want = 'Git could not be run.' if no_git else 'Counts fixture commit'
     env = {key: os.environ[key] for key in ('SystemRoot', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP')}
     env.update(PATH=str(native) if no_git else os.pathsep.join([str(git.parent), str(native)]),
                MILO_TEST_PROFILE=str(profile), MILO_TEST_FRAME=want, **overrides)
-    if choice:
-        env['MILO_TEST_CHOICE'] = choice
+    if confined:
+        env.update(MILO_TEST_CONFINED_PYTHON=sys.executable, MILO_TEST_FRAME='Reader without helpers')
     args = [WORK / 'driver.exe', 'installed_counts_pane', '--exact', '--nocapture']
     with subprocess.Popen(args, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as driver:
         try:
@@ -157,30 +159,6 @@ def preload(profile, previous):
     file.write_bytes(f'{(previous - date(1970, 1, 1)).days}\n'.encode())
 
 
-@contextmanager
-def without_curl(curl):
-    from ctypes import wintypes
-    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-    open_file = kernel.CreateFileW
-    open_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
-                          wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
-    open_file.restype = wintypes.HANDLE
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    handle = open_file(str(curl), 0x80000000, 0, None, 3, 0, None)
-    if handle == wintypes.HANDLE(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
-        try:
-            subprocess.run([curl, '-q', '--version'], check=True)
-        except OSError as error:
-            assert error.winerror in (5, 32), 'Unexpected reason for curl launch failure'
-        else:
-            raise AssertionError('The exclusive read handle did not prevent curl execution')
-        yield
-    finally:
-        assert kernel.CloseHandle(handle)
-
-
 def qualify(pg, git):
     assert not ctypes.windll.shell32.IsUserAnAdmin(), 'Run the installer and panes as a standard user'
     native_curl = Path(os.environ['SystemRoot']) / 'System32' / 'curl.exe'
@@ -188,6 +166,7 @@ def qualify(pg, git):
     subprocess.run([git, '--version'], check=True)
     project = WORK / 'project'
     project.mkdir()
+    (project / 'sample.txt').write_text('Reader without helpers\n', encoding='utf-8')
     subprocess.run([git, 'init', '--template=', '-b', 'main', project], check=True)
     subprocess.run([git, 'fast-import', '--quiet', '--done'], cwd=project, check=True, input=b'''commit refs/heads/main
 committer Milo Fixture <fixture@example.invalid> 1000000000 +0000
@@ -249,19 +228,31 @@ done
             assert state(profile).read_bytes() == epoch_day
 
         with receiver(*credentials):
-            with pane(main, git, choice='keep'):
+            fresh = WORK / 'prelaunch-opt-out'
+            fresh.mkdir()
+            with pane(fresh, git, MILO_TELEMETRY='0'):
+                pass
+            assert not state(fresh).exists()
+            assert not attempts
+            with pane(main, git):
                 with pane(main, git):
                     pass
-            assert state(main).read_bytes() == b'noticed\n'
-            with pane(off, git, choice='off'):
-                pass
+            assert state(main).read_bytes() == b'first-seen\n'
+            opted_out = off / 'Roaming' / 'milo' / 'anonymous-counts.conf'
+            opted_out.parent.mkdir(parents=True)
+            opted_out.write_bytes(b'off\n')
             with pane(off, git):
                 pass
+            assert not state(off).exists()
             with pane(main, git, CI='true'):
                 pass
+            saved = main / 'Roaming' / 'milo' / 'anonymous-counts.conf'
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            saved.write_bytes(b'on\n')
             with pane(main, git, MILO_TELEMETRY='0', no_git=True):
                 pass
-            assert state(main).read_bytes() == b'noticed\n'
+            assert saved.read_bytes() == b'on\n'
+            assert state(main).read_bytes() == b'first-seen\n'
             assert not attempts
             dashboard(0, 0, 0)
             next_report(main, True, True)
@@ -286,12 +277,12 @@ done
 
             blocked = WORK / 'no-transport-user'
             preload(blocked, previous_month)
-            with without_curl(native_curl), pane(blocked, git):
+            with pane(blocked, git, confined=True):
                 until(lambda: state(blocked).read_bytes() == epoch_day, 'Unavailable curl blocked the day claim')
             with pane(blocked, git):
                 pass
             assert len(attempts) == 3
-            print('With system curl held open read-only and non-executable, History still worked; no retry.')
+            print('The installed Reader worked with child process creation blocked; no POST or retry.')
 
         failed = WORK / 'offline-user'
         preload(failed, previous_month)
@@ -302,8 +293,24 @@ done
             assert len(attempts) == 4, 'A failed delivery was retried after recovery'
             dashboard(3, 1, 2 + month_changed)
             print('Receiver outage did not block the pane or retry; private totals survived restart.')
+            legacy = WORK / 'legacy-user'
+            marker = state(legacy)
+            marker.parent.mkdir(parents=True)
+            marker.write_bytes(b'noticed\n')
+            next_report(legacy, True, True)
+            with pane(legacy, git):
+                pass
+            assert len(attempts) == 5
+            dashboard(4, 2, 3 + month_changed)
 
 
 if __name__ == '__main__':
     tools = json.loads((WORK / 'tools.json').read_text())
-    qualify(Path(tools['pg']), Path(tools['git']))
+    try:
+        qualify(Path(tools['pg']), Path(tools['git']))
+    finally:
+        # The test user's private state intentionally grants no access to the runner administrator.
+        for local in WORK.glob('*/Local/milo'):
+            shutil.rmtree(local)
+        for roaming in WORK.glob('*/Roaming/milo'):
+            shutil.rmtree(roaming)

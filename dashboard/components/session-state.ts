@@ -6,7 +6,7 @@ export type PresenceDetails = 'generic' | 'session' | 'project' | 'both';
 export type AlertKind = 'blocked' | 'error' | 'done' | 'notification' | 'bell';
 export type AlertDestination = 'telegram' | 'discord';
 export type MenuIndicator = 'quota' | 'cpu' | 'memory';
-export type TelemetryStatus = 'off' | 'suppressed' | 'unconfigured' | 'awaiting_notice' | 'unreadable' | 'on';
+export type TelemetryStatus = 'off' | 'suppressed' | 'unconfigured' | 'on';
 
 export interface GroupState {
   scope: Scope | 'default';

@@ -1,7 +1,6 @@
 //! Anonymous counts of interactive launches. Claim the period before starting a single
 //! best-effort request. A lost report costs a count, never a retry or an identifier.
 
-mod notice;
 #[cfg(unix)]
 #[path = "telemetry/unix.rs"]
 mod platform;
@@ -10,9 +9,7 @@ mod platform;
 mod platform;
 #[cfg(test)]
 mod tests;
-mod transport;
 
-use std::cell::Cell;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Write as _};
 use std::path::{Component, Path, PathBuf};
@@ -20,18 +17,24 @@ use std::process::Child;
 
 use crate::{fs_ops, paths, preferences};
 
-pub(crate) use notice::Notice;
-
 const PREFERENCE: &str = "anonymous-counts.conf";
 const HIGH_WATER: &str = "anonymous-counts.state";
-const NOTICED: &str = "noticed\n";
+const FIRST_SEEN: &str = "first-seen\n";
 
 pub(crate) fn configured() -> bool {
     endpoint().is_some()
 }
 
 fn endpoint() -> Option<&'static str> {
-    option_env!("MILO_COUNTS_ENDPOINT").filter(|url| transport::protocol(url).is_some())
+    // Evaluate this gate at compile time so an ordinary binary does not embed a
+    // production URL even when the packaging environment accidentally sets one.
+    const BUILD_URL: Option<&str> = match option_env!("MILO_COUNTS_ENDPOINT") {
+        Some(url) if cfg!(milo_distribution_counts) || matches!(url.as_bytes(), [b'h', b't', b't', b'p', b':', ..]) => {
+            Some(url)
+        }
+        _ => None,
+    };
+    BUILD_URL.filter(|url| crate::usage::counts_protocol(url).is_some())
 }
 
 pub(crate) fn suppressed() -> bool {
@@ -82,15 +85,6 @@ pub(crate) fn set_enabled(config: &Path, value: bool) -> io::Result<()> {
     save(config, PREFERENCE, if value { "on\n" } else { "off\n" })
 }
 
-pub(crate) fn notice_shown(state: &Path) -> io::Result<bool> {
-    absolute(state)?;
-    match preferences::read(&state.join(HIGH_WATER), 24)? {
-        None => Ok(false),
-        Some(text) if text == NOTICED || saved_day(&text).is_some() => Ok(true),
-        _ => Err(ErrorKind::InvalidData.into()),
-    }
-}
-
 fn saved_day(text: &str) -> Option<i64> {
     let value = text.strip_suffix('\n')?;
     if !value.bytes().all(|b| b.is_ascii_digit()) {
@@ -136,26 +130,37 @@ impl Visit {
             return Err(ErrorKind::PermissionDenied.into());
         }
         // Never wait for another startup. In particular, skip every other launch
-        // for the entire lifetime of the interactive process that presents the notice.
+        // for the entire lifetime of the first eligible interactive session.
         let guard = platform::lock_file(&state, c"anonymous-counts-session.lock")?;
         guard.try_lock()?;
         Ok(Self { config, state, _guard: Held(guard) })
     }
 
-    fn last(&self) -> io::Result<Option<String>> {
-        preferences::read(&self.state.join(HIGH_WATER), 24)
+    fn settings_when_enabled(&self) -> io::Result<Held> {
+        let lock = platform::lock_file(&self.config, c"anonymous-counts-settings.lock")?;
+        lock.try_lock()?;
+        let settings = Held(lock);
+        if !enabled(&self.config)? {
+            return Err(ErrorKind::PermissionDenied.into());
+        }
+        Ok(settings)
     }
 
-    fn acknowledge(&self, keep_on: bool) -> io::Result<()> {
-        if !keep_on {
-            set_enabled(&self.config, false)?;
+    fn previous_or_mark_first(&self) -> io::Result<Option<String>> {
+        let previous = preferences::read(&self.state.join(HIGH_WATER), 24)?;
+        if previous.is_none() {
+            let _settings = self.settings_when_enabled()?;
+            save(&self.state, HIGH_WATER, FIRST_SEEN)?;
         }
-        save(&self.state, HIGH_WATER, NOTICED)
+        Ok(previous)
     }
 
     fn report(&self, last: &str, now: i64, url: &str) -> Option<Child> {
         let day = now.checked_div(crate::when::DAY).filter(|_| now >= 0)?;
-        let previous = if last == NOTICED { None } else { Some(saved_day(last)?) };
+        let previous = match last {
+            FIRST_SEEN | "noticed\n" => None,
+            text => Some(saved_day(text)?),
+        };
         if previous.is_some_and(|previous| previous >= day) {
             return None;
         }
@@ -164,14 +169,9 @@ impl Visit {
             None => true,
             Some(previous) => utc_date(previous)?[..7] != date[..7],
         };
-        let lock = platform::lock_file(&self.config, c"anonymous-counts-settings.lock").ok()?;
-        lock.try_lock().ok()?;
-        let _settings = Held(lock);
-        if !enabled(&self.config).ok()? {
-            return None;
-        }
+        let _settings = self.settings_when_enabled().ok()?;
         save(&self.state, HIGH_WATER, &format!("{day}\n")).ok()?;
-        transport::start(url, &date, previous.is_none(), monthly)
+        crate::usage::post_anonymous_counts(url, &date, previous.is_none(), monthly)
     }
 }
 
@@ -197,27 +197,21 @@ fn utc_date(day: i64) -> Option<String> {
     None
 }
 
-/// Dropping this releases the first-session lock; retain it across the original pane and its handoffs.
-pub(crate) struct First {
-    visit: Visit,
-    pub(crate) proceed: Cell<bool>,
-}
-
-impl First {
-    pub(crate) fn start() -> Option<Self> {
-        let url = endpoint()?;
-        if suppressed() {
-            return None;
-        }
-        let visit = Visit::enter(paths::config_dir()?, paths::state_dir()?).ok()?;
-        let Some(last) = visit.last().ok()? else { return Some(Self { visit, proceed: Cell::new(false) }) };
-        let _ = std::thread::Builder::new().spawn(move || {
-            let child = visit.report(&last, crate::when::now(), url);
-            drop(visit);
-            if let Some(mut child) = child {
-                let _ = child.wait();
-            }
-        });
-        None
+/// Keep the returned lock until the pane and its handoffs close, so that a concurrent
+/// launch cannot mistake the new first-seen marker for a completed first session.
+pub(crate) fn start() -> Option<impl Drop> {
+    if suppressed() {
+        return None;
     }
+    let url = endpoint()?;
+    let visit = Visit::enter(paths::config_dir()?, paths::state_dir()?).ok()?;
+    let Ok(Some(last)) = visit.previous_or_mark_first() else { return Some(visit._guard) };
+    let _ = std::thread::Builder::new().spawn(move || {
+        let child = visit.report(&last, crate::when::now(), url);
+        drop(visit);
+        if let Some(mut child) = child {
+            let _ = child.wait();
+        }
+    });
+    None
 }
