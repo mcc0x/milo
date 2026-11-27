@@ -54,7 +54,7 @@ The Actions artifact expires after 14 days. Compare the two manifest entries to 
 
 ## Qualify standalone Linux separately
 
-**Candidate only.** v0.1.8 has no Linux download. This procedure does not change the source installer, the hosted Mac installer, the tap or any release. Ubuntu 22.04 LTS amd64 is the oldest test target: it provides glibc 2.35, a maintained Jammy userspace and a hosted runner for the real terminal tests. The baseline is the system we run, not the highest glibc symbol found in an ELF. A newer glibc permits installation but does not qualify another distribution.
+This procedure qualifies a Linux candidate; it does not publish a release or change any install channel. Public Linux downloads start with v0.1.9. Ubuntu 22.04 LTS amd64 is the oldest test target: it provides glibc 2.35, a maintained Jammy userspace and a hosted runner for the real terminal tests. The baseline is the system we run, not the highest glibc symbol found in an ELF. A newer glibc permits installation but does not qualify another distribution.
 
 On a non-root x86-64 Linux builder with Docker and rustup, start in a clean checkout of the **committed revision**. No local uncommitted changes go into the binary.
 
@@ -68,7 +68,7 @@ sh tests/linux-candidate.sh "$assets"  # needs tmux, Git and Python 3 for the te
 
 The first command after creating the directory builds twice in digest-pinned Jammy builders with Rust 1.91.0, a locked dependency and different source and target directories. It requires identical ELF bytes, checks the loader, library dependencies, symbol versions and build paths, and binds the offline installer to the executable's SHA-256. A separate read-only Jammy runtime, with no network, compiler or repository, verifies the sums and exercises the installed executable. The last command drives the installed file, not a Cargo target: Home → Outline → Reader save and conflict, History, terminal restoration, headless settings save/reopen and missing usage providers. Use that same directory unchanged on each proposed target; record the source SHA, plaintext checksums and runtime results.
 
-**User steps for a future authorized release:** use an empty directory. Save `SHA256SUMS`, `install-linux.sh` and `milo-x86_64-unknown-linux-gnu` from the **same trusted release**. With GitHub CLI, set `tag` to the published Linux release tag and download just those files:
+**User steps for a published release with Linux assets:** use an empty directory. Save `SHA256SUMS`, `install-linux.sh` and `milo-x86_64-unknown-linux-gnu` from the **same trusted release**. With GitHub CLI, set `tag` to the published Linux release tag and download just those files:
 
 ```sh
 gh release download "${tag:?set the published Linux tag}" --repo mcc0x/milo \
@@ -133,7 +133,7 @@ gh run download "$windows_run_id" --repo mcc0x/milo \
 )
 ```
 
-Compare the two manifest entries to the log. Copy those same package files to a clean Windows x64 guest. As a standard user, exercise `install-windows.ps1`, the installed executable, a new shell's user PATH, and the installed uninstaller. Check that reinstalling adds no duplicate PATH entry and removing the package leaves settings intact. There was no public v0.1.8 Windows package; use a known prior private package for an upgrade check and label it as such.
+Compare the two manifest entries to the log. Copy those same package files to a clean Windows x64 guest. As a standard user, exercise `install-windows.ps1`, the installed executable, a new shell's user PATH, and the installed uninstaller. Check that reinstalling adds no duplicate PATH entry and removing the package leaves settings intact. Upgrade from the preceding public Windows package when one exists. For the first release, v0.1.9, the upgrade check used a prior private package and was labeled as such.
 
 ## Assemble one release manifest
 

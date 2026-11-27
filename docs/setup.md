@@ -23,6 +23,18 @@ sh install.sh
 
 The shell installer downloads and checks the binary before placing it in `~/.local/bin` by default. Upgrade with `brew upgrade mcc0x/milo/milo` or rerun the shell installer from the newer release. If you installed the Rex integration, run `milo setup --repair` after upgrading. If you installed the macOS menu app, run `milo menubar install` again.
 
+#### When Homebrew and Milo disagree
+
+```sh
+command -v milo
+milo --version
+brew list --versions mcc0x/milo/milo
+```
+
+`brew update` refreshes Homebrew and its formulae; it does not install or upgrade Milo. If `brew list --versions` shows no installed version, use `brew install mcc0x/milo/milo` to switch to Homebrew. If it lists an older version, use `brew upgrade mcc0x/milo/milo`. If Brew asks you to trust the formula, review the tap and trust just that formula with `brew trust --formula mcc0x/milo/milo`, then retry.
+
+If Brew lists the expected version but the shell still finds a script- or source-installed copy first (often in `~/.local/bin`), either keep updating that copy with its installer or switch to Homebrew. Before switching, back up the old executable and any installer receipt. Once the Homebrew copy works, move the old executable out of PATH or reorder your PATH. Open a new shell and repeat the three checks above; `brew update` never replaces an unmanaged binary.
+
 ### Linux
 
 On x86-64 Linux with glibc 2.35 or later, save [install-linux.sh](https://github.com/mcc0x/milo/releases/download/v0.1.9/install-linux.sh) and [milo-x86_64-unknown-linux-gnu](https://github.com/mcc0x/milo/releases/download/v0.1.9/milo-x86_64-unknown-linux-gnu) in the same directory. Check both hashes, then run the script there:
@@ -34,6 +46,8 @@ sh install-linux.sh
 
 The installer verifies the adjacent binary before placing it in `~/.local/bin` by default. To upgrade, repeat the steps with both files from the newer release. If `milo` isn’t on your PATH, run `~/.local/bin/milo`.
 
+The release is qualified for standalone use on glibc x86-64, not musl, WSL or other architectures. It does not qualify Linux-hosted Rex.
+
 ### Windows
 
 On native Windows x64, save [install-windows.ps1](https://github.com/mcc0x/milo/releases/download/v0.1.9/install-windows.ps1) and [milo-x86_64-pc-windows-msvc.exe](https://github.com/mcc0x/milo/releases/download/v0.1.9/milo-x86_64-pc-windows-msvc.exe) in the same folder. In PowerShell, open that folder, check both hashes, then run the verified script:
@@ -43,7 +57,7 @@ Get-FileHash -Algorithm SHA256 -Path .\install-windows.ps1, .\milo-x86_64-pc-win
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
 
-The policy option applies only to that PowerShell process. The executable is unsigned, so Windows may warn about an unknown publisher. The installer checks the adjacent executable, installs to `%LOCALAPPDATA%\Programs\Milo` by default and adds that directory to your user PATH. Open a new terminal and run `milo`. The Windows build runs standalone without Rex integration. To upgrade, close Milo and repeat the steps with both files from the newer release. To remove it, close Milo and run the installed `uninstall-milo.ps1` beside `milo.exe` the same way.
+The policy option applies only to that PowerShell process. The executable is unsigned, so Windows may warn about an unknown publisher. The installer checks the adjacent executable, installs to `%LOCALAPPDATA%\Programs\Milo` by default and adds that directory to your user PATH. Open a new terminal and run `milo`. The Windows build runs standalone without Rex integration. Windows 11 with Windows Terminal was tested; WSL is not a native Windows install. To upgrade, close Milo and repeat the steps with both files from the newer release. To remove it, close Milo and run the installed `uninstall-milo.ps1` beside `milo.exe` the same way.
 
 ### Install paths and removal
 
@@ -65,11 +79,11 @@ On macOS and Linux, the source installer builds the checkout containing the scri
 
 From the directory you want to browse, run `milo outline`, `milo history` or `milo usage`. Use `milo view FILE --edit` for a working text file. Or run `milo`, choose a pane with the arrow keys and `Enter`, and return to the picker with `q` after closing the reader. Standalone Home does not record a welcome choice or install anything.
 
-Choose **Terminal settings** for local preferences; you do not need to arrange a layout to save them. To use the browser editor without launching anything externally, run `milo web --no-open` and open its private link yourself. See the [command and feature matrix](../README.md#what-works-in-each-terminal).
+Choose **Terminal settings** for local preferences; you do not need to arrange a layout to save them. To use the browser editor without launching anything externally, run `milo web --no-open` and open its private link yourself. Install Git if you want Git history and change marks; Outline can browse ordinary folders without it. See the [command and feature matrix](../README.md#what-works-in-each-terminal).
 
 ## Anonymous usage counts
 
-Counts are on by default in the v0.1.9 release binaries, including Homebrew. Ordinary source builds have no reporting endpoint. The first eligible interactive launch records only that Milo has opened on this installation and sends nothing. A later launch can report. To opt out before opening Milo, use `export MILO_TELEMETRY=0` in a macOS or Linux shell or `$env:MILO_TELEMETRY = '0'` in PowerShell before launching it from that shell. To save a choice for all your projects, run `milo web` and open **Integrations → Anonymous usage counts**. Neither a worktree preference nor a settings import can change this choice.
+Counts are on by default in the v0.1.9 release binaries, including Homebrew. Ordinary source builds have no reporting endpoint. The first eligible interactive launch records only that Milo has opened on this installation and sends nothing. A later launch can report. To opt out before opening Milo, use `export MILO_TELEMETRY=0` in a macOS or Linux shell or `$env:MILO_TELEMETRY = '0'` in PowerShell before launching it from that shell. This overrides a saved On preference for that process. To save a choice for all your projects, run `milo web` and open **Integrations → Anonymous usage counts**. Neither a worktree preference nor a settings import can change this choice.
 
 An active installation is a user-level Milo installation that opens an eligible interactive pane. Standalone pane launches count; in Rex only opening Home or terminal Settings counts, so automatically started sidebars don't. Milo can report once per UTC day; the report contains the date and two yes/no values: first reporting install, and first active day this calendar month. It contains no identifier, version, OS, repository, account, prompt or agent usage. CI, background helpers and noninteractive commands don't report. Leaving a pane open overnight doesn't count another day. The receiver keeps daily new and active totals and calendar-month active totals. Monthly active is **not** the sum of daily active.
 
@@ -171,7 +185,7 @@ The agent runs with the environment of a new shell tab: your login shell's, with
 
 ## Browser editor
 
-Run `milo web` from the project you want to configure, or choose **Open browser settings** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the editor doesn’t open, use the private link printed in the terminal. `milo web --no-open` prints that link without opening a browser. The link is printed at once; a page opened from it waits the moment Milo takes to read your settings. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
+Run `milo web` from the project you want to configure, or choose **Open browser settings** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the browser can’t open that file (observed with Firefox Snap on Linux), open the private link printed in the terminal instead. `milo web --no-open` prints that link without opening a browser. The link is printed at once; a page opened from it waits the moment Milo takes to read your settings. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
 
 ![The local editor’s Integrations page for an example worktree, with Rex automation, Discord presence and alert forwarding all off](img/web-settings.webp)
 
@@ -181,7 +195,7 @@ The editor listens on `127.0.0.1:6110` by default. Use `milo web --port 7000` to
 
 Use **Layout** for pane order and sizes, **Panes** for Outline, History and shared appearance, and **Usage** for tools, accounts and display. In Rex, the layout actions menu lets you copy the current tab’s layout or try the draft in that tab. Undo a trial to restore the previous layout. Save explicitly for the current worktree or as the global default; Claude Code choices apply to the active profile. Outside Rex you can still edit and save settings.
 
-**Integrations** groups Rex automation, Discord presence and alert forwarding. Rex automation uses drafts; presence and forwarding apply immediately. **Menu Bar** manages the optional macOS app. **Hosts** names the computer these settings belong to and copies settings to or from [another Rex host](#several-rex-hosts). **Health** checks for problems and shows the host and its Rex version.
+**Integrations** groups Rex automation, Discord presence, alert forwarding and [anonymous usage counts](#anonymous-usage-counts). Rex automation uses drafts; presence and forwarding apply immediately. **Menu Bar** manages the optional macOS app. **Hosts** names the computer these settings belong to and can copy settings to or from [another Rex host](#several-rex-hosts) when Rex is available. **Health** checks for problems and shows the host and its Rex version if present.
 
 After saving, the confirmation names the destination: global defaults, the current worktree, or the active Claude profile. If open panes still use the old preferences, the browser keeps **Reopen panes to apply** in the project bar after the confirmation fades. Editing again clears the reminder.
 
@@ -416,6 +430,8 @@ Use **Refresh status** in the browser or `r` in the setup panel to check again w
 
 ## Remove milo
 
+On Windows, close Milo and use [the installed PowerShell uninstaller](#windows). The managed-integration removal commands below do not apply to Windows.
+
 The menu app and CLI uninstall separately. If you want both gone, run `milo menubar uninstall` **before** removing the CLI. This stops the app and unregisters launch at login. Skip this step if you want to keep using the menu bar.
 
 If [Discord presence](presence.md) is on, **Uninstall Milo** in Home turns it off and takes the activity down. Before removing the binary any other way, run `milo presence disable`.
@@ -424,7 +440,7 @@ From Home, choose **Uninstall Milo** to review and confirm removal of the CLI an
 
 1. To diagnose a setup before changing it, run `milo doctor`. To fix the managed integration after an upgrade or executable move, run `milo setup --repair` with the binary you intend to keep.
 2. Before deleting the binary, run `milo setup --remove` to disconnect the managed Rex and Claude Code integrations. It also ends [alert mirroring](#mirror-rex-alerts) and removes its saved destinations and secrets. Saved preferences and user-edited files are not an uninstall target. Close any live Milo panes separately.
-3. Remove the binary with `brew uninstall milo` if you installed with Homebrew. If you used the release installer, run `sh milo-install.sh --uninstall` with your downloaded copy. If you built from source, run `sh install.sh --uninstall` from the checkout. For either script, use the same `MILO_BIN_DIR` you installed to if you set one. Removing the binary does not change Rex or Claude Code settings or remove milo's saved state.
+3. Remove the binary using the [instructions for your install channel](#install-paths-and-removal). On Windows, use the [installed uninstaller](#windows). If you used the macOS or Linux source installer, run `sh install.sh --uninstall` from the checkout with the same `MILO_BIN_DIR` if you set one. Removing the binary does not change Rex or Claude Code settings or remove Milo’s saved state.
 
 If Rex cannot reload during removal, Milo still removes the managed files and tells you to restart Rex. If Milo cannot safely remove its Claude Code status line, correct the reported settings problem and retry before deleting the executable.
 
@@ -436,7 +452,7 @@ If you set `XDG_STATE_HOME` when installing the integration, use the same value 
 
 Choose **Doctor** in Home or **Read diagnostics** in Settings to check the installation. Press `Esc` to go back without waiting for the checks to finish. For a report to copy from the shell, run `milo doctor`.
 
-- **`milo` is not found:** for Homebrew, check that Homebrew is on `PATH`. The scripts put milo in `~/.local/bin` unless you set `MILO_BIN_DIR`. Add the install directory to `PATH`, or run the binary by its full path.
+- **`milo` is not found:** for Homebrew, check that Homebrew is on `PATH`. The Mac and Linux scripts use `~/.local/bin` by default; add that directory to `PATH` or run Milo by its full path. On Windows, open a new terminal after installation to pick up the user PATH change. See [install locations](#install) if you set `MILO_BIN_DIR`.
 - **Doctor reports a Rex loader conflict, or setup says Milo's Rex lines were moved, copied or changed:** Milo leaves your Rex settings and listener alone. In the Rex settings file named by Doctor, restore a single copy of Milo's original two lines at the top, just after any interpreter line. Then run Doctor again.
 - **Doctor reports an unreadable saved layout profile:** restore a known-good copy of the named file, or back it up and move it aside. Then reopen Settings to use the fallback layout or save a new one. Integration repair does not replace layout profiles.
 - **A save was interrupted or actions are missing:** run `milo doctor`. It checks the managed `rex.lua` and `listener.lua` on disk separately from the actions Rex has loaded. If it reports an out-of-date managed file, a stale launcher, a pending reload or missing managed actions, run `milo setup --repair` with the binary you intend Rex to use. If Doctor identifies a custom file, review it yourself. The **Health** section in setup offers the same diagnostics, repair and removal.

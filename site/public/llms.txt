@@ -2,15 +2,16 @@
 
 > milo provides small terminal panes for a live file tree, Git history, usage, and a file reader that can edit a working text file when asked. The panes work on their own or alongside your shell in Rex.
 
-milo writes to the project it displays only when you save a file you edited in its reader. On request, `milo task new` also adds a Git worktree for a coding agent's task. The v0.1.8 prebuilt release is for Apple Silicon Macs running macOS 13 or later. Use `brew install mcc0x/milo/milo` or the release installer below. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
+milo writes to the project it displays only when you save a file you edited in its reader. On request, `milo task new` also adds a Git worktree for a coding agent's task in Rex. v0.1.9 ships for Apple Silicon macOS 13 or later, Linux x86-64 with glibc 2.35 or later, and native Windows x64. The Linux and Windows packages are for standalone use. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
 
 ## Using milo
 
 - [Full documentation](https://usemilo.net/llms-full.txt): The guides and agent instructions in one text file.
 - [README](https://github.com/mcc0x/milo/blob/main/README.md): Install milo, open a local pane and see what Rex adds.
-- [v0.1.8 release notes](https://github.com/mcc0x/milo/blob/main/docs/releases/v0.1.8.md): Agent tasks in Rex, review notes, per-worktree Reader tab sets, output-file lookup and the optional Needs you menu.
-- [Release installer](https://github.com/mcc0x/milo/releases/download/v0.1.8/install.sh): Downloads the v0.1.8 binary from GitHub, verifies its SHA-256 checksum and installs it without a toolchain.
-- [Source installer](https://github.com/mcc0x/milo/blob/main/install.sh): Builds milo with Cargo and installs or removes the binary. It does not change Rex or Claude Code settings.
+- [v0.1.9 release notes and downloads](https://github.com/mcc0x/milo/releases/tag/v0.1.9): Standalone Linux and Windows packages alongside the macOS release.
+- [Install and upgrade](https://github.com/mcc0x/milo/blob/main/docs/setup.md#install): Homebrew on Apple Silicon, Mac and Linux shell installers, and the Windows PowerShell installer.
+- [Anonymous usage counts](https://github.com/mcc0x/milo/blob/main/docs/setup.md#anonymous-usage-counts): What the release binaries send by default and how to turn it off.
+- [Source installer](https://github.com/mcc0x/milo/blob/main/install.sh): Builds, installs or removes the binary on macOS and Linux without changing Rex or Claude Code settings.
 - [Agent skill](https://github.com/mcc0x/milo/blob/main/skills/milo/SKILL.md): How to check milo, open a reader in the user's terminal, including at a Git commit, and show the user only the edits the agent itself made.
 - [Setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md): Effective worktree and global preferences, remembering a Rex rail, outline peeks, new shell tabs, opt-in tab titles and naming a session for its project, starting a coding agent on a task in a Git worktree and a background Rex session (`milo task new`), several Rex hosts (which host and Rex version this is, `milo web --host`, `milo settings export`, `import` and `undo`, and Outline and History following a shell to another computer with `milo ssh HOST`), opt-in mirroring of Rex alerts to Telegram or Discord, `milo doctor`, repair and ownership-aware removal.
 - [Integrations](https://github.com/mcc0x/milo/blob/main/docs/integrations.md): Supported coding harnesses, provider accounts, messaging, external formatters and Reader tools.

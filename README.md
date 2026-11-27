@@ -21,7 +21,9 @@ The [v0.1.9 release](https://github.com/mcc0x/milo/releases/tag/v0.1.9) has stan
 | Linux x86-64, glibc 2.35 or later | [Linux binary and shell installer](docs/setup.md#linux) |
 | Native Windows x64 | [Windows executable and PowerShell installer](docs/setup.md#windows) |
 
-The installers verify the binary against a pinned SHA-256 checksum. See [setup and removal](docs/setup.md#install) for verification, upgrades, uninstalling and source builds.
+The installers verify the binary against a pinned SHA-256 checksum. See [setup and removal](docs/setup.md#install) for verification, upgrades, uninstalling and source builds, or [Homebrew troubleshooting](docs/setup.md#when-homebrew-and-milo-disagree) if your shell still runs an old copy.
+
+Linux and Windows are released for standalone use. The Rex column below describes what Milo adds in a supported Rex session, not new Rex support on Linux or Windows. The menu bar app and Finder actions are macOS-only. See [Reader media support](docs/panes.md#reading-pictures-video-and-markdown) and the [local browser fallback](docs/setup.md#browser-editor) for platform differences.
 
 From a shell in your project, run `milo` to pick a local pane, or `milo outline` to go straight to the file tree. Press `Enter` on a file to read it, `e` to edit working text, `Ctrl-S` to save, and `q` while reading to go back. No Rex installation, browser, account or setup is needed. In Rex, use `milo setup` if you want the panes arranged beside your shell.
 
@@ -67,7 +69,7 @@ Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside 
 
 <p align="center"><img src="docs/img/menu-bar.webp" width="312" alt="Milo’s macOS menu showing example Codex and Claude Code limits, reset times and a Settings button"></p>
 
-On an Apple Silicon Mac running macOS 13 or later, run `milo menubar install`. The Homebrew and release binaries include the app; it only runs if you install it. See [menu bar setup and removal](docs/usage.md#macos-menu-bar).
+On an Apple Silicon Mac running macOS 13 or later, run `milo menubar install`. The macOS release binary, including the copy Homebrew installs, contains the app; it only runs if you install it. See [menu bar setup and removal](docs/usage.md#macos-menu-bar).
 
 ## Discord presence
 
@@ -81,7 +83,7 @@ Optionally show **In a Rex session** on your Discord profile, under Milo's name 
 
 Read a file with added and removed lines marked, or open it as it was at a commit. Press `n` or `N` to jump between changed blocks, or `c` to fold unchanged stretches. In Rex, files opened from the same Outline or History pane share one floating reader as [tabs](docs/panes.md#tabs-in-the-floating-reader). The reader colours [about thirty languages](docs/panes.md#languages), from Rust and TypeScript to Markdown, HTML and CSS.
 
-The working-file Reader can also [view pictures, play supported MP4s, and render Markdown](docs/panes.md#reading-pictures-video-and-markdown). On a verified local Mac, press `Ctrl-O` on a working document in Outline, Find or Reader to open it in its default app, or `Ctrl-R` to [reveal it in Finder](docs/panes.md#opening-a-file-outside-milo-on-a-mac).
+The working-file Reader can [view supported pictures and render Markdown](docs/panes.md#reading-pictures-video-and-markdown), and play supported MP4s on macOS and Linux with the required decoders. On a verified local Mac, press `Ctrl-O` on a working document in Outline, Find or Reader to open it in its default app, or `Ctrl-R` to [reveal it in Finder](docs/panes.md#opening-a-file-outside-milo-on-a-mac).
 
 Press `e` to edit a working text file where you are reading it. The edit is a draft until you save with `Ctrl-S`, and a save never replaces a file that changed on disk without asking. `Ctrl-F` formats the draft with a [formatter you have installed](docs/panes.md#formatting); `Ctrl-Z` takes it back. See [editing files](docs/panes.md#editing-files).
 
