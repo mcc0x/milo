@@ -4,7 +4,9 @@ Build from the intended versioned release commit. Keep the hosted installer, tap
 
 ## Keep qualification out of installation counts
 
-Ordinary builds (including `cargo build --release` and `--all-features`), PRs and candidate packages have no production counts endpoint. An authorized distribution build must separately supply both the Rust compiler configuration `--cfg milo_distribution_counts` and a validated build-time HTTPS `MILO_COUNTS_ENDPOINT`. Neither has any effect as a runtime setting. Do not change the candidate workflow to test collection. The only positive reporting fixtures use a disposable binary compiled for a loopback receiver and throwaway Postgres. Never distribute that binary.
+Ordinary builds (including `cargo build --release` and `--all-features`), PRs and default candidates have no production counts endpoint. For an authorized reporting-enabled release, dispatch both package workflows on the same `release/prepare-*` ref with the recipient certificate and `-f distribution_counts=true`. The release build script supplies the compiler configuration and the pinned HTTPS URL; the dispatch accepts no arbitrary receiver URL. The setting has no effect at runtime. Record each run's source SHA, attempt and explicit counts mode with the retained hashes. Never mix packages from different modes.
+
+Routine acceptance runs with counts off. To exercise reporting in the exact distribution, use a disposable lab with no route to production, route only the exact hostname to a controlled TLS receiver, and keep normal TLS certificate verification. Never send synthetic reports to production. The separate loopback fixture builds a different executable and is never a release asset.
 
 When testing **exact released bytes**, set `MILO_TELEMETRY=0` in the lab environment **before the first launch**, including terminal multiplexers, shells, child panes and helpers. On Unix export it before starting the session; on Windows set `$env:MILO_TELEMETRY = '0'` in the process starting Milo. Carry it explicitly through clean environment lists and service/VM launchers; a variable in one shell cannot affect a process another shell already started. It overrides a saved On preference, does not record the first launch and does not claim a day or queue a report. Do not identify VMs or exclude customers just because they use one.
 
@@ -22,7 +24,7 @@ gh workflow run release-tests.yml --repo mcc0x/milo --ref "${ref:?set the releas
   -f recipient="$(base64 < recipient.pem | tr -d '\n')"
 ```
 
-Never send the private key, a personal certificate or a password as an input. Check the dispatch's **head SHA** against the intended commit. Require a successful run with a non-skipped **Apple Silicon release tests** job on that SHA. Record the run ID and attempt, artifact ID, and the plaintext hashes printed by **Seal the tested Mac release files**: the tar (`mac_tar_sha256` below), the two package files, and the embedded menu archive. A rerun or a different commit is a new candidate.
+Never send the private key, a personal certificate or a password as an input. Check the dispatch's **head SHA** against the intended commit. Require a successful run with a non-skipped **Apple Silicon release tests** job on that SHA. Record the run ID and attempt, artifact ID, and the plaintext hashes printed by **Seal the tested Mac release files**: the tar (`mac_tar_sha256` below), the two package files, and the embedded menu archive. A rerun, a different commit or a changed counts mode is a new candidate.
 
 Using the recorded run ID and full source SHA:
 

@@ -45,6 +45,16 @@ fn mime(file: &str) -> Option<&'static str> {
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=MILO_DISTRIBUTION_COUNTS");
+    match env::var("MILO_DISTRIBUTION_COUNTS").as_deref() {
+        Err(env::VarError::NotPresent) | Ok("") => {}
+        Ok("1") if env::var("PROFILE").as_deref() == Ok("release") => {
+            println!("cargo:rustc-cfg=milo_distribution_counts");
+            println!("cargo:rustc-env=MILO_COUNTS_ENDPOINT=https://counts-production.up.railway.app/v1/counts");
+        }
+        _ => panic!("MILO_DISTRIBUTION_COUNTS must be unset or set to 1 for a release build"),
+    }
+
     // Cargo source archives carry the production bundle. No Node, network or generated
     // framework intermediates are needed here. CI checks the source and asset digests.
     println!("cargo:rerun-if-changed={BUNDLE}");

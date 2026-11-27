@@ -30,6 +30,7 @@ SH
 chmod 700 "$tmp/remap"
 env -i HOME="$tmp/home" PATH="$tools:/usr/bin:/bin" LC_ALL=C SOURCE_DATE_EPOCH=0 \
     CARGO_HOME="$tmp/cargo" CARGO_TARGET_DIR="$tmp/target" MILO_SOURCE="$src" \
+    MILO_DISTRIBUTION_COUNTS="${MILO_DISTRIBUTION_COUNTS-}" \
     RUSTC_WRAPPER="$tmp/remap" RUSTFLAGS="-C target-cpu=x86-64" \
     "$cargo" build --release --locked --target "$target" --bin milo
 
