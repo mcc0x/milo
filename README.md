@@ -13,20 +13,15 @@
 
 ## Install
 
-The [v0.1.8 release](docs/releases/v0.1.8.md) is available for Apple Silicon Macs running macOS 13 or later. Install it with Homebrew:
+The [v0.1.9 release](https://github.com/mcc0x/milo/releases/tag/v0.1.9) has standalone binaries for three platforms. Choose the installer and binary for your platform from the same release.
 
-```sh
-brew install mcc0x/milo/milo
-```
+| Platform | Install |
+| --- | --- |
+| Apple Silicon, macOS 13 or later | `brew install mcc0x/milo/milo` or the [release installer](docs/setup.md#macos) |
+| Linux x86-64, glibc 2.35 or later | [Linux binary and shell installer](docs/setup.md#linux) |
+| Native Windows x64 | [Windows executable and PowerShell installer](docs/setup.md#windows) |
 
-Without Homebrew, download and run the installer from the release tag:
-
-```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.8/install.sh &&
-  sh milo-install.sh
-```
-
-The script verifies the release binary against its SHA-256 checksum and installs it to `~/.local/bin` by default. It does not need Rust or Git. If you already installed with Homebrew, run `brew upgrade mcc0x/milo/milo`. If you use the Rex integration, run `milo setup --repair` after upgrading. See [setup and removal](docs/setup.md) for source installation and uninstall instructions.
+The installers verify the binary against a pinned SHA-256 checksum. See [setup and removal](docs/setup.md#install) for verification, upgrades, uninstalling and source builds.
 
 From a shell in your project, run `milo` to pick a local pane, or `milo outline` to go straight to the file tree. Press `Enter` on a file to read it, `e` to edit working text, `Ctrl-S` to save, and `q` while reading to go back. No Rex installation, browser, account or setup is needed. In Rex, use `milo setup` if you want the panes arranged beside your shell.
 
@@ -36,7 +31,7 @@ Run `milo web` in your project to open the [settings dashboard](docs/setup.md#br
 
 Choose a pane layout for one worktree or set a global default. Under **Integrations**, you can have Rex arrange new shell tabs, forward alerts to Discord or Telegram, or show Discord presence. To configure [another Rex host](docs/setup.md#several-rex-hosts), run `milo web --host HOST`.
 
-**[Anonymous usage counts](docs/setup.md#anonymous-usage-counts)** estimate active installations, not people or agent usage. Standard builds have no reporting endpoint. A reporting-enabled build sends nothing on its first interactive launch and can report on later launches. Turn counts off in **Integrations → Anonymous usage counts** or with `MILO_TELEMETRY=0`.
+**[Anonymous usage counts](docs/setup.md#anonymous-usage-counts)** estimate active installations, not people or agent usage. Counts are on by default in the v0.1.9 release binaries, including Homebrew, but ordinary source builds have no reporting endpoint. The first eligible interactive launch sends nothing. To opt out before opening Milo, set `MILO_TELEMETRY=0`. To save the choice, open **Integrations → Anonymous usage counts** in Milo’s settings.
 
 [Alert forwarding](docs/setup.md#mirror-rex-alerts) reconnects when Rex returns, but an explicit pause stays paused. Lifecycle notices are optional for each destination. A separate opt-in adds a verified Rex session label to ordinary alerts. Both choices are off by default.
 
@@ -64,7 +59,7 @@ See recent commits and, when the branch tracks a remote branch, how many still n
   <img src="docs/img/usage.png" width="860" alt="Codex and Claude Code limits showing percent left, time until reset and an Opus weekly limit">
 </p>
 
-See how much of each reported limit you have left. Milo reads local reports saved by oh-my-pi, Codex and Claude Code, and the tokens and estimated cost OpenCode recorded today. It shows the tools that have a figure on this Mac, so there is no empty place for one you do not use, and setup can always show or hide each tool. Where the terminal can show pictures, such as in Rex, the pane can draw the logos and large figures as pictures.
+See how much of each reported limit you have left. Where the tool and its local reports are available, Milo reads usage saved by oh-my-pi, Codex and Claude Code, and the tokens and estimated cost OpenCode recorded today. Setup can show or hide each tool. Where the terminal can show pictures, such as in Rex, the pane can draw the logos and large figures as pictures.
 
 ### In the macOS menu bar
 

@@ -22,7 +22,9 @@ function FeatureIcon({ name }: { name: string }) {
 }
 
 const title = 'milo — The little things that make Rex feel like home';
-const description = 'Review changes, edit files, and keep an eye on agent usage. In Rex, Milo remembers your layout and can ping you in Discord or Telegram when an agent needs you.';
+const description = 'Review changes, edit files, and check agent usage in your terminal. In Rex, Milo can also remember your layout and send alerts to Discord or Telegram.';
+const release = 'https://github.com/mcc0x/milo/releases/tag/v0.1.9';
+const assets = 'https://github.com/mcc0x/milo/releases/download/v0.1.9';
 const preview = {
   url: 'https://usemilo.net/milo-preview.jpg',
   alt: 'Milo — Your Git workspace, inside Rex. A file tree, commit history and agent session sit above the Milo and Rex mascots.',
@@ -79,12 +81,11 @@ export default function Home() {
               <p className="description">The little things that make <SiteLink className="rex" href="https://www.superlogical.com/rex"><img src={rex.src} width="72" height="72" alt="" />Rex</SiteLink> feel like home.</p>
               <p className="subtext">{description}</p>
             </div>
-            <div className="install">
-              <span className="install-prompt" aria-hidden="true">$</span>
-              <code id="install-command" translate="no">brew install mcc0x/milo/milo</code>
-              <CopyButton id="copy-command" target="install-command" />
-            </div>
-            <CopyStatus />
+            <nav className="install-platforms" aria-label="Install Milo">
+              <a href="#install-macos">macOS</a>
+              <a href="#install-linux">Linux</a>
+              <a href="#install-windows">Windows</a>
+            </nav>
             <ul className="bubbles" role="list" aria-label="Integrations">
               <Bubble><img src={claude.src} width="192" height="192" alt="Claude Code" /></Bubble>
               <Bubble><img src={omp.src} width="120" height="90" alt="OMP" /></Bubble>
@@ -94,6 +95,34 @@ export default function Home() {
           </div>
 
           <Demo />
+        </section>
+        <section className="downloads" id="install" aria-labelledby="install-title">
+          <h2 id="install-title">Install Milo</h2>
+          <p>Start in your terminal. Standalone panes and local settings don’t need Rex.</p>
+          <div className="download-grid">
+            <article className="feature" id="install-macos" tabIndex={-1}>
+              <h3>macOS</h3>
+              <p>Apple Silicon · macOS 13 or later</p>
+              <div className="install">
+                <code id="install-command" translate="no">brew install mcc0x/milo/milo</code>
+                <CopyButton target="install-command" />
+              </div>
+              <p>Or <SiteLink href={`${assets}/install.sh`}>download install.sh</SiteLink> and run <code>sh install.sh</code>.</p>
+            </article>
+            <article className="feature" id="install-linux" tabIndex={-1}>
+              <h3>Linux</h3>
+              <p>x86-64 · glibc 2.35 or later</p>
+              <p>Save the <SiteLink href={`${assets}/milo-x86_64-unknown-linux-gnu`}>Linux binary</SiteLink> and <SiteLink href={`${assets}/install-linux.sh`}>install-linux.sh</SiteLink> in the same folder. Run <code>sh install-linux.sh</code> there.</p>
+            </article>
+            <article className="feature" id="install-windows" tabIndex={-1}>
+              <h3>Windows</h3>
+              <p>Native Windows x64</p>
+              <p>Save the <SiteLink href={`${assets}/milo-x86_64-pc-windows-msvc.exe`}>Windows executable</SiteLink> and <SiteLink href={`${assets}/install-windows.ps1`}>install-windows.ps1</SiteLink> in the same folder. Follow the <SiteLink href="https://github.com/mcc0x/milo/blob/main/docs/setup.md#windows">PowerShell steps</SiteLink>.</p>
+            </article>
+          </div>
+          <CopyStatus />
+          <p><SiteLink href={release}>v0.1.9 release notes</SiteLink> · <SiteLink href={`${assets}/SHA256SUMS`}>SHA-256 checksums</SiteLink> · <SiteLink href="https://github.com/mcc0x/milo/blob/main/docs/setup.md#install">Setup and upgrades</SiteLink></p>
+          <p>Release binaries have <a href="/privacy/#usage-counts">anonymous usage counts</a> on by default. To opt out before opening Milo, set <code>MILO_TELEMETRY=0</code>.</p>
         </section>
         <section className="features" aria-labelledby="features-title">
           <h2 id="features-title">What’s in Milo?</h2>
@@ -137,8 +166,7 @@ export default function Home() {
             <img className="companions" src={companions.src} width="544" height="356" alt="Rex with a magnifying glass beside Milo, pointing ahead." loading="lazy" />
             <h2 id="companion-title">Your Rex deserves a companion.</h2>
           </header>
-          <div className="brew-pill"><code id="setup-command" translate="no">brew install mcc0x/milo/milo</code><CopyButton target="setup-command" /></div>
-          <p>Then run <code translate="no">milo</code> in Rex.</p>
+          <p>Run <code translate="no">milo setup</code> in a supported Rex session to arrange Milo beside your shell.</p>
         </section>
       </main>
       <footer className="site-footer" id="open-source">

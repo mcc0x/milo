@@ -2,7 +2,6 @@
 
 import { createContext, use, useEffect, useRef, useState, type ReactNode } from 'react';
 
-// Both Copy buttons report through the page's one status line.
 const Announce = createContext<(message: string) => void>(() => {});
 const Announcement = createContext({ message: '', count: 0 });
 

@@ -73,9 +73,9 @@ major=${kernel%%.*}
 case "$major" in ''|*[!0-9]*) fail 'Could not determine the macOS version.' ;; esac
 [ "$major" -ge 22 ] || fail 'This release requires macOS 13 or later.'
 
-version=v0.1.8
+version=v0.1.9
 asset=milo-aarch64-apple-darwin
-expected=e715e19d593d476dc78711fca2a96ef8ff65fb41e414a00a261a261e2d107043
+expected=7f2f0349d33fa25765c9bce92d0e6fdf1b1d01ffa8e8dbc74fcfa4f7daaf2e2d
 release=https://github.com/mcc0x/milo/releases/download/$version
 
 # Stage on the same filesystem so a verified download can replace milo by rename.

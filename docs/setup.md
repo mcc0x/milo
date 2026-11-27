@@ -4,24 +4,54 @@
 
 ## Install
 
-The [v0.1.8 prebuilt release](releases/v0.1.8.md) is for Apple Silicon Macs running macOS 13 or later. Use Homebrew:
+Use the [v0.1.9 release](https://github.com/mcc0x/milo/releases/tag/v0.1.9) for the files below. Download from that release and compare each downloaded file’s SHA-256 with its entry in [SHA256SUMS](https://github.com/mcc0x/milo/releases/download/v0.1.9/SHA256SUMS) before running the installer. These checks detect a mismatched download; they don’t replace getting the files from the official release.
+
+### macOS
+
+On Apple Silicon with macOS 13 or later, install from the Homebrew tap:
 
 ```sh
 brew install mcc0x/milo/milo
 ```
 
-Or download the versioned release installer from GitHub:
+Or download [install.sh](https://github.com/mcc0x/milo/releases/download/v0.1.9/install.sh), check its hash and run it:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.8/install.sh &&
-  sh milo-install.sh
+shasum -a 256 install.sh
+sh install.sh
 ```
 
-The installer checks the binary against a pinned SHA-256 checksum before placing it in `~/.local/bin`. Set `MILO_BIN_DIR` to choose a different directory. The prebuilt installer does not need a compiler, Cargo or Git.
+The shell installer downloads and checks the binary before placing it in `~/.local/bin` by default. Upgrade with `brew upgrade mcc0x/milo/milo` or rerun the shell installer from the newer release. If you installed the Rex integration, run `milo setup --repair` after upgrading. If you installed the macOS menu app, run `milo menubar install` again.
 
-To upgrade, run `brew upgrade mcc0x/milo/milo` for a Homebrew install, or download and run the new version’s installer for a script install. If you installed the Rex integration, run `milo setup --repair` after upgrading so Rex loads the current actions and listener. If you installed the macOS menu app, run `milo menubar install` again to update it.
+### Linux
 
-To build from source instead, install Git and Rust 1.91 or later, then run:
+On x86-64 Linux with glibc 2.35 or later, save [install-linux.sh](https://github.com/mcc0x/milo/releases/download/v0.1.9/install-linux.sh) and [milo-x86_64-unknown-linux-gnu](https://github.com/mcc0x/milo/releases/download/v0.1.9/milo-x86_64-unknown-linux-gnu) in the same directory. Check both hashes, then run the script there:
+
+```sh
+sha256sum install-linux.sh milo-x86_64-unknown-linux-gnu
+sh install-linux.sh
+```
+
+The installer verifies the adjacent binary before placing it in `~/.local/bin` by default. To upgrade, repeat the steps with both files from the newer release. If `milo` isn’t on your PATH, run `~/.local/bin/milo`.
+
+### Windows
+
+On native Windows x64, save [install-windows.ps1](https://github.com/mcc0x/milo/releases/download/v0.1.9/install-windows.ps1) and [milo-x86_64-pc-windows-msvc.exe](https://github.com/mcc0x/milo/releases/download/v0.1.9/milo-x86_64-pc-windows-msvc.exe) in the same folder. In PowerShell, open that folder, check both hashes, then run the verified script:
+
+```powershell
+Get-FileHash -Algorithm SHA256 -Path .\install-windows.ps1, .\milo-x86_64-pc-windows-msvc.exe
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
+```
+
+The policy option applies only to that PowerShell process. The executable is unsigned, so Windows may warn about an unknown publisher. The installer checks the adjacent executable, installs to `%LOCALAPPDATA%\Programs\Milo` by default and adds that directory to your user PATH. Open a new terminal and run `milo`. The Windows build runs standalone without Rex integration. To upgrade, close Milo and repeat the steps with both files from the newer release. To remove it, close Milo and run the installed `uninstall-milo.ps1` beside `milo.exe` the same way.
+
+### Install paths and removal
+
+The prebuilt installers don’t need Cargo, a compiler or administrator access. Set `MILO_BIN_DIR` before running an installer to choose a different directory (use a full path on Windows). For Homebrew use `brew uninstall mcc0x/milo/milo`. On macOS and Linux, run the shell installer with `--uninstall` and the same `MILO_BIN_DIR` if you set it. The scripts check their receipt before removing the binary and leave preferences in place. Older installs may not have a receipt; verify the binary before removing it manually.
+
+### Build from source
+
+Install Git and Rust 1.91 or later. On macOS and Linux, run:
 
 ```sh
 git clone https://github.com/mcc0x/milo.git
@@ -29,11 +59,7 @@ cd milo
 sh install.sh
 ```
 
-The source installer builds the checkout containing the script, even when launched from another directory. A standalone or piped copy clones Milo from GitHub into a private temporary directory instead.
-
-The source installer also honours `MILO_BIN_DIR` and defaults to `~/.local/bin`.
-
-Current installers write a receipt for the binary and its install path. Use a current installer with `--uninstall` and the same `MILO_BIN_DIR` to remove it. If the binary has changed or the receipt is missing or invalid, the installer leaves the binary in place. Older installs may not have a receipt; verify the binary before removing it manually rather than running an older installer’s `--uninstall`.
+On macOS and Linux, the source installer builds the checkout containing the script, even when launched from another directory. A standalone or piped copy clones Milo from GitHub into a private temporary directory instead. It honours `MILO_BIN_DIR` and defaults to `~/.local/bin`. On native Windows, use `cargo build --release --locked` in the checkout and run `target\release\milo.exe` instead of using the shell script.
 
 ## Without Rex
 
@@ -43,7 +69,7 @@ Choose **Terminal settings** for local preferences; you do not need to arrange a
 
 ## Anonymous usage counts
 
-Standard builds have no reporting endpoint. In a reporting-enabled build, counts are on by default. The first eligible interactive launch records only that Milo has opened on this installation and sends nothing. A later launch can report. To opt out before opening Milo, set `MILO_TELEMETRY=0` in your environment. To save a choice for all your projects, run `milo web` and open **Integrations → Anonymous usage counts**. Neither a worktree preference nor a settings import can change this choice.
+Counts are on by default in the v0.1.9 release binaries, including Homebrew. Ordinary source builds have no reporting endpoint. The first eligible interactive launch records only that Milo has opened on this installation and sends nothing. A later launch can report. To opt out before opening Milo, use `export MILO_TELEMETRY=0` in a macOS or Linux shell or `$env:MILO_TELEMETRY = '0'` in PowerShell before launching it from that shell. To save a choice for all your projects, run `milo web` and open **Integrations → Anonymous usage counts**. Neither a worktree preference nor a settings import can change this choice.
 
 An active installation is a user-level Milo installation that opens an eligible interactive pane. Standalone pane launches count; in Rex only opening Home or terminal Settings counts, so automatically started sidebars don't. Milo can report once per UTC day; the report contains the date and two yes/no values: first reporting install, and first active day this calendar month. It contains no identifier, version, OS, repository, account, prompt or agent usage. CI, background helpers and noninteractive commands don't report. Leaving a pane open overnight doesn't count another day. The receiver keeps daily new and active totals and calendar-month active totals. Monthly active is **not** the sum of daily active.
 
