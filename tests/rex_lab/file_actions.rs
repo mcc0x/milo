@@ -37,6 +37,8 @@ fn markdown_handoff_reuses_only_its_own_split() {
     let temp = lab.root.join("login-tmp");
     fs::create_dir(&temp).unwrap();
     let temp = format!("TMPDIR={}", temp.display());
+    // Rex can supply an escaped Unix URL, e.g. its default macOS socket has a space.
+    let endpoint = format!("REX_SERVER={}", lab.socket().replace("/s.sock", "/%73.sock"));
     lab.rex(&[
         "split",
         "-s",
@@ -52,6 +54,7 @@ fn markdown_handoff_reuses_only_its_own_split() {
         "--",
         "/usr/bin/env",
         &temp,
+        &endpoint,
         lab.milo.to_str().unwrap(),
         "outline",
         "--shell",
