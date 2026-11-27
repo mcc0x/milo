@@ -15,8 +15,8 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 $hostName = 'counts-production.up.railway.app'
 $package = (Resolve-Path -LiteralPath $Package).ProviderPath
 $repo = (Resolve-Path .).ProviderPath
-$python = (Get-Command python.exe -CommandType Application).Source
-$git = (Get-Command git.exe -CommandType Application).Source
+$python = Get-Command python.exe -CommandType Application | Select-Object -First 1 -ExpandProperty Source
+$git = Get-Command git.exe -CommandType Application | Select-Object -First 1 -ExpandProperty Source
 $gitRoot = Split-Path -Parent (Split-Path -Parent $git)
 $openssl = @('usr\bin\openssl.exe','mingw64\bin\openssl.exe') |
     ForEach-Object { Join-Path $gitRoot $_ } |
