@@ -8,6 +8,8 @@ Ordinary builds (including `cargo build --release` and `--all-features`), PRs an
 
 Routine acceptance runs with counts off. To exercise reporting in the exact distribution, use a disposable lab with no route to production, route only the exact hostname to a controlled TLS receiver, and keep normal TLS certificate verification. The Apple Silicon and Windows jobs exercise their exact staged binary against private TLS before sealing. Native fresh-install and upgrade regressions still need independent acceptance. Never send synthetic reports to production. The separate loopback fixture builds a different executable and is never a release asset.
 
+The macOS fixture deletes its one-use issuer certificate and keys and restores the hosts file. Removing the admin trust settings directly on macOS 15 can require an interactive authorization prompt, so the disposable runner discards the remaining trust record when it exits. Never run this fixture on a persistent Mac.
+
 When testing **exact released bytes**, set `MILO_TELEMETRY=0` in the lab environment **before the first launch**, including terminal multiplexers, shells, child panes and helpers. On Unix export it before starting the session; on Windows set `$env:MILO_TELEMETRY = '0'` in the process starting Milo. Carry it explicitly through clean environment lists and service/VM launchers; a variable in one shell cannot affect a process another shell already started. It overrides a saved On preference, does not record the first launch and does not claim a day or queue a report. Do not identify VMs or exclude customers just because they use one.
 
 ## Retain the bytes the Mac job tested

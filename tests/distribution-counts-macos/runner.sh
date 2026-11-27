@@ -37,14 +37,21 @@ cleanup() {
         /usr/bin/sudo -n /bin/kill -TERM "$(/usr/bin/sudo -n /bin/cat "$root/listener.pid")" 2>/dev/null || :
     fi
     if [[ -n "$listener" ]]; then wait "$listener" 2>/dev/null || :; fi
-    if (( trust_dirty )); then
-        /usr/bin/sudo -n /usr/bin/security remove-trusted-cert -d "$root/ca.pem" || rc=1
-        /usr/bin/sudo -n /usr/bin/security delete-certificate -Z "$fingerprint" "$keychain" || rc=1
-    fi
     if (( hosts_dirty )); then
         /usr/bin/sudo -n /bin/cp -p "$root/hosts.before" /private/etc/hosts || rc=1
         /usr/bin/cmp -s "$root/hosts.before" /private/etc/hosts || rc=1
         flush || rc=1
+    fi
+    if (( trust_dirty )); then
+        "$py" -I - "$fingerprint" "$keychain" <<'PY' || rc=1
+import subprocess
+import sys
+
+subprocess.run(
+    ["/usr/bin/sudo", "-n", "/usr/bin/security", "delete-certificate", "-Z", *sys.argv[1:]],
+    check=True, timeout=10,
+)
+PY
     fi
     /usr/bin/sudo -n /bin/rm -rf -- "$root" || rc=1
     exit "$rc"
@@ -131,3 +138,4 @@ day="$(/bin/date -u +%F)"
 echo 'PASS private TLS control via exact name, default system trust and no override'
 client "$py" -B "$script_dir/runner-cases.py" "$root" "$binary" "$day"
 [[ "$(/usr/bin/shasum -a 256 < "$binary" | /usr/bin/cut -d ' ' -f 1)" == "$cli_pin" ]]
+echo 'PASS staged CLI digest unchanged after private TLS tests'
