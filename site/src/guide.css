@@ -32,35 +32,53 @@
 .feature code, .field-notes code { white-space: nowrap; font: .88em var(--mono); }
 .field-notes { display: grid; justify-items: center; gap: .35rem; padding-bottom: clamp(2.5rem, 5vw, 4rem); text-align: center; }
 .footer-inner { border: 1px solid #ffffffad; background: linear-gradient(135deg, #ffffffa6, #eff7ff66); box-shadow: inset 0 1px 0 #ffffffab, 0 5px 18px -10px #41587550; }
-.install-platforms { display: flex; flex-wrap: wrap; justify-content: center; gap: .45rem; }
-.install-platforms a {
-  display: inline-flex;
-  align-items: center;
-  min-height: 44px;
-  padding: .45rem .9rem;
-  border-radius: .7rem;
-  background: #ffffff8c;
-  color: var(--ink);
-  font-weight: 650;
-  text-decoration: none;
+/* Two glass buttons under the hero copy: tinted for the page's own action, clear for the way out. */
+.hero-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: .5rem; margin-top: .7rem; }
+.hero-action { display: inline-flex; align-items: center; gap: .5rem; min-height: 2.75rem; padding: .5rem clamp(.7rem, 3.4vw, 1.15rem); border: 1px solid #ffffffad; border-radius: .85rem; background: linear-gradient(135deg, #ffffffa6, #eff7ff66); -webkit-backdrop-filter: blur(18px) saturate(125%); backdrop-filter: blur(18px) saturate(125%); box-shadow: inset 0 1px 0 #ffffffab, 0 5px 18px -10px #41587550; color: var(--ink); font: 620 1rem/1 Bricolage, system-ui, sans-serif; text-decoration: none; }
+.hero-action:hover { background: linear-gradient(135deg, #ffffffd1, #f4faff99); }
+.hero-action-primary { border-color: #ffffff4d; background: linear-gradient(135deg, #2f5a7ce0, #284456eb); box-shadow: inset 0 1px 0 #ffffff4d, 0 6px 18px -9px #1c3346b3; color: #fbfcfa; font-weight: 650; }
+.hero-action-primary:hover { background: linear-gradient(135deg, #2b5f95e6, #204e80f0); }
+.hero-action svg { flex: none; width: 1.15em; height: 1.15em; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+/* Install Milo idles with a slow bob, and holds still while it is pointed at, focused or pressed. */
+@media (prefers-reduced-motion: no-preference) {
+  .hero-action-primary { animation: hero-bob 3s ease-in-out infinite; }
+  .hero-action-primary:is(:hover, :focus-visible, :active) { animation-play-state: paused; }
 }
-.install-platforms a:hover { background: #ffffffe0; }
-.downloads { padding-block: 1.5rem clamp(2rem, 5vw, 4rem); }
-.downloads p { margin-block: .5rem; }
-.downloads a { color: var(--blue); text-underline-offset: .18em; }
-.download-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); gap: .75rem; margin-block: 1rem; }
-.download-grid article { --cell-pad: clamp(.9rem, 1.7vw, 1.3rem); --tile-radius: 1rem; background: #f4f8fddd; scroll-margin-top: 1rem; }
-.download-grid article:target { outline: 2px solid var(--blue); outline-offset: 2px; }
-.download-grid .install { margin-block: .75rem; }
-.download-grid .install code { flex: 1; white-space: normal; }
+@keyframes hero-bob { 50% { transform: translateY(-2px); } }
+/* Only the hero's own jump glides, and only while that button is under the pointer or holds keyboard focus. */
+@media (prefers-reduced-motion: no-preference) {
+  html:has(.hero-action[href='#install']:is(:hover, :active, :focus-visible)) { scroll-behavior: smooth; }
+}
+/* Install shares the feature grid and tile. The platform tiles share their rows, so each
+   command or file name and its action sit level across the three. */
+.downloads { --cell-pad: clamp(1.25rem, 2.3vw, 2rem); padding-block: .75rem clamp(2rem, 5vw, 4rem); scroll-margin-top: .5rem; }
+.platform { display: grid; grid-row: span 3; grid-template-rows: subgrid; row-gap: 0; scroll-margin-top: 1rem; }
+.platform:target { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* Wide tiles lead with the icon on the title line; narrow ones keep it beside the title and requirement. */
+@media (width > 60rem) {
+  .platform { grid-template-columns: auto minmax(0, 1fr); column-gap: .75rem; }
+  .platform > .milo-feature-icon { align-self: center; margin: 0; }
+  .platform > h3 { align-self: center; }
+  .platform > p { margin-top: .6rem; }
+  .platform > :is(p, .platform-get) { grid-column: 1 / -1; }
+}
+/* The row is set out by its padding, so its text lines up with the heading above it. */
+.platform-get { container-type: inline-size; display: flex; align-items: center; gap: .5rem; margin: 1rem -.6rem 0; padding: .3rem .3rem .3rem .6rem; border-radius: .7rem; background: #dfedf6; }
+.platform-get code { flex: 1; min-width: 0; font: 400 clamp(.75rem, 3.65cqi, .875rem)/1.45 var(--mono); white-space: normal; overflow-wrap: anywhere; }
+.platform-get .download { width: auto; padding-inline: .65rem; }
+/* One click selects the whole command. */
+.platform-command { -webkit-user-select: all; user-select: all; }
+.downloads .feature-intro a { color: var(--blue); text-underline-offset: .18em; }
 .companions { display: block; width: clamp(10rem, 19vw, 15rem); height: auto; margin: 0 auto .8rem; }
 .start-intro h2 { margin: 0 0 .4rem; font-size: clamp(1.7rem, 3.4vw, 2.85rem); font-weight: 680; letter-spacing: -.045em; line-height: 1.08; text-wrap: balance; }
-.feature-menu small { display: inline-block; vertical-align: middle; margin-left: .2rem; padding: .18rem .5rem; border-radius: 2rem; background: #204e800d; color: var(--blue); font: 600 .7rem/1.2 Bricolage, system-ui, sans-serif; letter-spacing: 0; }
+.feature-menu small, .platform small { display: inline-block; vertical-align: middle; margin-left: .2rem; padding: .18rem .5rem; border-radius: 2rem; background: #204e800d; color: var(--blue); font: 600 .7rem/1.2 Bricolage, system-ui, sans-serif; letter-spacing: 0; }
 @media (max-width: 60rem) {
   .feature-panes dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .feature-grid { grid-template-columns: 1fr; }
   .feature-grid .feature:not(.feature-panes) { display: grid; grid-template-columns: 3rem 1fr; column-gap: .9rem; }
   .feature > .milo-feature-icon { grid-row: span 2; margin: 0; }
+  .feature-grid .platform { grid-row: auto; grid-template-rows: none; }
+  .platform-get { grid-column: 1 / -1; }
 }
 @media (max-width: 30rem) {
   .feature-panes dl { grid-template-columns: 1fr; }
@@ -109,7 +127,6 @@
     min-height: calc(100svh - 5.5rem);
     padding-block: clamp(.5rem, 1.5vh, 1.25rem) .25rem;
   }
-  .hero .demo-footer { margin-bottom: auto; }
   .intro { margin: auto 0 0; gap: .5rem; padding: .25rem 0 .85rem; }
   .terminal-panes {
     flex: 1 0 auto; height: 15rem; contain: size;

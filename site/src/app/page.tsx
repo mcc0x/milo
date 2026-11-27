@@ -23,7 +23,7 @@ function FeatureIcon({ name }: { name: string }) {
 
 const title = 'milo — The little things that make Rex feel like home';
 const description = 'Review changes, edit files, and check agent usage in your terminal. In Rex, Milo can also remember your layout and send alerts to Discord or Telegram.';
-const release = 'https://github.com/mcc0x/milo/releases/tag/v0.1.9';
+const setup = 'https://github.com/mcc0x/milo/blob/main/docs/setup.md';
 const assets = 'https://github.com/mcc0x/milo/releases/download/v0.1.9';
 const preview = {
   url: 'https://usemilo.net/milo-preview.jpg',
@@ -81,11 +81,16 @@ export default function Home() {
               <p className="description">The little things that make <SiteLink className="rex" href="https://www.superlogical.com/rex"><img src={rex.src} width="72" height="72" alt="" />Rex</SiteLink> feel like home.</p>
               <p className="subtext">{description}</p>
             </div>
-            <nav className="install-platforms" aria-label="Install Milo">
-              <a href="#install-macos">macOS</a>
-              <a href="#install-linux">Linux</a>
-              <a href="#install-windows">Windows</a>
-            </nav>
+            <div className="hero-actions">
+              <a className="hero-action hero-action-primary" href="#install">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9m0 0 3.5-3.5M10 12 6.5 8.5M4 13.5V15a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-1.5" /></svg>
+                Install Milo
+              </a>
+              <SiteLink className="hero-action" href="https://github.com/mcc0x/milo">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 6-4 4 4 4m6-8 4 4-4 4m-1.5-10.5-3 13" /></svg>
+                Source Code
+              </SiteLink>
+            </div>
             <ul className="bubbles" role="list" aria-label="Integrations">
               <Bubble><img src={claude.src} width="192" height="192" alt="Claude Code" /></Bubble>
               <Bubble><img src={omp.src} width="120" height="90" alt="OMP" /></Bubble>
@@ -98,31 +103,37 @@ export default function Home() {
         </section>
         <section className="downloads" id="install" aria-labelledby="install-title">
           <h2 id="install-title">Install Milo</h2>
-          <p>Start in your terminal. Standalone panes and local settings don’t need Rex.</p>
-          <div className="download-grid">
-            <article className="feature" id="install-macos" tabIndex={-1}>
-              <h3>macOS</h3>
-              <p>Apple Silicon · macOS 13 or later</p>
-              <div className="install">
-                <code id="install-command" translate="no">brew install mcc0x/milo/milo</code>
+          <p className="feature-intro">Start in your terminal. No Rex required. See the <SiteLink href={`${setup}#install`}>installation guide</SiteLink>.</p>
+          <div className="feature-grid">
+            <article className="feature platform" id="install-macos" tabIndex={-1}>
+              <FeatureIcon name="macos" />
+              <h3>macOS <small>Apple Silicon</small></h3>
+              <p>macOS 13 or later, with Homebrew.</p>
+              <div className="platform-get">
+                <code className="platform-command" id="install-command" translate="no">brew install mcc0x/milo/milo</code>
                 <CopyButton target="install-command" />
               </div>
-              <p>Or <SiteLink href={`${assets}/install.sh`}>download install.sh</SiteLink> and run <code>sh install.sh</code>.</p>
             </article>
-            <article className="feature" id="install-linux" tabIndex={-1}>
-              <h3>Linux</h3>
-              <p>x86-64 · glibc 2.35 or later</p>
-              <p>Save the <SiteLink href={`${assets}/milo-x86_64-unknown-linux-gnu`}>Linux binary</SiteLink> and <SiteLink href={`${assets}/install-linux.sh`}>install-linux.sh</SiteLink> in the same folder. Run <code>sh install-linux.sh</code> there.</p>
+            <article className="feature platform" id="install-linux" tabIndex={-1}>
+              <FeatureIcon name="linux" />
+              <h3>Linux <small>x86-64</small></h3>
+              <p>glibc 2.35 or later.</p>
+              <div className="platform-get">
+                <code translate="no">milo-x86_64-unknown-linux-gnu</code>
+                <a className="download" href={`${assets}/milo-x86_64-unknown-linux-gnu`}>Download<span className="visually-hidden"> the Linux binary</span></a>
+              </div>
             </article>
-            <article className="feature" id="install-windows" tabIndex={-1}>
-              <h3>Windows</h3>
-              <p>Native Windows x64</p>
-              <p>Save the <SiteLink href={`${assets}/milo-x86_64-pc-windows-msvc.exe`}>Windows executable</SiteLink> and <SiteLink href={`${assets}/install-windows.ps1`}>install-windows.ps1</SiteLink> in the same folder. Follow the <SiteLink href="https://github.com/mcc0x/milo/blob/main/docs/setup.md#windows">PowerShell steps</SiteLink>.</p>
+            <article className="feature platform" id="install-windows" tabIndex={-1}>
+              <FeatureIcon name="windows" />
+              <h3>Windows <small>x64</small></h3>
+              <p>Native Windows, not WSL.</p>
+              <div className="platform-get">
+                <code translate="no">milo-x86_64-pc-windows-msvc.exe</code>
+                <a className="download" href={`${assets}/milo-x86_64-pc-windows-msvc.exe`}>Download<span className="visually-hidden"> the Windows executable</span></a>
+              </div>
             </article>
           </div>
           <CopyStatus />
-          <p><SiteLink href={release}>v0.1.9 release notes</SiteLink> · <SiteLink href={`${assets}/SHA256SUMS`}>SHA-256 checksums</SiteLink> · <SiteLink href="https://github.com/mcc0x/milo/blob/main/docs/setup.md#install">Setup and upgrades</SiteLink></p>
-          <p>Release binaries have <a href="/privacy/#usage-counts">anonymous usage counts</a> on by default. To opt out before opening Milo, set <code>MILO_TELEMETRY=0</code>.</p>
         </section>
         <section className="features" aria-labelledby="features-title">
           <h2 id="features-title">What’s in Milo?</h2>
