@@ -12,6 +12,10 @@ on:
         description: Base64 of a PEM certificate. When set, the tested installer package is encrypted to it and kept for one day.
         required: false
         default: ''
+      distribution_counts:
+        description: Enable the pinned production counts URL in an encrypted release/prepare-* candidate
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,7 +27,11 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: never
+      MILO_TELEMETRY: '0'
     steps:
+      - name: Require sealed release prep for distribution counts
+        if: inputs.distribution_counts && (!startsWith(github.ref, 'refs/heads/release/prepare-') || inputs.recipient == '')
+        run: exit 1
       # Keep the checked-out bytes as committed: fixtures and the dashboard bundle are hashed.
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,6 +67,11 @@ jobs:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
         run: cargo +1.91.0 test --release --locked
+      - name: Build the reporting distribution
+        if: inputs.distribution_counts
+        env:
+          MILO_DISTRIBUTION_COUNTS: '1'
+        run: cargo +1.91.0 build --release --locked
       - name: Record the tested executables
         run: |
           git rev-parse HEAD
@@ -68,6 +81,7 @@ jobs:
         env:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
+          MILO_DISTRIBUTION_COUNTS: ${{ inputs.distribution_counts && '1' || '' }}
         run: |
           $smoke = "$env:RUNNER_TEMP\milo-web-smoke"
           npm install --prefix $smoke --no-save --no-audit --no-fund --ignore-scripts playwright-core@1.65.1
@@ -88,6 +102,31 @@ jobs:
           ./.github/ci/stage-windows.ps1 -Executable target\release\milo.exe -Destination "$env:RUNNER_TEMP\package"
           ./.github/ci/stage-windows.ps1 -Executable target\debug\milo.exe -Destination "$env:RUNNER_TEMP\package-upgrade"
           ./tests/windows-install.ps1 -Release "$env:RUNNER_TEMP\package" -Upgrade "$env:RUNNER_TEMP\package-upgrade"
+      - name: Verify the pinned reporting endpoint in the sealed PE
+        if: inputs.distribution_counts
+        run: |
+          $exe = "$env:RUNNER_TEMP\package\milo-x86_64-pc-windows-msvc.exe"
+          if (-not [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe)).Contains('https://counts-production.up.railway.app/v1/counts')) {
+              throw 'Distribution binary does not contain the pinned counts endpoint.'
+          }
+      - name: Qualify the installed Windows reporting binary against isolated TLS
+        if: inputs.distribution_counts
+        run: |
+          $package = "$env:RUNNER_TEMP\package"
+          $manifest = Join-Path $package 'SHA256SUMS'
+          $pins = @{}
+          foreach ($line in Get-Content -LiteralPath $manifest) {
+              if ($line -cmatch '^([a-f0-9]{64})  ([A-Za-z0-9_.-]+)$') {
+                  $pins.Add($Matches[2], $Matches[1])
+              } else {
+                  throw 'Invalid Windows package manifest.'
+              }
+          }
+          if ($pins.Count -ne 2) { throw 'Expected two Windows package pins.' }
+          ./tests/distribution-counts-windows/qualify.ps1 -Package $package `
+              -ExeSha256 $pins['milo-x86_64-pc-windows-msvc.exe'] `
+              -InstallerSha256 $pins['install-windows.ps1'] `
+              -ManifestSha256 (Get-FileHash -LiteralPath $manifest).Hash
       # After every test, so a failed run keeps nothing. Only its recipient can open the copy kept: a public
       # artifact would publish a binary.
       - name: Seal the tested installer package for its recipient

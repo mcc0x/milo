@@ -10,6 +10,10 @@ on:
         description: Optional public X.509 PEM certificate (base64, one line) to retain tested main or release/prepare-* candidates encrypted
         required: false
         type: string
+      distribution_counts:
+        description: Enable the pinned production counts URL in an encrypted release/prepare-* candidate
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,6 +29,9 @@ jobs:
     outputs:
       needed: ${{ steps.changes.outputs.needed }}
     steps:
+      - name: Require sealed release prep for distribution counts
+        if: inputs.distribution_counts && (!startsWith(github.ref, 'refs/heads/release/prepare-') || inputs.recipient == '')
+        run: exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -61,6 +68,7 @@ jobs:
 
   linux-candidate:
     name: Standalone Linux x86-64 release candidate
+    needs: macos-changes
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -68,11 +76,16 @@ jobs:
         with:
           persist-credentials: false
       - name: Reproduce in pinned Jammy containers and install without a compiler or network
+        env:
+          MILO_DISTRIBUTION_COUNTS: ${{ inputs.distribution_counts && '1' || '' }}
         run: sh .github/ci/qualify-linux.sh "$RUNNER_TEMP/assets"
       - name: Exercise the installed executable in tmux and headless settings
         run: |
           sh tests/linux-install.sh
           sh tests/linux-candidate.sh "$RUNNER_TEMP/assets"
+      - name: Verify the pinned reporting endpoint in the sealed ELF
+        if: inputs.distribution_counts
+        run: grep -aFq 'https://counts-production.up.railway.app/v1/counts' "$RUNNER_TEMP/assets/milo-x86_64-unknown-linux-gnu"
       - name: Seal the tested Linux release files for offline qualification
         if: github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/prepare-')) && inputs.recipient != ''
         env:
@@ -203,7 +216,7 @@ jobs:
     needs: macos-changes
     # Never satisfy the tag ruleset's check name with a skipped job.
     name: ${{ needs.macos-changes.outputs.needed == 'false' && 'macOS not needed for these paths' || 'Apple Silicon release tests' }}
-    if: ${{ !cancelled() && (needs.macos-changes.result != 'success' || needs.macos-changes.outputs.needed != 'false') }}
+    if: ${{ !cancelled() && (!inputs.distribution_counts || needs.macos-changes.result == 'success') && (needs.macos-changes.result != 'success' || needs.macos-changes.outputs.needed != 'false') }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -224,6 +237,7 @@ jobs:
       - name: Smoke-test packaged settings in Chromium
         env:
           RUSTUP_TOOLCHAIN: 1.91.0
+          MILO_DISTRIBUTION_COUNTS: ${{ inputs.distribution_counts && '1' || '' }}
         run: |
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustc -V
@@ -241,6 +255,17 @@ jobs:
           sh .github/ci/stage-macos.sh target/local-menu/milo "$RUNNER_TEMP/assets"
           cmp target/local-menu/milo "$RUNNER_TEMP/assets/milo-aarch64-apple-darwin"
           (cd "$RUNNER_TEMP/assets" && shasum -a 256 -c SHA256SUMS)
+      - name: Verify the pinned reporting endpoint in both Mac executables
+        if: inputs.distribution_counts
+        run: |
+          grep -aFq 'https://counts-production.up.railway.app/v1/counts' target/local-menu/milo
+          grep -aFq 'https://counts-production.up.railway.app/v1/counts' target/local-menu/Milo.app/Contents/Resources/Tools/milo
+      - name: Qualify the staged Mac reporting binary against isolated TLS
+        if: inputs.distribution_counts
+        run: |
+          assets="$RUNNER_TEMP/assets"
+          pin=$(awk '$2 == "milo-aarch64-apple-darwin" { print $1 }' "$assets/SHA256SUMS")
+          bash tests/distribution-counts-macos/runner.sh "$assets/milo-aarch64-apple-darwin" "$pin" counts-production.up.railway.app
       - name: Seal the tested Mac release files for offline qualification
         if: github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/prepare-')) && inputs.recipient != ''
         env:

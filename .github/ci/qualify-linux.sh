@@ -30,6 +30,7 @@ for tree in first second-build; do
     run -v "$w/tools:/tooling:ro" -v "$w/$tree/src:/$tree/src:ro" \
         -v "$w/$tree/tmp:/$tree/tmp" -v "$w/$tree/out:/$tree/out" -w "/$tree/src" \
         -e PATH=/tooling/bin:/usr/bin:/bin -e RUSTUP_HOME=/tooling/rustup -e HOME=/tmp \
+        -e MILO_DISTRIBUTION_COUNTS="${MILO_DISTRIBUTION_COUNTS-}" \
         -e TMPDIR="/$tree/tmp" "$builder" sh .github/ci/build-linux.sh "/$tree/out"
 done
 name=milo-x86_64-unknown-linux-gnu
