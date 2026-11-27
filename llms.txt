@@ -1,6 +1,6 @@
 # milo
 
-> milo provides small terminal panes for a live file tree, Git history, usage, and a file reader that can edit a working text file when asked. The panes work on their own or alongside your shell in Rex.
+> milo helps you review agent edits in your terminal with a live Git file tree, diffs and commit history, a file reader that can edit a working text file when asked, and usage limits. It runs on Apple Silicon macOS, Linux x86-64 and native Windows x64, on its own or alongside your shell in Rex.
 
 milo writes to the project it displays only when you save a file you edited in its reader. On request, `milo task new` also adds a Git worktree for a coding agent's task in Rex. v0.1.9 ships for Apple Silicon macOS 13 or later, Linux x86-64 with glibc 2.35 or later, and native Windows x64. The Linux and Windows packages are for standalone use. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
 
@@ -9,6 +9,7 @@ milo writes to the project it displays only when you save a file you edited in i
 - [Full documentation](https://usemilo.net/llms-full.txt): The guides and agent instructions in one text file.
 - [README](README.md): Install milo, open a local pane and see what Rex adds.
 - [v0.1.9 release notes and downloads](https://github.com/mcc0x/milo/releases/tag/v0.1.9): Standalone Linux and Windows packages alongside the macOS release.
+- [Install page](https://usemilo.net/install/): The v0.1.9 commands, release files and prerequisites for macOS, Linux and Windows, generated from the setup guide.
 - [Install and upgrade](docs/setup.md#install): Homebrew on Apple Silicon, Mac and Linux shell installers, and the Windows PowerShell installer.
 - [Anonymous usage counts](docs/setup.md#anonymous-usage-counts): What the release binaries send by default and how to turn it off.
 - [Source installer](install.sh): Builds, installs or removes the binary on macOS and Linux without changing Rex or Claude Code settings.

@@ -21,13 +21,13 @@ function FeatureIcon({ name }: { name: string }) {
   return <img className="milo-feature-icon" src={`/icons/milo/${name}.webp`} width={48} height={48} loading="lazy" decoding="async" alt="" />;
 }
 
-const title = 'milo — The little things that make Rex feel like home';
-const description = 'Review changes, edit files, and check agent usage in your terminal. In Rex, Milo can also remember your layout and send alerts to Discord or Telegram.';
-const setup = 'https://github.com/mcc0x/milo/blob/main/docs/setup.md';
+const title = 'Milo — Review Git diffs and agent edits in your terminal';
+const description = 'Review agent edits in your terminal with a live Git file tree, diffs, commit history and usage limits. For macOS, Linux and Windows; standalone or in Rex.';
+const subtext = 'Review changes, edit files, and check agent usage in your terminal. In Rex, Milo can also remember your layout and send alerts to Discord or Telegram.';
 const assets = 'https://github.com/mcc0x/milo/releases/download/v0.1.9';
 const preview = {
-  url: 'https://usemilo.net/milo-preview.jpg',
-  alt: 'Milo — Your Git workspace, inside Rex. A file tree, commit history and agent session sit above the Milo and Rex mascots.',
+  url: 'https://usemilo.net/milo-social.jpg',
+  alt: 'Milo: review agent edits in your terminal. A file tree, commit history and agent session beside the Milo and Rex mascots.',
 };
 
 export const metadata: Metadata = {
@@ -79,7 +79,7 @@ export default function Home() {
           <div className="intro">
             <div className="intro-copy">
               <p className="description">The little things that make <SiteLink className="rex" href="https://www.superlogical.com/rex"><img src={rex.src} width="72" height="72" alt="" />Rex</SiteLink> feel like home.</p>
-              <p className="subtext">{description}</p>
+              <p className="subtext">{subtext}</p>
             </div>
             <div className="hero-actions">
               <a className="hero-action hero-action-primary" href="#install">
@@ -103,7 +103,7 @@ export default function Home() {
         </section>
         <section className="downloads" id="install" aria-labelledby="install-title">
           <h2 id="install-title">Install Milo</h2>
-          <p className="feature-intro">Start in your terminal. No Rex required. See the <SiteLink href={`${setup}#install`}>installation guide</SiteLink>.</p>
+          <p className="feature-intro">Start in your terminal. No Rex required. See the <a href="/install/">installation guide</a>.</p>
           <div className="feature-grid">
             <article className="feature platform" id="install-macos" tabIndex={-1}>
               <FeatureIcon name="macos" />
