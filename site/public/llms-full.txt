@@ -1853,7 +1853,7 @@ After changing the source or macOS installer, also run `sh tests/install.sh`; fo
 
 Then run the program and look at what you changed. Text checks cannot tell you whether a pane looks right.
 
-When updating the README, guides, agent skill, `llms.txt` or this file, run `python3 site/bundle-docs.py` and commit the refreshed `site/public/llms-full.txt` and `site/public/llms.txt`. CI checks that the published copies match these sources.
+When updating the README, guides, agent skill, `llms.txt` or this file, run `python3 site/bundle-docs.py` and commit the refreshed `site/public/llms-full.txt`, `site/public/llms.txt` and `site/src/generated/install.md`, the copy of the setup guide’s Install section that builds `/install/`. CI checks that the published copies match these sources.
 
 The website in `site/` is a Next.js static export, built with Bun 1.4 and Node.js 26. In that directory, `bun install` and `bun run dev` start it for editing. Before a pull request, run `bun test && bun run build`, then `bun run preview` and look at the built pages in a browser. Railway runs the same build and serves `site/dist` with `site/Caddyfile`.
 

@@ -30,9 +30,16 @@ for name in files:
     source, text = published(name)
     parts.append(f'Source: {source}\n\n{text}')
 # The site's index is the checkout's llms.txt, so the two cannot describe different programs.
-outputs = {'llms-full.txt': '\n\n---\n\n'.join(parts), 'llms.txt': published('llms.txt')[1]}
+outputs = {'public/llms-full.txt': '\n\n---\n\n'.join(parts), 'public/llms.txt': published('llms.txt')[1]}
+# The production build sees only site/, so the install page reads this generated copy of the guide's Install section.
+setup = (repo / 'docs/setup.md').read_text(encoding='utf-8').replace('\r\n', '\n')
+install = re.search(r'^## Install\n.*?(?=^## |\Z)', setup, re.S | re.M)
+if not install:
+    raise SystemExit('docs/setup.md has no "## Install" section.')
+outputs['src/generated/install.md'] = install[0].strip()
 for name, text in outputs.items():
-    path = site / 'public' / name
+    path = site / name
+    path.parent.mkdir(parents=True, exist_ok=True)
     content = (text + '\n').encode('utf-8')
     if not args.check:
         path.write_bytes(content)
