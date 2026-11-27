@@ -51,6 +51,8 @@ Follow [railway-template.md](railway-template.md). It is the only deployment pro
 - A separate Railway HTTPS domain can serve submissions and the authenticated dashboard. No admin credential belongs in the Milo binary or public website. Do not change the existing site or pairing relay.
 - Applying a template or changing production needs the maintainer's explicit approval of a reviewed plan (see the [Railway skill](../../skills/milo-railway/SKILL.md)).
 
+Before enabling clients, [separate the runtime login from the database owner](receiver-role.md). A restricted login verifies the existing schema at start; only a migration owner creates it.
+
 ## Abuse limitation
 
 The receiver cannot tell one client from another, so it cannot stop a determined sender. Anyone who can reach it can add to today's totals: the global limiter only caps the rate (50 reports per second sustained) and a flood fills the limiter for real clients too. A valid payload carries no secret, so the counts are an approximate, unauthenticated signal, not evidence. Only four distinct days (and at most two months) are accepted at any time, so a flood cannot grow storage. If abuse matters, handle it at a layer that is itself reviewed for what it logs, and never by adding identifiers here.
