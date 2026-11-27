@@ -1,6 +1,6 @@
 .hero .demo-footer { margin-bottom: 0; }
 .features { --cell-pad: clamp(1.25rem, 2.3vw, 2rem); padding-block: 1rem clamp(3rem, 7vw, 6rem); }
-.features h2, .field-notes h2 { margin: 0 0 .4rem; font-size: clamp(1.65rem, 3vw, 2.6rem); line-height: 1.1; letter-spacing: -.045em; font-weight: 680; }
+.features h2, .field-notes h2, .downloads h2 { margin: 0 0 .4rem; font-size: clamp(1.65rem, 3vw, 2.6rem); line-height: 1.1; letter-spacing: -.045em; font-weight: 680; }
 .feature-intro { max-width: 68ch; margin: 0 0 1.35rem; color: var(--ink); font-size: clamp(.97rem, 1.18vw, 1.08rem); font-weight: 500; line-height: 1.65; text-wrap: pretty; }
 .feature-intro span { white-space: nowrap; font-weight: 600; color: var(--ink); }
 .feature-intro :is(img, svg) { display: inline-block; width: 1em; height: 1em; object-fit: contain; margin-right: .25em; vertical-align: -.14em; }
@@ -31,20 +31,35 @@
 .feature-panes dl > div { padding: var(--cell-pad); background: #dfedf6; }
 .feature code, .field-notes code { white-space: nowrap; font: .88em var(--mono); }
 .field-notes { display: grid; justify-items: center; gap: .35rem; padding-bottom: clamp(2.5rem, 5vw, 4rem); text-align: center; }
-.brew-pill, .footer-inner { border: 1px solid #ffffffad; background: linear-gradient(135deg, #ffffffa6, #eff7ff66); box-shadow: inset 0 1px 0 #ffffffab, 0 5px 18px -10px #41587550; }
-.brew-pill { display: inline-flex; align-items: center; gap: .5rem; max-width: 100%; margin-block: .5rem .15rem; padding: .2rem .2rem .2rem .6rem; border-radius: .7rem; }
-.brew-pill code { min-width: 0; white-space: normal; overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
-@media (max-width: 24rem) {
-  .brew-pill code { font-size: .78rem; }
-  .brew-pill button[data-copy] { width: 4.3rem; padding: 0; }
+.footer-inner { border: 1px solid #ffffffad; background: linear-gradient(135deg, #ffffffa6, #eff7ff66); box-shadow: inset 0 1px 0 #ffffffab, 0 5px 18px -10px #41587550; }
+.install-platforms { display: flex; flex-wrap: wrap; justify-content: center; gap: .45rem; }
+.install-platforms a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: .45rem .9rem;
+  border-radius: .7rem;
+  background: #ffffff8c;
+  color: var(--ink);
+  font-weight: 650;
+  text-decoration: none;
 }
+.install-platforms a:hover { background: #ffffffe0; }
+.downloads { padding-block: 1.5rem clamp(2rem, 5vw, 4rem); }
+.downloads p { margin-block: .5rem; }
+.downloads a { color: var(--blue); text-underline-offset: .18em; }
+.download-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); gap: .75rem; margin-block: 1rem; }
+.download-grid article { --cell-pad: clamp(.9rem, 1.7vw, 1.3rem); --tile-radius: 1rem; background: #f4f8fddd; scroll-margin-top: 1rem; }
+.download-grid article:target { outline: 2px solid var(--blue); outline-offset: 2px; }
+.download-grid .install { margin-block: .75rem; }
+.download-grid .install code { flex: 1; white-space: normal; }
 .companions { display: block; width: clamp(10rem, 19vw, 15rem); height: auto; margin: 0 auto .8rem; }
 .start-intro h2 { margin: 0 0 .4rem; font-size: clamp(1.7rem, 3.4vw, 2.85rem); font-weight: 680; letter-spacing: -.045em; line-height: 1.08; text-wrap: balance; }
 .feature-menu small { display: inline-block; vertical-align: middle; margin-left: .2rem; padding: .18rem .5rem; border-radius: 2rem; background: #204e800d; color: var(--blue); font: 600 .7rem/1.2 Bricolage, system-ui, sans-serif; letter-spacing: 0; }
 @media (max-width: 60rem) {
   .feature-panes dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .feature-grid { grid-template-columns: 1fr; }
-  .feature:not(.feature-panes) { display: grid; grid-template-columns: 3rem 1fr; column-gap: .9rem; }
+  .feature-grid .feature:not(.feature-panes) { display: grid; grid-template-columns: 3rem 1fr; column-gap: .9rem; }
   .feature > .milo-feature-icon { grid-row: span 2; margin: 0; }
 }
 @media (max-width: 30rem) {

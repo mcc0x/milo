@@ -130,8 +130,6 @@ h1 {
   text-align: left;
 }
 
-.install-prompt { color: var(--secondary); opacity: .7; font: 400 .875rem/1 var(--mono); user-select: none; }
-
 /* One click selects the whole command. */
 .install code {
   min-width: 0;
