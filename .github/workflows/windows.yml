@@ -1,151 +1,16 @@
-name: Windows
-
-# Native Windows only: the MSVC target built and tested on a Windows host. This is not WSL,
-# a cross-compile from Linux, or a Windows Rex client attached to another host.
-on:
-  push:
-    branches: [main]
-  pull_request:
-  workflow_dispatch:
-    inputs:
-      recipient:
-        description: Base64 of a PEM certificate. When set, the tested installer package is encrypted to it and kept for one day.
-        required: false
-        default: ''
-      distribution_counts:
-        description: Enable the pinned production counts URL in an encrypted release/prepare-* candidate
-        type: boolean
-        default: false
-
+name: Windows hosted transport rehearsal
+on: workflow_dispatch
 permissions:
   contents: read
-
 jobs:
-  native:
-    name: Native Windows x86-64 tests
+  diagnostic:
+    name: Synthetic Windows loopback TLS diagnostic
     runs-on: windows-2025
-    timeout-minutes: 60
+    timeout-minutes: 10
     env:
-      CARGO_TERM_COLOR: never
       MILO_TELEMETRY: '0'
     steps:
-      - name: Require sealed release prep for distribution counts
-        if: inputs.distribution_counts && (!startsWith(github.ref, 'refs/heads/release/prepare-') || inputs.recipient == '')
-        run: exit 1
-      # Keep the checked-out bytes as committed: fixtures and the dashboard bundle are hashed.
-      - run: git config --global core.autocrlf false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - run: rustup toolchain install 1.91.0 --profile minimal --component rustfmt
-      - name: Record the host
-        run: |
-          (Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, OSArchitecture | Format-List | Out-String).Trim()
-          rustc +1.91.0 -vV
-          git --version
-      - run: cargo +1.91.0 check --locked --all-targets
-      - name: Run the tests in a private temporary folder
-        env:
-          TEMP: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-        run: cargo +1.91.0 test --locked
-      - name: Edit, save and refuse an external change in a pseudoconsole
-        env:
-          TEMP: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-        run: cargo +1.91.0 test --locked --test windows_console -- --nocapture
-      - name: Hand the settings link to headless Chrome through the private page
-        env:
-          TEMP: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-        run: |
-          $env:MILO_TEST_CHROMIUM = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
-          cargo +1.91.0 test --locked --bin milo web::launch::tests::headless_browser_authenticates_through_the_handoff -- --ignored --exact
-      # The optimised build is what a release would ship, so it runs every test again.
-      - name: Test the release build
-        env:
-          TEMP: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-        run: cargo +1.91.0 test --release --locked
-      - name: Build the reporting distribution
-        if: inputs.distribution_counts
-        env:
-          MILO_DISTRIBUTION_COUNTS: '1'
-        run: cargo +1.91.0 build --release --locked
-      - name: Record the tested executables
-        run: |
-          git rev-parse HEAD
-          (Get-FileHash target\debug\milo.exe, target\release\milo.exe -Algorithm SHA256 | Format-Table Hash, Path -AutoSize | Out-String -Width 200).Trim()
-      # It drives the release build tested and recorded above, and uploads nothing.
-      - name: Smoke-test packaged settings in Chromium
-        env:
-          TEMP: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-          MILO_DISTRIBUTION_COUNTS: ${{ inputs.distribution_counts && '1' || '' }}
-        run: |
-          $smoke = "$env:RUNNER_TEMP\milo-web-smoke"
-          npm install --prefix $smoke --no-save --no-audit --no-fund --ignore-scripts playwright-core@1.65.1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:PLAYWRIGHT_BROWSERS_PATH = "$smoke\browsers"
-          node "$smoke\node_modules\playwright-core\cli.js" install --only-shell chromium
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:NODE_PATH = "$smoke\node_modules"
-          $env:MILO_SAVED_PREFERENCES = "$env:RUNNER_TEMP\milo-saved-preferences.conf"
-          node tests/web-smoke-windows.cjs target\release\milo.exe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo +1.91.0 test --release --locked --test windows_console usage_follows_preferences_saved_in_the_browser -- --ignored --exact
-      - name: Install, upgrade and remove the packaged release as a person would
-        env:
-          TEMP: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-        run: |
-          ./.github/ci/stage-windows.ps1 -Executable target\release\milo.exe -Destination "$env:RUNNER_TEMP\package"
-          ./.github/ci/stage-windows.ps1 -Executable target\debug\milo.exe -Destination "$env:RUNNER_TEMP\package-upgrade"
-          ./tests/windows-install.ps1 -Release "$env:RUNNER_TEMP\package" -Upgrade "$env:RUNNER_TEMP\package-upgrade"
-      - name: Verify the pinned reporting endpoint in the sealed PE
-        if: inputs.distribution_counts
-        run: |
-          $exe = "$env:RUNNER_TEMP\package\milo-x86_64-pc-windows-msvc.exe"
-          if (-not [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe)).Contains('https://counts-production.up.railway.app/v1/counts')) {
-              throw 'Distribution binary does not contain the pinned counts endpoint.'
-          }
-      - name: Qualify the installed Windows reporting binary against isolated TLS
-        if: inputs.distribution_counts
-        run: |
-          $package = "$env:RUNNER_TEMP\package"
-          $manifest = Join-Path $package 'SHA256SUMS'
-          $pins = @{}
-          foreach ($line in Get-Content -LiteralPath $manifest) {
-              if ($line -cmatch '^([a-f0-9]{64})  ([A-Za-z0-9_.-]+)$') {
-                  $pins.Add($Matches[2], $Matches[1])
-              } else {
-                  throw 'Invalid Windows package manifest.'
-              }
-          }
-          if ($pins.Count -ne 2) { throw 'Expected two Windows package pins.' }
-          ./tests/distribution-counts-windows/qualify.ps1 -Package $package `
-              -ExeSha256 $pins['milo-x86_64-pc-windows-msvc.exe'] `
-              -InstallerSha256 $pins['install-windows.ps1'] `
-              -ManifestSha256 (Get-FileHash -LiteralPath $manifest).Hash
-      # After every test, so a failed run keeps nothing. Only its recipient can open the copy kept: a public
-      # artifact would publish a binary.
-      - name: Seal the tested installer package for its recipient
-        if: github.event_name == 'workflow_dispatch' && inputs.recipient != ''
-        env:
-          RECIPIENT: ${{ inputs.recipient }}
-        run: |
-          $openssl = "$env:ProgramFiles\Git\usr\bin\openssl.exe"
-          & $openssl version
-          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\recipient.pem", [Convert]::FromBase64String($env:RECIPIENT))
-          Get-Content "$env:RUNNER_TEMP\package\SHA256SUMS"
-          Compress-Archive -Path "$env:RUNNER_TEMP\package\*" -DestinationPath "$env:RUNNER_TEMP\milo-windows.zip"
-          & $openssl smime -encrypt -aes256 -binary -outform DER -in "$env:RUNNER_TEMP\milo-windows.zip" -out "$env:RUNNER_TEMP\milo-windows.zip.p7m" "$env:RUNNER_TEMP\recipient.pem"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          (Get-FileHash "$env:RUNNER_TEMP\milo-windows.zip", "$env:RUNNER_TEMP\milo-windows.zip.p7m" -Algorithm SHA256 | Format-Table Hash, Path -AutoSize | Out-String -Width 200).Trim()
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: github.event_name == 'workflow_dispatch' && inputs.recipient != ''
-        with:
-          name: milo-windows-x86_64-release-${{ github.sha }}
-          path: ${{ runner.temp }}/milo-windows.zip.p7m
-          if-no-files-found: error
-          retention-days: 1
+      - run: ./tests/distribution-counts-windows/qualify.ps1

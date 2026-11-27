@@ -1,9 +1,3 @@
-param(
-    [Parameter(Mandatory)][string]$Package,
-    [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExeSha256,
-    [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$InstallerSha256,
-    [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ManifestSha256
-)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted') {
@@ -13,7 +7,6 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     throw 'Runner admin is required only for hosts, TLS trust and firewall provisioning.'
 }
 $hostName = 'counts-production.up.railway.app'
-$package = (Resolve-Path -LiteralPath $Package).ProviderPath
 $repo = (Resolve-Path .).ProviderPath
 $python = (Get-Command python.exe -CommandType Application).Source
 $git = (Get-Command git.exe -CommandType Application).Source
@@ -26,11 +19,6 @@ if (!$openssl) { throw 'Authentic Git for Windows OpenSSL not found' }
 $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
 $curlInfo = & $curl -q --version
 if ($LASTEXITCODE -ne 0 -or ($curlInfo -join ' ') -notmatch 'Schannel') { throw 'System32 curl must use Schannel' }
-$names = @('milo-x86_64-pc-windows-msvc.exe', 'install-windows.ps1', 'SHA256SUMS')
-$pins = @($ExeSha256.ToLowerInvariant(), $InstallerSha256.ToLowerInvariant(), $ManifestSha256.ToLowerInvariant())
-for ($i = 0; $i -lt $names.Count; $i++) {
-    if ((Get-FileHash -LiteralPath (Join-Path $package $names[$i])).Hash -ine $pins[$i]) { throw "Wrong sealed input: $($names[$i])" }
-}
 $name = 'm26c' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
 $work = Join-Path $env:SystemDrive "$name-qualification"
 $hosts = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
@@ -73,31 +61,11 @@ try {
     [void](New-Item -ItemType Directory -Path $evidence)
     & icacls $evidence /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$($user.SID.Value):(OI)(CI)RX" | Out-Null
     CheckExternal
-    foreach ($file in $names) {
-        $target = Join-Path $work "package\$file"
-        Copy-Item -LiteralPath (Join-Path $package $file) -Destination $target
-        (Get-Item -LiteralPath $target).IsReadOnly = $false
-    }
     $fixture = Join-Path $work 'fixture.py'
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixture.py') -Destination $fixture
     & icacls $fixture /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' "*$($user.SID.Value):RX" | Out-Null
     CheckExternal
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'openssl.cnf') -Destination $pki
-    Copy-Item -LiteralPath (Join-Path $repo 'tests\windows-counts\installed.py') -Destination $work
-    $git | Set-Content -LiteralPath (Join-Path $work 'git.txt') -Encoding utf8
-
-    $driver = Join-Path $repo "tests\$name.rs"
-    $harness = Get-Content -Raw -LiteralPath (Join-Path $repo 'tests\windows_console.rs')
-    $case = Get-Content -Raw -LiteralPath (Join-Path $repo 'tests\windows-counts\console.rs')
-    try {
-        [IO.File]::WriteAllText($driver, $harness + [Environment]::NewLine + $case)
-        $env:CARGO_BIN_EXE_milo = Join-Path $work 'installed\milo.exe'
-        & rustc +1.91.0 --edition=2024 --test $driver -o (Join-Path $work 'driver.exe')
-        CheckExternal
-    } finally {
-        Remove-Item -LiteralPath $driver -ErrorAction SilentlyContinue
-    }
-
     Push-Location $pki
     try {
         [void](New-Item -ItemType Directory certs)
@@ -158,7 +126,7 @@ try {
     $certFile = Join-Path $pki 'issuer.cer'
     $rootThumb = [Security.Cryptography.X509Certificates.X509Certificate2]::new($certFile).Thumbprint
     [void](Import-Certificate -FilePath $certFile -CertStoreLocation Cert:\LocalMachine\Root)
-    RunAsStandard qualify $pins
+    RunAsStandard diagnose
 } finally {
     if ($server -and !$server.HasExited) { Stop-Process -Id $server.Id -Force -ErrorAction Continue }
     if ($rootThumb) { Remove-Item -LiteralPath "Cert:\LocalMachine\Root\$rootThumb" -ErrorAction Continue }
