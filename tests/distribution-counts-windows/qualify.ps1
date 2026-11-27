@@ -86,13 +86,17 @@ try {
     Copy-Item -LiteralPath (Join-Path $repo 'tests\windows-counts\installed.py') -Destination $work
     $git | Set-Content -LiteralPath (Join-Path $work 'git.txt') -Encoding utf8
 
-    $driver = Join-Path $work 'driver.rs'
+    $driver = Join-Path $repo "tests\$name.rs"
     $harness = Get-Content -Raw -LiteralPath (Join-Path $repo 'tests\windows_console.rs')
     $case = Get-Content -Raw -LiteralPath (Join-Path $repo 'tests\windows-counts\console.rs')
-    [IO.File]::WriteAllText($driver, $harness + [Environment]::NewLine + $case)
-    $env:CARGO_BIN_EXE_milo = Join-Path $work 'installed\milo.exe'
-    & rustc +1.91.0 --edition=2024 --test $driver -o (Join-Path $work 'driver.exe')
-    CheckExternal
+    try {
+        [IO.File]::WriteAllText($driver, $harness + [Environment]::NewLine + $case)
+        $env:CARGO_BIN_EXE_milo = Join-Path $work 'installed\milo.exe'
+        & rustc +1.91.0 --edition=2024 --test $driver -o (Join-Path $work 'driver.exe')
+        CheckExternal
+    } finally {
+        Remove-Item -LiteralPath $driver -ErrorAction SilentlyContinue
+    }
 
     Push-Location $pki
     try {
@@ -123,7 +127,8 @@ try {
             $active = Get-NetFirewallRule -Name $ruleName -PolicyStore ActiveStore
             if ($active.Enabled -ne 'True' -or $active.Action -ne 'Block' -or $active.Direction -ne 'Outbound') { throw "Inactive denial: $ruleName" }
             if (($active | Get-NetFirewallApplicationFilter).Program -ine $program) { throw "Wrong egress path: $ruleName" }
-            $denied = @($active | Get-NetFirewallAddressFilter | Select-Object -ExpandProperty RemoteAddress)
+            $denied = @($active | Get-NetFirewallAddressFilter | Select-Object -ExpandProperty RemoteAddress |
+                ForEach-Object { $_ -replace '^128\.0\.0\.0/128\.0\.0\.0$', '128.0.0.0/1' })
             if (Compare-Object @($rule.addresses) $denied) { throw "Wrong egress range: $ruleName" }
         }
     }
