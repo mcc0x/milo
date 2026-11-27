@@ -353,7 +353,7 @@ fn socket_path(endpoint: &str) -> Option<Cow<'_, Path>> {
                 if byte == b'%' {
                     let high = char::from(bytes.next()?).to_digit(16)?;
                     let low = char::from(bytes.next()?).to_digit(16)?;
-                    decoded.push((high * 16 + low) as u8);
+                    decoded.push(u8::try_from(high * 16 + low).ok()?);
                 } else {
                     decoded.push(byte);
                 }
