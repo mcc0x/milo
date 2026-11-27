@@ -1,16 +1,39 @@
-name: Windows hosted transport rehearsal
+name: Windows hosted reporting rehearsal without assets
 on: workflow_dispatch
 permissions:
   contents: read
 jobs:
   diagnostic:
-    name: Synthetic Windows loopback TLS diagnostic
+    name: Installed Windows reporting rehearsal
     runs-on: windows-2025
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       MILO_TELEMETRY: '0'
     steps:
+      - run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - run: ./tests/distribution-counts-windows/qualify.ps1
+      - run: rustup toolchain install 1.91.0 --profile minimal
+      - name: Compile a disposable reporting build
+        env:
+          MILO_DISTRIBUTION_COUNTS: '1'
+        run: cargo +1.91.0 build --release --locked
+      - name: Exercise the installed disposable build against isolated TLS
+        run: |
+          $package = "$env:RUNNER_TEMP\package"
+          ./.github/ci/stage-windows.ps1 -Executable target\release\milo.exe -Destination $package
+          $manifest = Join-Path $package 'SHA256SUMS'
+          $pins = @{}
+          foreach ($line in Get-Content -LiteralPath $manifest) {
+              if ($line -cmatch '^([a-f0-9]{64})  ([A-Za-z0-9_.-]+)$') {
+                  $pins.Add($Matches[2], $Matches[1])
+              } else {
+                  throw 'Invalid Windows package manifest.'
+              }
+          }
+          if ($pins.Count -ne 2) { throw 'Expected two package pins.' }
+          ./tests/distribution-counts-windows/qualify.ps1 -Package $package `
+              -ExeSha256 $pins['milo-x86_64-pc-windows-msvc.exe'] `
+              -InstallerSha256 $pins['install-windows.ps1'] `
+              -ManifestSha256 (Get-FileHash -LiteralPath $manifest).Hash

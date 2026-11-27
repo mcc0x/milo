@@ -265,25 +265,5 @@ def qualify(exe_pin, installer_pin, manifest_pin):
     assert not exe.exists()
     print("Original kept uninstaller removed the installed sealed executable.")
 
-def diagnose():
-    assert not ctypes.windll.shell32.IsUserAnAdmin()
-    require_local()
-    assert curl("https://192.0.2.1/").returncode in {7, 28}
-    health = curl(URL + "/_lab_health")
-    assert health.returncode == 0, health.stderr.decode(errors="replace")
-    assert CRL_LEDGER.read_text().count("served") >= 1
-    assert not LEDGER.read_bytes()
-    today = datetime.now(timezone.utc).date().isoformat()
-    response = subprocess.run([CURL, "-q", "--proto", "=https", "--noproxy", "*",
-              "--globoff", "--http1.1", "--retry", "0", "--max-time", "3", "--max-filesize", "1024",
-              "--no-ssl-auto-client-cert", "--user-agent", "", "--header", "Content-Type: application/json",
-              "--data-binary", json.dumps({"day": today, "new_install": True, "monthly_active": True}),
-              "--write-out", "%{http_code}", "--url", URL + "/v1/counts"], capture_output=True)
-    assert response.returncode == 0 and response.stdout == b"204", response.stderr.decode(errors="replace")
-    event, = [json.loads(x) for x in LEDGER.read_text().splitlines()]
-    assert event.pop("tls") in {"TLSv1.2","TLSv1.3"}
-    assert event == dict(event="accepted", status=204, day=today, new_install=True, monthly_active=True)
-    print("PASS synthetic system curl: live routing blocked, exact host and CRL verified, exactly one private TLS POST.")
-
 if __name__ == "__main__":
-    {"serve": serve, "negative": negative, "qualify": qualify, "diagnose": diagnose}[sys.argv[1]](*sys.argv[2:])
+    {"serve": serve, "negative": negative, "qualify": qualify}[sys.argv[1]](*sys.argv[2:])
