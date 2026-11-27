@@ -114,6 +114,7 @@ jobs:
           export PG_BIN="$(pg_config --bindir)"
           pg=hosted/counts/scripts/pg-ephemeral.sh
           "$pg" bun test ./hosted/counts/counts.integration.ts
+          "$pg" python3 hosted/counts/scripts/check-receiver-role.py
           export MILO_TEST_WITHOUT_CURL="$RUNNER_TEMP/without-curl"
           cat > "$MILO_TEST_WITHOUT_CURL" <<'SH'
           #!/bin/sh

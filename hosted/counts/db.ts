@@ -20,6 +20,12 @@ export function openDb(url: string) {
   return {
     async migrate() {
       await sql.begin(async (tx) => {
+        const [role] = await tx`SELECT has_schema_privilege('public', 'CREATE') AS can_migrate`;
+        if (!role.can_migrate) {
+          await tx`SELECT day, daily_active, new_installs FROM milo_counts_daily LIMIT 0`;
+          await tx`SELECT month, monthly_active FROM milo_counts_monthly LIMIT 0`;
+          return;
+        }
         await tx`SELECT pg_advisory_xact_lock(${migrationLock})`;
         await tx.unsafe(schema);
       });

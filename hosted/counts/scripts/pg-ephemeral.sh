@@ -33,7 +33,8 @@ PGPASSWORD=$password "$(bin createdb)" -h 127.0.0.1 -p "$port" -U milo milo_coun
 
 DATABASE_URL="postgres://milo:$password@127.0.0.1:$port/milo_counts"
 MILO_COUNTS_TEST_DATABASE_URL=$DATABASE_URL
-export DATABASE_URL MILO_COUNTS_TEST_DATABASE_URL
+MILO_COUNTS_TEST_POSTGRES_LOG="$dir/postgres.log"
+export DATABASE_URL MILO_COUNTS_TEST_DATABASE_URL MILO_COUNTS_TEST_POSTGRES_LOG
 status=0
 "$@" || status=$?
 exit "$status"
