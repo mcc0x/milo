@@ -150,7 +150,10 @@ def qualify(exe_pin, installer_pin, manifest_pin):
     else:
         assert observed.returncode != 0
         diagnostic = observed.stderr.decode(errors="replace")
-        assert any(word in diagnostic.lower() for word in ("not digitally signed", "running scripts is disabled", "pssecurityexception")), diagnostic
+        reason = diagnostic.lower()
+        refused = any(word in reason for word in ("not digitally signed", "running scripts is disabled", "pssecurityexception"))
+        blocked_prompt = all(word in reason for word in ("authorizationmanager check failed", "securityerror", "unauthorizedaccess"))
+        assert refused or blocked_prompt, diagnostic
         print("Stock PowerShell blocked the Internet-zone-marked installer; verified bytes then installed with a single process-scoped Bypass.")
         subprocess.run(invocation, env=env, check=True)
     unchanged = subprocess.run([ps, "-NoProfile", "-Command", "Get-ExecutionPolicy -List; Get-ExecutionPolicy"],
