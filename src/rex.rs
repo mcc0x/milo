@@ -38,6 +38,7 @@ pub(crate) use server::native_app;
 pub(crate) use server::{CommandVersion, RemoteEditor, Server, Viewers, command_version, server, viewers};
 
 use crate::sys::{AsRawFd, RawFd};
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal as _, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -339,9 +340,38 @@ impl AlertServer {
     }
 }
 
-fn socket_path(endpoint: &str) -> Option<&Path> {
-    let path = endpoint.strip_prefix("unix://").unwrap_or(endpoint);
-    (path.starts_with('/') && !path.bytes().any(|byte| byte.is_ascii_control())).then(|| Path::new(path))
+/// Rex escapes its Unix URLs, but also accepts bare filesystem paths, where `%` is literal.
+fn socket_path(endpoint: &str) -> Option<Cow<'_, Path>> {
+    let path = if let Some(url_path) = endpoint.strip_prefix("unix://") {
+        if !url_path.starts_with('/') || url_path.contains(['?', '#']) {
+            return None;
+        }
+        if url_path.contains('%') {
+            let mut bytes = url_path.bytes();
+            let mut decoded = Vec::with_capacity(url_path.len());
+            while let Some(byte) = bytes.next() {
+                if byte == b'%' {
+                    let high = char::from(bytes.next()?).to_digit(16)?;
+                    let low = char::from(bytes.next()?).to_digit(16)?;
+                    decoded.push((high * 16 + low) as u8);
+                } else {
+                    decoded.push(byte);
+                }
+            }
+            Cow::Owned(String::from_utf8(decoded).ok()?)
+        } else {
+            Cow::Borrowed(url_path)
+        }
+    } else {
+        Cow::Borrowed(endpoint)
+    };
+    if !path.starts_with('/') || path.bytes().any(|byte| byte.is_ascii_control()) {
+        return None;
+    }
+    Some(match path {
+        Cow::Borrowed(path) => Cow::Borrowed(Path::new(path)),
+        Cow::Owned(path) => Cow::Owned(PathBuf::from(path)),
+    })
 }
 
 #[cfg(unix)]
@@ -981,7 +1011,7 @@ fn unhex(code: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::{
         Frame, ShellChange, ShellNews, Target, exact_block, finished, inside_with, json, layout_catalog, probe_output,
-        reader_command, reader_label, review_command, scripted,
+        reader_command, reader_label, review_command, scripted, socket_path,
     };
     use crate::term::Host;
     use std::ffi::OsStr;
@@ -989,6 +1019,34 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn unix_socket_urls_decode_once_and_plain_paths_are_literal() {
+        for (endpoint, expected) in [
+            (
+                "unix:///Users/example/Library/Application%20Support/rex/server.sock",
+                "/Users/example/Library/Application Support/rex/server.sock",
+            ),
+            ("unix:///tmp/with space.sock", "/tmp/with space.sock"),
+            ("unix:///tmp/a+%2520%23%3F.sock", "/tmp/a+%20#?.sock"),
+            ("/tmp/with%20space.sock", "/tmp/with%20space.sock"),
+        ] {
+            assert_eq!(socket_path(endpoint).as_deref(), Some(Path::new(expected)));
+        }
+        for endpoint in [
+            "https://rex.example/",
+            "unix://other-host/tmp/rex.sock",
+            "unix:///tmp/%00.sock",
+            "unix:///tmp/%1b.sock",
+            "unix:///tmp/%ff.sock",
+            "unix:///tmp/%zz.sock",
+            "unix:///tmp/rex.sock%",
+            "unix:///tmp/rex.sock?query",
+            "unix:///tmp/rex.sock#fragment",
+        ] {
+            assert!(socket_path(endpoint).is_none(), "{endpoint}");
+        }
+    }
 
     #[test]
     fn doctor_requires_the_current_milo_action_catalog() {

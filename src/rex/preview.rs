@@ -93,7 +93,7 @@ impl Rex {
                 if !project.outside(&path) || super::socket_identity(path.to_str()?).is_none() {
                     return None;
                 }
-                Some(format!("unix://{}", path.to_str()?))
+                Some(path.to_str()?.to_owned())
             }
             _ => None,
         };
