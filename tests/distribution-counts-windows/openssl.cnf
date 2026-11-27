@@ -1,0 +1,29 @@
+[ ca ]
+default_ca = lab
+[ lab ]
+database = index.txt
+serial = serial
+new_certs_dir = certs
+certificate = root.pem
+private_key = root.key
+default_md = sha256
+default_days = 2
+default_crl_days = 2
+policy = lab_policy
+[ lab_policy ]
+commonName = supplied
+[ req ]
+distinguished_name = dn
+[ dn ]
+[ rootext ]
+basicConstraints = critical, CA:true, pathlen:0
+keyUsage = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+[ leafext ]
+basicConstraints = critical, CA:false
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:counts-production.up.railway.app
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid
+crlDistributionPoints = URI:http://127.0.0.1:18443/fixture.crl
