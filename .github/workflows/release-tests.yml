@@ -259,6 +259,12 @@ jobs:
         run: |
           grep -aFq 'https://counts-production.up.railway.app/v1/counts' target/local-menu/milo
           grep -aFq 'https://counts-production.up.railway.app/v1/counts' target/local-menu/Milo.app/Contents/Resources/Tools/milo
+      - name: Qualify the staged Mac reporting binary against isolated TLS
+        if: inputs.distribution_counts
+        run: |
+          assets="$RUNNER_TEMP/assets"
+          pin=$(awk '$2 == "milo-aarch64-apple-darwin" { print $1 }' "$assets/SHA256SUMS")
+          bash tests/distribution-counts-macos/runner.sh "$assets/milo-aarch64-apple-darwin" "$pin" counts-production.up.railway.app
       - name: Seal the tested Mac release files for offline qualification
         if: github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/prepare-')) && inputs.recipient != ''
         env:
