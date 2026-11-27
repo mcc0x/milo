@@ -4,10 +4,10 @@
 //! FSEvents watches a whole directory tree through a single stream.
 //! The loop also checks periodically on macOS in case notifications miss a change.
 
+use crate::sys::{AsRawFd, RawFd};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{ErrorKind, PipeReader, Read};
-use std::os::fd::{AsRawFd, RawFd};
 #[cfg(any(test, target_os = "macos"))]
 use std::path::Components;
 use std::path::{Path, PathBuf};
@@ -203,8 +203,9 @@ impl Watcher {
     pub fn refresh(&mut self, scope: Scope) -> bool {
         let roots_changed = self.scope.roots != scope.roots;
         let ignored_changed = self.scope.ignored != scope.ignored;
-        let mut restart =
-            roots_changed || self.retry || self.listener.as_ref().is_some_and(|listener| listener.stream.take_root_change());
+        let mut restart = roots_changed
+            || self.retry
+            || self.listener.as_ref().is_some_and(|listener| listener.stream.take_root_change());
         if !restart && !ignored_changed {
             self.scope.complete = scope.complete;
             return false;
@@ -267,14 +268,14 @@ fn native_exclusions(dirs: &HashSet<PathBuf>, previous: &[PathBuf]) -> Vec<PathB
 
 #[cfg(target_os = "macos")]
 mod imp {
+    use crate::sys::AsRawFd;
     use std::ffi::{CStr, OsStr, c_void};
     use std::io::{self, PipeWriter};
-    use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::ptr::{null, null_mut};
-    use std::sync::{Arc, Mutex, PoisonError};
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
 
     use super::{Ignored, Listener};
 
@@ -454,10 +455,7 @@ mod imp {
         }
         let (reader, writer) = io::pipe().ok()?;
         for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
-            // SAFETY: each fd is an open pipe end; F_SETFL accepts an integer flag.
-            if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
-                return None;
-            }
+            crate::sys::set_nonblocking(fd).ok()?;
         }
         let callback = Arc::new(CallbackState {
             signal: writer,
@@ -510,7 +508,15 @@ mod imp {
         let mut context = Context { version: 0, info, retain: None, release: None, describe: None };
         // SAFETY: paths is a live CFArray. The stream copies the fields of context.
         let stream = unsafe {
-            FSEventStreamCreate(null(), on_event, &mut context, paths, SINCE_NOW, LATENCY, NO_DEFER | WATCH_ROOT | FILE_EVENTS)
+            FSEventStreamCreate(
+                null(),
+                on_event,
+                &mut context,
+                paths,
+                SINCE_NOW,
+                LATENCY,
+                NO_DEFER | WATCH_ROOT | FILE_EVENTS,
+            )
         };
         // SAFETY: paths was created above and the stream keeps its own paths.
         unsafe { CFRelease(paths) };
@@ -576,7 +582,9 @@ mod filter_tests {
     use super::*;
     use crate::fixture::Fixture;
     use crate::git::Repo;
+    #[cfg(unix)]
     use std::ffi::OsStr;
+    #[cfg(unix)]
     use std::os::unix::ffi::OsStrExt;
 
     #[test]
@@ -652,6 +660,7 @@ mod filter_tests {
         assert!(!reader.allows(&common.join("worktrees/linked-other/index"), false));
     }
 
+    #[cfg(unix)]
     #[test]
     fn worktree_filter_has_component_boundaries_and_preserves_raw_path_bytes() {
         let common = Path::new("/project/.git");
@@ -689,11 +698,11 @@ mod tests {
 
     fn changed(watcher: &Watcher, timeout_ms: i32) -> bool {
         let fd = watcher.fd().expect("the stream should have a notification descriptor");
-        let mut fds = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }];
+        let mut fds = [crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 }];
         match crate::term::wait_ready(&mut fds, timeout_ms) {
             0 => false,
             1 => {
-                assert_eq!(fds[0].revents, libc::POLLIN);
+                assert_eq!(fds[0].revents, crate::sys::POLLIN);
                 watcher.drain();
                 true
             }
@@ -788,6 +797,7 @@ mod tests {
         assert!(screen.text()[0].contains("2 to commit"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn reader_wakes_for_its_file_rules_git_and_ancestor_but_not_other_work() {
         let f = Fixture::folder();

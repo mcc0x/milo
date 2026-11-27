@@ -6,9 +6,9 @@
 //! above it with the second. A tab closes only once its file is no longer
 //! being edited, which is where unsaved edits are asked about.
 
+use crate::sys::RawFd;
 use std::cell::{Cell, OnceCell};
 use std::ops::Range;
-use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -781,7 +781,7 @@ impl TabSets {
     /// The lists of the worktree that holds `dir`. `last` starts at the preview of its last tabs.
     pub fn open(dir: &Path, last: bool) -> Result<Self, String> {
         let state = rescue::state_dir().ok_or("milo has no state folder to remember tabs in")?;
-        let found = dir.canonicalize().ok().and_then(|dir| Repo::open(&dir));
+        let found = crate::sys::canonicalize(dir).ok().and_then(|dir| Repo::open(&dir));
         let repo = found.ok_or_else(|| format!("{} is not a directory", dir.display()))?;
         Ok(Self::at(state, repo.root, last))
     }
@@ -908,9 +908,11 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    #[cfg(unix)]
     use super::super::{Floated, Offer};
     use super::*;
     use crate::fixture::Fixture;
+    #[cfg(unix)]
     use crate::native::{Action, tests::with_fake};
 
     const BLOCK: &str = "block:11111111-1111-1111-1111-111111111111";
@@ -1024,6 +1026,7 @@ mod tests {
         assert!(drawn(&mut tabs, 64, 10).iter().any(|row| row.ends_with("saved in the gap")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pane_that_did_not_open_a_reader_reaches_it_only_for_the_readers_own_project() {
         use super::super::ask_reader;
@@ -1034,12 +1037,12 @@ mod tests {
         f.commit("two files");
         let other = Fixture::new();
         other.write("b.txt", "another project\n");
-        let root = f.root.canonicalize().unwrap();
+        let root = crate::sys::canonicalize(&f.root).unwrap();
         let place = Place { state: state(&f), block: BLOCK.into() };
         let mut tabs = Tabs::placed(reader(&f, "a.txt"), Some(place));
         let spot = Some(crate::reader::Spot { line: 2, column: None });
 
-        let elsewhere = other.root.canonicalize().unwrap();
+        let elsewhere = crate::sys::canonicalize(&other.root).unwrap();
         assert!(!ask_reader(&state(&f), BLOCK, &elsewhere, &elsewhere.join("b.txt"), spot));
         assert!(matches!(tabs.check_external(), External::Unchanged));
         assert!(ask_reader(&state(&f), BLOCK, &root, &root.join("b.txt"), spot));
@@ -1098,6 +1101,7 @@ mod tests {
         assert!(drawn(&mut tabs, 40, 8)[2].starts_with("  7   line 7"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn native_actions_use_the_shown_tab_even_while_another_has_a_draft() {
         let f = Fixture::folder();
@@ -1135,6 +1139,7 @@ mod tests {
         assert_eq!(fs::read_to_string(f.root.join("draft.txt")).unwrap(), "original\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn actions_capture_tab_keys_and_clicks_without_outliving_the_shown_tab() {
         let f = Fixture::folder();
@@ -1251,6 +1256,7 @@ mod tests {
         assert!(rows[7].contains("60   line 60") && rows[8].starts_with(" Line 900"), "{rows:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn working_tabs_keep_directory_aliases_distinct_and_follow_retargets_when_shown() {
         use std::os::unix::fs::symlink;
@@ -1274,6 +1280,7 @@ mod tests {
         assert!(drawn(&mut tabs, 80, 6)[2].ends_with("retargeted body"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn working_tab_identity_is_not_the_lossy_label() {
         use std::ffi::OsStr;
@@ -1573,6 +1580,7 @@ mod tests {
         assert!(drawn(&mut tabs, 60, 6)[2].ends_with("second, changed"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_request_from_another_pane_opens_a_tab_and_the_block_is_marked_while_any_tab_is_unsaved() {
         let f = Fixture::folder();

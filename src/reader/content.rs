@@ -33,7 +33,7 @@ impl Location {
         let dir = file.ancestors().skip(1).find(|dir| dir.is_dir())?;
         // Keep the final component even if it is a link. Within a known
         // worktree also keep the directory aliases the user actually opened.
-        let resolved = dir.canonicalize().ok()?;
+        let resolved = crate::sys::canonicalize(dir).ok()?;
         let tail = file.strip_prefix(dir).ok()?;
         if resolved != dir {
             if dir.components().any(|part| part == Component::ParentDir) {
@@ -50,12 +50,14 @@ impl Location {
                 let _ = enclosing_worktree(&lexical, &resolved)?;
             } else if let Some((logical, root)) = enclosing_worktree(dir, &resolved)? {
                 let repo = open(&root)?;
-                let relative = root.strip_prefix(&repo.root).ok()?.join(file.strip_prefix(logical).ok()?);
+                let relative = crate::sys::git_relative(
+                    root.strip_prefix(&repo.root).ok()?.join(file.strip_prefix(logical).ok()?),
+                );
                 return Some(Self { repo, relative });
             }
         }
         let repo = open(&resolved)?;
-        let relative = resolved.join(tail).strip_prefix(&repo.root).ok()?.to_path_buf();
+        let relative = crate::sys::git_relative(resolved.join(tail).strip_prefix(&repo.root).ok()?.to_path_buf());
         Some(Self { repo, relative })
     }
 }
@@ -109,13 +111,14 @@ fn enclosing_worktree<'a>(dir: &'a Path, resolved: &Path) -> Option<Option<(&'a 
         if fs::symlink_metadata(name.join(".git")).is_err() {
             continue;
         }
-        let root = name.canonicalize().ok()?;
+        let root = crate::sys::canonicalize(name).ok()?;
         if !resolved.starts_with(&root) {
             return None;
         }
-        if project.as_ref().is_none_or(|(alias, target)| {
-            alias.strip_prefix(name).is_ok_and(|tail| root.join(tail) != *target)
-        }) {
+        if project
+            .as_ref()
+            .is_none_or(|(alias, target)| alias.strip_prefix(name).is_ok_and(|tail| root.join(tail) != *target))
+        {
             project = Some((name, root));
         }
     }
@@ -130,9 +133,8 @@ impl Attributes {
         if !repo.git || relative.to_str().is_none() {
             return Self(Vec::new());
         }
-        let info = repo
-            .common_dir()
-            .map_or_else(|| repo.root.join(".git/info/attributes"), |dir| dir.join("info/attributes"));
+        let info =
+            repo.common_dir().map_or_else(|| repo.root.join(".git/info/attributes"), |dir| dir.join("info/attributes"));
         let rules = relative.ancestors().skip(1).map(|dir| repo.root.join(dir).join(".gitattributes"));
         Self(rules.chain(std::iter::once(info)).map(|path| (path, None)).collect())
     }
@@ -235,7 +237,7 @@ impl CommittedTarget {
         let (repo, relative) = if let Some(repo) = cwd_repo.filter(|r| r.git)
             && let Ok(tail) = absolute.strip_prefix(&repo.root)
         {
-            (repo, tail.to_path_buf())
+            (repo, crate::sys::git_relative(tail.to_path_buf()))
         } else {
             const NOT_REPO: &str = "This file is not in a git repository.";
             let location = Location::find(&absolute, Repo::open).ok_or(NOT_REPO)?;
@@ -310,7 +312,10 @@ impl MediaCheck {
                     } else if !repo.read_if_changed() && !force {
                         return None;
                     }
-                    if stop.load(Ordering::Relaxed) || repo.busy() || WorkingStamp::at(&repo, &root, &relative).1 != stamp {
+                    if stop.load(Ordering::Relaxed)
+                        || repo.busy()
+                        || WorkingStamp::at(&repo, &root, &relative).1 != stamp
+                    {
                         return None;
                     }
                     let patch = repo.ok().then(|| file_diff(&mut repo, path)).flatten();
@@ -621,7 +626,11 @@ fn working_body(
         .unwrap_or_else(|kind| body_from_working_content(&working_content(entry, LIMIT), kind, lang))
 }
 
-fn body_from_patch(patch: FileDiff, picture_suffix: bool, lang: Option<&'static syntax::Lang>) -> Result<Body, LineKind> {
+fn body_from_patch(
+    patch: FileDiff,
+    picture_suffix: bool,
+    lang: Option<&'static syntax::Lang>,
+) -> Result<Body, LineKind> {
     if !picture_suffix && patch.binary {
         return Ok(Body::Note(NOT_TEXT));
     }

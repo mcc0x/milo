@@ -1,15 +1,25 @@
 //! Read-only discovery for programs that must not come from the checkout.
 
-use std::ffi::{CString, OsStr};
+#![cfg_attr(windows, allow(dead_code))]
+
+#[cfg(unix)]
+use std::ffi::CString;
+use std::ffi::OsStr;
+#[cfg(unix)]
 use std::fs::Metadata;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt as _;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
-use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 
 pub(crate) fn safe_path_text(path: &Path) -> bool {
     path.to_str().is_some_and(|text| !text.chars().any(char::is_control))
 }
 
+#[cfg(unix)]
 /// Prefer a direct parent reported by the kernel, then examine absolute PATH
 /// entries in order. Neither route may traverse the checkout or current directory.
 pub(crate) fn find(
@@ -56,10 +66,18 @@ pub(crate) fn find(
     None
 }
 
+/// Ownership of a program's folders is not checked on Windows yet, so no program is trusted there.
+#[cfg(windows)]
+pub(crate) fn find(_: &str, _: Option<&Path>, _: &Path, _: Option<&Path>, _: &OsStr) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(unix)]
 fn absolute_candidate(path: &Path) -> bool {
     path.is_absolute() && safe_path_text(path) && !path.components().any(|part| part == Component::ParentDir)
 }
 
+#[cfg(unix)]
 fn executable(path: &Path, metadata: &Metadata) -> bool {
     if !metadata.is_file()
         || metadata.nlink() != 1
@@ -74,17 +92,20 @@ fn executable(path: &Path, metadata: &Metadata) -> bool {
     unsafe { libc::access(name.as_ptr(), libc::X_OK) == 0 }
 }
 
+#[cfg(unix)]
 fn directory_id(path: &Path) -> Option<(u64, u64)> {
     let metadata = path.metadata().ok()?;
     metadata.is_dir().then_some((metadata.dev(), metadata.ino()))
 }
 
+#[cfg(unix)]
 struct ToolTrust {
     user: libc::uid_t,
     cwd: (u64, u64),
     root: Option<(u64, u64)>,
 }
 
+#[cfg(unix)]
 impl ToolTrust {
     /// Check each encountered entry, including the lexical parents of symlinks
     /// and the links' destinations. Identity catches alternate spellings on

@@ -4,12 +4,13 @@
 //! credits each keep their own unit, and none of them is turned into a
 //! percentage or compared with another.
 
+use crate::sys::RawFd;
 use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::{Read as _, Write as _};
-use std::os::fd::RawFd;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -566,8 +567,15 @@ impl Sources {
         };
         let metadata = file.metadata().map_err(|_| Failure::OpenFile)?;
         // SAFETY: geteuid has no preconditions and cannot fail.
-        let mine = metadata.uid() == unsafe { libc::geteuid() };
-        if !metadata.is_file() || !mine || metadata.mode() & 0o077 != 0 || metadata.len() > SETTINGS_LIMIT {
+        #[cfg(unix)]
+        let private = metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0;
+        // Only a file with exactly the security Milo gives its own private files is trusted.
+        #[cfg(windows)]
+        let private = crate::sys::file_security(&file)
+            .ok()
+            .zip(crate::sys::private_security().ok())
+            .is_some_and(|(file, private)| file == private);
+        if !metadata.is_file() || !private || metadata.len() > SETTINGS_LIMIT {
             return Err(Failure::OpenFile);
         }
         let mut text = String::new();
@@ -729,7 +737,7 @@ impl Sources {
             http::RetryAfter::At(date) => date.saturating_sub(now),
         });
         let (answer, rest) = match reply {
-            None => (Err(Failure::without_reply(http::executable())), UNREACHABLE_REST),
+            None => (Err(Failure::without_reply(http::executable().as_os_str())), UNREACHABLE_REST),
             Some(reply) => match reply.status {
                 200 => (account.parse(&reply.body, now, until).unwrap_or(Err(Failure::Unexpected)), interval),
                 401 => (Err(Failure::Refused), REFUSED_REST),
@@ -980,7 +988,7 @@ impl Sources {
         let file = self.settings.as_deref().map(Path::display);
         let file = file.map_or_else(|| SETTINGS_FILE.to_owned(), |file| file.to_string());
         let mut lines = Vec::new();
-        let curl = Path::new(http::executable());
+        let curl = http::executable();
         if choices.any() && !curl.exists() {
             lines.push(format!("Usage accounts: {} is missing, so no provider can be asked", curl.display()));
         }
@@ -997,6 +1005,9 @@ impl Sources {
                     lines.push(match failure {
                         Failure::NoKey | Failure::NoScope => {
                             format!("{title}: not asked; set {name} in the environment or in {file}")
+                        }
+                        Failure::OpenFile if cfg!(windows) => {
+                            format!("{title}: not asked; {file} is not private to you, so set {name} in the environment instead")
                         }
                         Failure::OpenFile => {
                             format!("{title}: not asked; {file} must be a plain file only you can read (chmod 600)")
@@ -1043,9 +1054,8 @@ impl Accounts {
     pub(super) fn settle_at(&mut self, now: i64, clock: Instant, manual: bool) {
         self.start(now, clock, manual);
         while let Some(fd) = self.fd() {
-            let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-            // SAFETY: `poll` points to one writable pollfd whose descriptor the job keeps open.
-            unsafe { libc::poll(&raw mut poll, 1, 30_000) };
+            let mut poll = crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 };
+            crate::sys::poll(std::slice::from_mut(&mut poll), 30_000);
             self.collect(clock);
         }
     }

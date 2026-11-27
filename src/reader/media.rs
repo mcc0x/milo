@@ -12,17 +12,19 @@ pub(super) fn picture(s: &mut Screen, rows: usize, picture: &Picture) -> Option<
     if room == 0 || rows == 0 {
         return None;
     }
-    if s.pictures() == Some(true) {
+    if s.pictures() == Some(true) && picture.kitty() {
         let size = picture.fit(s.cell_size(), room, rows);
         let origin = (1 + (room - size.0) / 2, 1 + (rows - size.1) / 2);
         s.show_picture(picture, origin.0, origin.1, size.0, size.1);
     } else if let Some(rgb) = picture.raster() {
         fitted_cells(s, rows, rgb);
     } else if s.pictures() == Some(false) {
-        return Some("Kitty graphics and a cell preview are unavailable here.");
+        return Some(NO_PICTURES);
     }
     None
 }
+
+const NO_PICTURES: &str = "Kitty graphics and a cell preview are unavailable here.";
 
 pub(super) fn movie<'a>(s: &mut Screen, rows: usize, video: &'a Video) -> Option<&'a str> {
     if let Some(why) = video.error() {

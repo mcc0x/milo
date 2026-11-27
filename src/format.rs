@@ -8,10 +8,8 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write as _};
-use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -132,12 +130,25 @@ pub fn known(name: &str) -> bool {
 /// The first program of this name in a folder that `PATH` names in full. A
 /// folder named from wherever the command happens to run, such as `.` or
 /// `node_modules/.bin`, would let the project being read choose the program.
+#[cfg(unix)]
 pub(crate) fn find(program: &str, path: &OsStr) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+
     std::env::split_paths(path).filter(|dir| dir.is_absolute()).map(|dir| dir.join(program)).find(|file| {
         let Ok(name) = std::ffi::CString::new(file.as_os_str().as_bytes()) else { return false };
         // SAFETY: The path is a live NUL-terminated string; access only reports on it.
         file.is_file() && unsafe { libc::access(name.as_ptr(), libc::X_OK) } == 0
     })
+}
+
+/// On Windows only a program with an `.exe` name is run: a script wrapper such as `prettier.cmd`
+/// would pass the file name through a command interpreter.
+#[cfg(windows)]
+pub(crate) fn find(program: &str, path: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(format!("{program}.exe")))
+        .find(|file| file.is_file())
 }
 
 /// The text to format and the file it belongs to.
@@ -262,9 +273,25 @@ fn full_path(path: &OsStr) -> OsString {
     std::env::join_paths(std::env::split_paths(path).filter(|dir| dir.is_absolute())).unwrap_or_default()
 }
 
+#[cfg(unix)]
+fn stop(child: &mut Child) {
+    if let Some(group) = libc::pid_t::try_from(child.id()).ok().filter(|&group| group > 1) {
+        // SAFETY: The child leads a process group of its own, so this reaches only it and what it started.
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
+}
+
+/// Windows has no process group to stop. A helper that outlives the formatter is left behind,
+/// which the wait for its pipes already allows.
+#[cfg(windows)]
+fn stop(child: &mut Child) {
+    let _ = child.kill();
+}
+
 fn run_within(tool: &Tool, program: &Path, draft: &Draft<'_>, wait: Duration) -> Result<String, Failure> {
     let deadline = Instant::now() + wait;
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(arguments(tool, draft))
         .current_dir(draft.dir)
         .env("PATH", full_path(&std::env::var_os("PATH").unwrap_or_default()))
@@ -273,18 +300,11 @@ fn run_within(tool: &Tool, program: &Path, draft: &Draft<'_>, wait: Duration) ->
         .env("RUSTUP_AUTO_INSTALL", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // A group of its own, so that helpers it starts can be stopped with it.
-        .process_group(0)
-        .spawn()
-        .map_err(|_| Failure::NotStarted)?;
-    let group = libc::pid_t::try_from(child.id()).ok().filter(|&group| group > 1);
-    let stop = || {
-        if let Some(group) = group {
-            // SAFETY: The child leads a process group of its own, so this reaches only it and what it started.
-            unsafe { libc::killpg(group, libc::SIGKILL) };
-        }
-    };
+        .stderr(Stdio::piped());
+    // A group of its own, so that helpers it starts can be stopped with it.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command.spawn().map_err(|_| Failure::NotStarted)?;
     // Written from its own thread: a formatter may answer before it has read everything.
     if let Some(mut pipe) = child.stdin.take() {
         let text = draft.text.to_owned();
@@ -307,7 +327,7 @@ fn run_within(tool: &Tool, program: &Path, draft: &Draft<'_>, wait: Duration) ->
         }
     };
     if status.is_none() {
-        stop();
+        stop(&mut child);
         let _ = child.wait();
     }
     let (mut out, mut err) = (None, None);
@@ -318,7 +338,7 @@ fn run_within(tool: &Tool, program: &Path, draft: &Draft<'_>, wait: Duration) ->
             Ok((true, read)) => out = Some(read),
             Ok((false, read)) => err = Some(read),
             Err(_) => {
-                stop();
+                stop(&mut child);
                 return Err(Failure::TimedOut);
             }
         }
@@ -336,7 +356,7 @@ fn run_within(tool: &Tool, program: &Path, draft: &Draft<'_>, wait: Duration) ->
     Ok(text)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
@@ -535,5 +555,31 @@ pub(crate) mod tests {
             });
             assert!(gone, "the helper outlived its formatter: {script:?}");
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::fs;
+
+    use super::*;
+    use crate::fixture::Fixture;
+
+    #[test]
+    fn rustfmt_exe_from_path_formats_the_draft_and_a_cmd_wrapper_is_never_run() {
+        let f = Fixture::folder();
+        let path = std::env::var_os("PATH").unwrap();
+        let Support::Ready(tool, program) = support("lib.rs", Some(&path)) else {
+            panic!("rustfmt.exe is not in a folder PATH names in full")
+        };
+        assert_eq!(tool.name, "rustfmt");
+        assert!(program.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("exe")), "{program:?}");
+        let draft = Draft { text: "fn  main( ) { let  x=1 ; }\n", name: "lib.rs", dir: &f.root, root: &f.root };
+        assert_eq!(run(tool, &program, &draft).unwrap(), "fn main() {\n    let x = 1;\n}\n");
+
+        let wrappers = f.root.join("wrappers");
+        fs::create_dir(&wrappers).unwrap();
+        fs::write(wrappers.join("prettier.cmd"), "@echo off\r\nexit /b 1\r\n").unwrap();
+        assert!(matches!(support("app.js", Some(wrappers.as_os_str())), Support::Missing("prettier, biome or deno")));
     }
 }

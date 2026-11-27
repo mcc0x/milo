@@ -2,7 +2,6 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 use super::files::{self, Change, Image};
@@ -54,11 +53,11 @@ impl Location {
         check_config_dir(config)?;
         check_config_dir(&directory)?;
         let (name, owner) = if let Some(root) = root {
-            let bytes = root.as_os_str().as_encoded_bytes();
+            let bytes = crate::preferences::worktree_bytes(root);
             let hash = bytes
                 .iter()
                 .fold(0xcbf2_9ce4_8422_2325, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
-            (format!("worktree-{hash:016x}"), hex(bytes))
+            (format!("worktree-{hash:016x}"), hex(&bytes))
         } else {
             ("global".into(), "global".into())
         };
@@ -161,6 +160,11 @@ fn worktree(cwd: &Path) -> Option<PathBuf> {
 impl Store {
     pub fn layout_for(&self, root: Option<&Path>) -> Result<(Layout, bool, Scope), &'static str> {
         self.inspect_layout(root).map_err(LayoutError::message)
+    }
+
+    /// The layout saved for this worktree or as the global default, if any. Rex's files are not looked at.
+    pub(super) fn saved_profile(&self, root: Option<&Path>) -> Result<Option<(Layout, Scope)>, LayoutError> {
+        selected(&self.config, root)
     }
 
     pub(super) fn inspect_layout(&self, root: Option<&Path>) -> Result<(Layout, bool, Scope), LayoutError> {
@@ -547,11 +551,15 @@ fn unhex(text: &str) -> Option<OsString> {
     for i in (0..text.len()).step_by(2) {
         bytes.push(u8::from_str_radix(&text[i..i + 2], 16).ok()?);
     }
-    Some(OsString::from_vec(bytes))
+    crate::sys::os_string(bytes)
 }
 
 /// Internal, noninteractive entry point for the installed Rex actions. Paths are arguments, never Lua.
 pub fn layout_profile(args: &[OsString]) -> i32 {
+    if cfg!(windows) {
+        eprintln!("milo layout profiles are not supported on Windows yet.");
+        return 1;
+    }
     fn run(args: &[OsString]) -> Result<(), &'static str> {
         let [action, rest @ ..] = args else { return Err("Missing layout-profile operation.") };
         match (action.to_str(), rest) {
@@ -605,7 +613,7 @@ pub fn layout_profile(args: &[OsString]) -> i32 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::fixture::Fixture;

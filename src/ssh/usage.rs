@@ -113,7 +113,7 @@ impl Pane for Scoped {
         self.usage.check_with_watcher(watching, started)
     }
 
-    fn unfinished_check(&self) -> Option<std::os::fd::RawFd> {
+    fn unfinished_check(&self) -> Option<crate::sys::RawFd> {
         self.usage.unfinished_check()
     }
 
@@ -125,7 +125,7 @@ impl Pane for Scoped {
         self.usage.filesystem_changed();
     }
 
-    fn external_fd(&self) -> Option<std::os::fd::RawFd> {
+    fn external_fd(&self) -> Option<crate::sys::RawFd> {
         self.usage.external_fd()
     }
 
@@ -160,7 +160,9 @@ impl Pane for Scoped {
 
     /// The host's usage stays only while its `milo ssh` holds the connection.
     fn still_lent(&mut self) -> bool {
-        self.state.as_deref().is_some_and(|state| self.link.as_ref().is_some_and(|link| link.current(state, &self.anchor)))
+        self.state
+            .as_deref()
+            .is_some_and(|state| self.link.as_ref().is_some_and(|link| link.current(state, &self.anchor)))
     }
 
     fn returned(&mut self, finished: bool) -> After {
@@ -224,7 +226,7 @@ impl Pane for Labeled {
         self.usage.check_with_watcher(watching, started)
     }
 
-    fn unfinished_check(&self) -> Option<std::os::fd::RawFd> {
+    fn unfinished_check(&self) -> Option<crate::sys::RawFd> {
         self.usage.unfinished_check()
     }
 
@@ -236,7 +238,7 @@ impl Pane for Labeled {
         self.usage.filesystem_changed();
     }
 
-    fn external_fd(&self) -> Option<std::os::fd::RawFd> {
+    fn external_fd(&self) -> Option<crate::sys::RawFd> {
         self.usage.external_fd()
     }
 
@@ -272,7 +274,7 @@ fn draw_foot(screen: &mut Screen, [before, host, after]: [&str; 3]) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::fixture::Fixture;

@@ -480,7 +480,9 @@ impl Lang {
                 return end;
             }
         }
-        if self.toml_keys && let Some(end) = self.toml_key(b, indent) {
+        if self.toml_keys
+            && let Some(end) = self.toml_key(b, indent)
+        {
             emit((indent, end, Class::Key));
             return end;
         }
@@ -498,10 +500,8 @@ impl Lang {
                     string_end(b, at + 1, q)?
                 }
                 _ => {
-                    let len = b[at..]
-                        .iter()
-                        .take_while(|&&c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
-                        .count();
+                    let len =
+                        b[at..].iter().take_while(|&&c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')).count();
                     if len == 0 {
                         return None;
                     }

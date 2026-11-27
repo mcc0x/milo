@@ -16,8 +16,13 @@
 //! are off unless chosen, and Rex is asked about sessions only for the names
 //! that were.
 
+#![cfg_attr(windows, allow(dead_code))]
+
+#[cfg(unix)]
 mod discord;
+#[cfg(unix)]
 mod helper;
+#[cfg(unix)]
 mod label;
 
 use std::borrow::Cow;
@@ -85,6 +90,7 @@ pub(crate) const APPLICATION_HELP: &str = "Milo's own Discord application is use
 const BAD_APPLICATION: &str = "An application ID is the 17 to 19 digit number Discord calls Application ID.";
 const BAD_DETAILS: &str = "Details are one of: generic, session, project, both.";
 const UNREADABLE: &str = "Could not read Milo's Discord presence setting, so presence will not start and the file was left alone. milo doctor names the file.";
+const WINDOWS: &str = "Discord presence is not supported on Windows yet.";
 const UNSAVED: &str = "Could not save Milo's Discord presence setting.";
 const REVIEW: &str = "Discord presence was changed elsewhere, so nothing was changed here. Look at what it shows now.";
 const SYNTAX: &str = "expected milo presence [status] | enable [APPLICATION_ID | --official] [--details DETAILS] [--yes] | details DETAILS [--yes] | application official|APPLICATION_ID | disable";
@@ -339,6 +345,9 @@ pub(crate) struct Control {
 
 impl Control {
     pub(crate) fn real() -> Option<Self> {
+        if cfg!(windows) {
+            return None;
+        }
         Some(Self::at(paths::config_dir()?, paths::state_dir()?).starting_helper())
     }
 
@@ -366,6 +375,9 @@ impl Control {
     }
 
     pub(crate) fn status(&self) -> io::Result<Status> {
+        if cfg!(windows) {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
         let setting = self.setting()?;
         let noted = if !setting.enabled {
             None
@@ -389,6 +401,9 @@ impl Control {
     /// If another surface has saved a different one since, nothing changes: what they were
     /// told would become public is no longer what would.
     pub(crate) fn apply(&self, change: Change, reviewed: Setting) -> Result<String, &'static str> {
+        if cfg!(windows) {
+            return Err(WINDOWS);
+        }
         let path = self.file();
         let (saved, setting) = preferences::locked(&path, |dir| {
             let Ok(saved) = self.setting() else { return Ok(Err(UNREADABLE)) };
@@ -425,6 +440,9 @@ impl Control {
     /// helper is stopped even when the choice could not be read or saved: it
     /// will not start again from a choice Milo cannot read.
     pub(crate) fn disable(&self) -> Result<String, &'static str> {
+        if cfg!(windows) {
+            return Err(WINDOWS);
+        }
         let saved = self
             .setting()
             .map_err(|_| UNREADABLE)
@@ -487,21 +505,30 @@ impl Control {
         Some((phase, Some(names.trim().to_owned()).filter(|names| !names.is_empty())))
     }
 
+    #[cfg(unix)]
     fn note_phase(&self, phase: Phase, names: Option<&str>) {
         let _ = std::fs::write(self.state.join(PHASE_FILE), format!("{}\n{}", phase.word(), names.unwrap_or_default()));
     }
 
+    #[cfg(unix)]
     fn forget_phase(&self) {
         let _ = std::fs::remove_file(self.state.join(PHASE_FILE));
     }
 }
 
 /// Runs the helper for the internal command of that name.
+#[cfg(unix)]
 pub fn helper(args: &[OsString]) -> i32 {
     match args {
         [rex] => helper::run(rex),
         _ => 1,
     }
+}
+
+/// The presence helper does not run on Windows.
+#[cfg(windows)]
+pub fn helper(_: &[OsString]) -> i32 {
+    1
 }
 
 /// Turns presence off when Milo itself is removed, so that a later install starts with it off.
@@ -576,6 +603,9 @@ impl Request {
 
 /// Runs `milo presence` and returns its last line.
 pub fn command(request: Request) -> Result<String, String> {
+    if cfg!(windows) {
+        return Err(WINDOWS.into());
+    }
     let control = Control::real().ok_or("Could not find Milo's settings folders.")?;
     let saved = || control.setting().map_err(|_| UNREADABLE.to_owned());
     match request {
@@ -654,18 +684,22 @@ fn confirm(wanted: Setting, question: &str, left: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::fixture::Fixture;
 
     const OWN: u64 = 1_234_567_890_123_456_789;
 
+    #[cfg(unix)]
     fn control(f: &Fixture) -> Control {
         Control::at(f.root.join("config"), f.root.join("state"))
     }
 
+    #[cfg(unix)]
     fn saved(f: &Fixture) -> String {
         std::fs::read_to_string(f.root.join("config").join(FILE)).unwrap()
     }
 
+    #[cfg(unix)]
     impl Control {
         /// Applies a change as a surface that has just shown what is saved.
         fn change(&self, change: Change) -> Result<String, &'static str> {
@@ -673,6 +707,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn presence_is_off_until_enabled_and_then_uses_milos_application_with_no_names() {
         let f = Fixture::folder();
@@ -693,6 +728,7 @@ mod tests {
         assert_eq!(control.status().unwrap().state, State::Off);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_persons_own_application_and_details_are_kept_until_they_change_them() {
         let f = Fixture::folder();
@@ -724,6 +760,7 @@ mod tests {
         assert_eq!(control.setting().unwrap().application, None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_file_from_before_details_keeps_its_application_and_shows_no_names() {
         let f = Fixture::folder();
@@ -744,6 +781,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_setting_file_nobody_could_have_saved_is_an_error_and_never_turns_presence_on() {
         let f = Fixture::folder();
@@ -767,6 +805,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn what_becomes_public_names_exactly_what_each_choice_adds() {
         for own in [false, true] {
@@ -792,6 +831,7 @@ mod tests {
         assert!(!Details::Both.shows_more_than(Details::Both));
     }
 
+    #[cfg(unix)]
     #[test]
     fn status_repeats_the_names_only_while_they_are_shown() {
         let f = Fixture::folder();
@@ -885,5 +925,12 @@ mod tests {
         ] {
             assert!(parse(action, rest).is_err(), "{action:?} {rest:?}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn presence_is_unsupported_on_windows() {
+        assert_eq!(command(Request::Status), Err(WINDOWS.into()));
+        assert!(Control::real().is_none());
     }
 }

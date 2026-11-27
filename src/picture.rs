@@ -1,14 +1,16 @@
-//! Prepares checked PNG data for Kitty and, on macOS, a small RGB raster for
-//! terminals that can only show pictures as colored cells.
+//! Prepares checked PNG data for Kitty and, on macOS and Windows, a small RGB
+//! raster for terminals that can only show pictures as colored cells.
 //!
 //! User input is capped at 64 MiB, 40 million pixels and 16,384 pixels per
 //! side. Kitty gets a static PNG no larger than 1600 pixels per side or
-//! 16 MiB; the retained RGB raster is at most 512 pixels per side. On macOS
-//! the decoder and its preparation share a five-second deadline. On other
-//! platforms only already-sized PNGs can be shown, and only with Kitty graphics.
-//! Declared dimensions are checked before launching the decoder. While it
-//! runs, a sampled 384 MiB RSS watchdog can stop it; this is not a hard or
-//! aggregate memory cap.
+//! 16 MiB; the retained RGB raster is at most 512 pixels per side. The decoder
+//! and its preparation share a five-second deadline. On other platforms only
+//! already-sized PNGs can be shown, and only with Kitty graphics. Windows
+//! converts other pictures only to the raster, so Kitty shows them as cells.
+//! Declared dimensions are checked before launching the decoder. On macOS a
+//! sampled 384 MiB RSS watchdog can stop it while it runs; this is not a hard
+//! or aggregate memory cap. On Windows the decoder's job caps its committed
+//! memory at 384 MiB.
 //!
 //! SVG and PDF are not handed to a document renderer, and HEIC/HEIF and PSD
 //! are excluded because their containers can refer to external media.
@@ -26,6 +28,11 @@ mod headers;
 
 #[cfg(target_os = "macos")]
 mod sips;
+#[cfg(windows)]
+mod wic;
+
+#[cfg(windows)]
+pub use wic::{DECODER_COMMAND, command as decoder};
 
 /// Picture files larger than this are not opened.
 pub const FILE_LIMIT: u64 = 64 << 20;
@@ -38,6 +45,9 @@ const SOURCE_SIDE: u32 = 16_384;
 const SOURCE_PIXELS: u64 = 40_000_000;
 /// Bytes of encoded picture sent to the terminal at a time, as it asks.
 const CHUNK: usize = 4096;
+/// The terminal can't use every pixel in the Kitty PNG as a colored cell.
+#[cfg(any(target_os = "macos", windows))]
+const RASTER_SIDE: u32 = 512;
 
 /// File endings treated as possible pictures, not as permission to decode them.
 const ENDINGS: [&str; 15] =
@@ -58,11 +68,11 @@ pub struct Picture {
     pub width: u32,
     pub height: u32,
     pub id: u32,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     raster: Option<Raster>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 struct Raster {
     rgb: Vec<u8>,
     width: usize,
@@ -70,10 +80,12 @@ struct Raster {
 }
 
 struct Prepared {
+    /// A converted PNG for Kitty, or `None` to keep the checked original.
+    /// An empty one means there is no Kitty copy.
     png: Option<Vec<u8>>,
     width: u32,
     height: u32,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     raster: Raster,
 }
 
@@ -97,8 +109,10 @@ impl Refusal {
         match self {
             Self::TooLarge => "This image exceeds the preview size limit.",
             Self::Cancelled => "This image preview was cancelled.",
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(all(not(target_os = "macos"), not(windows)))]
             Self::UnsupportedPlatform => "Decoding this image requires macOS.",
+            #[cfg(windows)]
+            Self::UnsupportedPlatform => "WebP pictures are not supported on Windows yet.",
             Self::UnsupportedFormat => "This image format is not previewed.",
             Self::Unreadable => "This image could not be decoded.",
         }
@@ -139,12 +153,16 @@ impl Picture {
         let control = DecodeControl::new(cancel);
         Self::prepare(&bytes, &control)
             .and_then(|prepared| {
+                let png = match prepared.png {
+                    Some(png) if png.is_empty() => Cow::Borrowed(&[][..]),
+                    png => file_png(png.unwrap_or(bytes), &control)?,
+                };
                 Ok(Self {
-                    png: file_png(prepared.png.unwrap_or(bytes), &control)?,
+                    png,
                     width: prepared.width,
                     height: prepared.height,
                     id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", windows))]
                     raster: Some(prepared.raster),
                 })
             })
@@ -178,7 +196,13 @@ impl Picture {
         {
             sips::decode(bytes, format, original, control)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            let raster = wic::decode(bytes, format, size, control)?;
+            let png = if original.is_some() { None } else { Some(Vec::new()) };
+            Ok(Prepared { png, width: size.0, height: size.1, raster })
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let (width, height) = original.ok_or(Refusal::UnsupportedPlatform)?;
             Ok(Prepared { png: None, width, height })
@@ -188,14 +212,19 @@ impl Picture {
     /// Top-down, tightly packed RGB24 and its own width and height. Generated
     /// and embedded Kitty pictures, and platforms without a decoder, have none.
     pub fn raster(&self) -> Option<(&[u8], usize, usize)> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             self.raster.as_ref().map(|raster| (raster.rgb.as_slice(), raster.width, raster.height))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             None
         }
+    }
+
+    /// Whether there is PNG data for Kitty; Windows keeps only a raster of other pictures.
+    pub fn kitty(&self) -> bool {
+        !self.png.is_empty()
     }
 
     /// Opens a PNG built into milo without copying its bytes.
@@ -218,7 +247,7 @@ impl Picture {
             width,
             height,
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             raster: None,
         }
     }
@@ -267,7 +296,10 @@ impl Picture {
 }
 
 fn source_size((width, height): (u32, u32)) -> bool {
-    width != 0 && height != 0 && width.max(height) <= SOURCE_SIDE && u64::from(width) * u64::from(height) <= SOURCE_PIXELS
+    width != 0
+        && height != 0
+        && width.max(height) <= SOURCE_SIDE
+        && u64::from(width) * u64::from(height) <= SOURCE_PIXELS
 }
 
 /// Identify raster containers by their magic; the string is a fixed sips
@@ -295,6 +327,14 @@ fn raster_format(bytes: &[u8]) -> Result<&'static str, Refusal> {
         _ => return Err(Refusal::Unreadable),
     };
     Ok(format)
+}
+
+/// RGB24 has no alpha. Neutral gray is legible against terminals with either
+/// a light or a dark background.
+#[cfg(any(target_os = "macos", windows))]
+fn over_gray(color: [u8; 3], opacity: u8) -> [u8; 3] {
+    let opacity = u16::from(opacity);
+    color.map(|c| u8::try_from((u16::from(c) * opacity + 128 * (255 - opacity) + 127) / 255).unwrap())
 }
 
 fn le32(bytes: &[u8], at: usize) -> Option<u32> {
@@ -367,7 +407,7 @@ fn rendering_chunk(kind: &[u8]) -> bool {
 }
 
 /// Make a private PNG copy without metadata or extra frames.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn write_png_pixels(
     png: &[u8],
     control: &DecodeControl<'_>,
@@ -528,7 +568,8 @@ mod tests {
         }
         jpeg.extend_from_slice(b"\xff\xda\0\x08\x01\x01\0\0\x3f\0\x3f\xff\xd9");
         let gif = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;";
-        let webp = b"RIFF\x22\0\0\0WEBPVP8 \x16\0\0\0\x30\x01\0\x9d\x01\x2a\x01\0\x01\0\x0e\xc0\xfe\x25\xa4\0\x03\x70\0\0\0\0";
+        let webp =
+            b"RIFF\x22\0\0\0WEBPVP8 \x16\0\0\0\x30\x01\0\x9d\x01\x2a\x01\0\x01\0\x0e\xc0\xfe\x25\xa4\0\x03\x70\0\0\0\0";
         let png = Picture::sample_png(2, 3);
         for (data, name, size, shade) in [
             (png, "pixel.png", (2, 3), 0),
@@ -614,7 +655,48 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    #[test]
+    fn windows_decodes_png_jpeg_gif_and_bmp_to_cells_and_keeps_only_small_pngs_for_kitty() {
+        let jpeg = include_bytes!("../tests/rex_lab/river-dusk.jpg").to_vec();
+        let jpeg_size = headers::size(&jpeg, "jpeg", &DecodeControl::new(&AtomicBool::new(false))).unwrap();
+        let gif = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;";
+        let (width, height) = (LONGEST_SIDE * 2, 40_u32);
+        let pixels = width * height * 3;
+        let mut bmp = vec![0; usize::try_from(54 + pixels).unwrap()];
+        bmp[..2].copy_from_slice(b"BM");
+        for (at, value) in [(2, 54 + pixels), (10, 54), (14, 40), (18, width), (22, height), (34, pixels)] {
+            bmp[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bmp[26..30].copy_from_slice(&[1, 0, 24, 0]);
+        let scaled = |(w, h): (u32, u32)| {
+            let longest = w.max(h).max(RASTER_SIDE);
+            ((w * RASTER_SIDE).div_ceil(longest) as usize, (h * RASTER_SIDE).div_ceil(longest) as usize)
+        };
+        for (data, name, size, kitty) in [
+            (Picture::sample_png(2, 3), "pixel.png", (2, 3), true),
+            (jpeg, "dusk.jpg", jpeg_size, false),
+            (gif.to_vec(), "pixel.gif", (1, 1), false),
+            (bmp, "wide.bmp", (width, height), false),
+        ] {
+            let picture = Picture::decode(data).unwrap();
+            assert_eq!((picture.width, picture.height), size, "{name}");
+            assert_eq!(picture.kitty(), kitty, "{name}");
+            let (rgb, w, h) = picture.raster().unwrap();
+            let (expected_w, expected_h) = scaled(size);
+            assert!(w.abs_diff(expected_w) <= 1 && h.abs_diff(expected_h) <= 1, "{name}: {w}×{h}");
+            assert!(w.max(h) <= RASTER_SIDE as usize, "{name}");
+            assert_eq!(rgb.len(), w * h * 3, "{name}");
+        }
+        let webp =
+            b"RIFF\x22\0\0\0WEBPVP8 \x16\0\0\0\x30\x01\0\x9d\x01\x2a\x01\0\x01\0\x0e\xc0\xfe\x25\xa4\0\x03\x70\0\0\0\0";
+        assert_eq!(
+            Picture::decode(webp.to_vec()).err().unwrap().note,
+            "WebP pictures are not supported on Windows yet."
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
     #[test]
     fn without_a_system_decoder_static_png_is_still_available_for_kitty() {
         let picture = Picture::decode(Picture::sample_png(2, 3)).unwrap();

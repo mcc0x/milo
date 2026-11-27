@@ -13,11 +13,11 @@ mod sqlite;
 mod status;
 pub(crate) mod time;
 
+use crate::sys::RawFd;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::ops::ControlFlow;
-use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -984,6 +984,8 @@ pub struct Usage {
     large_figures: bool,
     tools: UsageTools,
     preference_note: Option<&'static str>,
+    /// Whether the last look found OMP or OpenCode using its database, which Windows leaves unread.
+    databases_in_use: bool,
     #[cfg(test)]
     fixed_now: Option<i64>,
     #[cfg(test)]
@@ -999,7 +1001,12 @@ impl Usage {
             .with_large_figures(prefs.usage_large_figures);
         let (omp, opencode) = (omp::database(home.as_deref()), opencode::database(home.as_deref()));
         let mut usage = usage.with_databases(omp, opencode, sqlite::QUERY_WAIT);
-        usage.preference_note = note;
+        #[cfg(windows)]
+        let large = [usage.omp.path(), usage.opencode.poll.path()].into_iter().flatten().any(sqlite::too_large);
+        #[cfg(unix)]
+        let large = false;
+        usage.preference_note =
+            if large { Some("OMP and OpenCode databases over 64 MiB are not read on Windows yet.") } else { note };
         usage.accounts = accounts::Accounts::open(prefs.usage_accounts);
         usage
     }
@@ -1054,11 +1061,8 @@ impl Usage {
 
     fn for_home(home: Option<&Path>, now: i64, tools: UsageTools) -> Self {
         let codex = (tools[UsageTool::Codex] != Show::Hide).then(|| codex_sessions(home)).flatten();
-        let (claude, config, state) = if tools[UsageTool::Claude] == Show::Hide {
-            (None, None, None)
-        } else {
-            claude_sources()
-        };
+        let (claude, config, state) =
+            if tools[UsageTool::Claude] == Show::Hide { (None, None, None) } else { claude_sources() };
         let mut usage = Self::from_dirs(codex, claude, state, now);
         usage.claude_config = config;
         usage.showing(tools)
@@ -1080,6 +1084,7 @@ impl Usage {
             large_figures: false,
             tools: UsageTools::default(),
             preference_note: None,
+            databases_in_use: false,
             #[cfg(test)]
             fixed_now: Some(now),
             #[cfg(test)]
@@ -1114,6 +1119,11 @@ impl Usage {
             self.opencode.poll.start(now, clock);
         }
         self.accounts.start(now, clock, manual);
+        #[cfg(windows)]
+        {
+            self.databases_in_use =
+                [self.omp.path(), self.opencode.poll.path()].into_iter().flatten().any(sqlite::in_use);
+        }
         let mut codex_budget = Budget::new(CODEX_BYTES);
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
         self.check_limits(&mut claude_budget);
@@ -1177,10 +1187,23 @@ pub fn doctor(tools: UsageTools, chosen: UsageAccounts) -> Vec<String> {
     lines
 }
 
+/// Why Windows leaves a tool's database unread, from its files' names and size alone.
+#[cfg(windows)]
+fn database_note(tool: &str, path: &Path) -> Option<String> {
+    if sqlite::too_large(path) {
+        return Some(format!("{tool} database: over 64 MiB, so it is not read on Windows yet ({path:?})"));
+    }
+    sqlite::in_use(path)
+        .then(|| format!("{tool} database: in use, so it is read only while {tool} is closed ({path:?})"))
+}
+
 impl Usage {
     fn doctor(mut self, omp: Option<PathBuf>, opencode: Option<PathBuf>, wait: Duration) -> Vec<String> {
         let (now, clock) = (self.now(), Instant::now());
-        let saved = omp.filter(|_| self.reads_omp()).and_then(|path| omp::read(&path, now, wait));
+        let omp = omp.filter(|_| self.reads_omp());
+        #[cfg(windows)]
+        let omp_note = omp.as_deref().and_then(|path| database_note("OMP", path));
+        let saved = omp.and_then(|path| omp::read(&path, now, wait));
         if let Some(reports) = saved {
             self.keep(reports);
         }
@@ -1190,9 +1213,14 @@ impl Usage {
         self.claude.check(self.claude_dir.as_deref(), cutoff, clock, true, &mut Budget::new(0));
         let codex = self.codex.reported(now);
         let claude = self.claude.reported(now);
+        let claude_step = if cfg!(windows) {
+            "turn on Show Claude Code limits in milo web"
+        } else {
+            "turn on Show Claude Code limits in milo setup"
+        };
         let limits = [
             (UsageTool::Codex, self.codex.presence(codex), codex, "run Codex to save one"),
-            (UsageTool::Claude, self.claude.presence(claude), claude, "turn on Show Claude Code limits in milo setup"),
+            (UsageTool::Claude, self.claude.presence(claude), claude, claude_step),
         ];
         let mut lines = Vec::new();
         for (tool, presence, reported, step) in limits {
@@ -1204,11 +1232,15 @@ impl Usage {
                 });
             }
         }
+        #[cfg(windows)]
+        lines.extend(omp_note);
         let show = self.tools[UsageTool::OpenCode];
         if show != Show::Hide {
             let report = opencode.as_deref().map_or(opencode::Report::Missing, |path| opencode::read(path, now, wait));
             if show == Show::Always || report != opencode::Report::Missing {
                 lines.extend(report.describe(opencode.as_deref(), now));
+                #[cfg(windows)]
+                lines.extend(opencode.as_deref().and_then(|path| database_note("OpenCode", path)));
             }
         }
         if lines.is_empty() && UsageTool::ALL.into_iter().any(|tool| self.tools[tool] != Show::Hide) {
@@ -1220,7 +1252,9 @@ impl Usage {
 
 impl Pane for Usage {
     fn notice(&self) -> Option<&'static str> {
-        self.preference_note
+        self.preference_note.or(self
+            .databases_in_use
+            .then_some("On Windows, OMP and OpenCode usage is read only while they are closed."))
     }
 
     fn check(&mut self) -> bool {
@@ -1380,5 +1414,7 @@ pub fn claude_status() -> i32 {
     status::run_fd(io::stdin(), io::stdout().lock(), target, when::now(), status::INPUT_WAIT)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, windows))]
+mod windows_tests;

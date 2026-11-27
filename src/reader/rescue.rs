@@ -6,6 +6,7 @@
 
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Read as _, Write as _};
+#[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -39,7 +40,12 @@ pub(super) fn state_dir() -> Option<PathBuf> {
 /// A private folder under the state folder, made if it is missing.
 pub(super) fn private_dir(state: &Path, name: &str) -> io::Result<PathBuf> {
     let dir = state.join(name);
-    DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+    let mut builder = DirBuilder::new();
+    builder.recursive(true);
+    // On Windows the folder takes the access list of the user's profile folder it is created in.
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(&dir)?;
     // Refuse a link left where the folder should be.
     fs_ops::open_dir(&dir)?;
     Ok(dir)
@@ -237,15 +243,14 @@ impl Drop for Mark {
 pub(crate) fn block_has_draft(state: &Path, block: &str) -> bool {
     let path = mark_path(state, block);
     let Some(pid) = read_pid(&path) else { return false };
-    // SAFETY: Signal 0 only asks whether the process exists; nothing is sent.
-    let alive = unsafe { libc::kill(pid, 0) } == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    let alive = crate::sys::process_alive(pid);
     if !alive {
         let _ = fs::remove_file(path);
     }
     alive
 }
 
-fn read_pid(path: &Path) -> Option<libc::pid_t> {
+fn read_pid(path: &Path) -> Option<u32> {
     let mut text = String::new();
     File::open(path).ok()?.take(16).read_to_string(&mut text).ok()?;
     text.trim().parse().ok().filter(|&pid| pid > 0)
@@ -258,6 +263,7 @@ mod tests {
 
     #[test]
     fn a_kept_draft_is_private_and_found_only_for_its_own_file() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt as _;
 
         let f = Fixture::folder();
@@ -275,7 +281,9 @@ mod tests {
         assert_eq!(draft.read().as_deref(), Some("kept é\r\n"));
         // A draft from before bases were recorded is known to be written over nothing.
         assert!(!draft.written_over("its file"));
+        #[cfg(unix)]
         assert_eq!(fs::metadata(&draft.path).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
         assert_eq!(fs::metadata(state.join("drafts")).unwrap().permissions().mode() & 0o777, 0o700);
         assert!(Drafts::new(state, f.root.join("b.txt")).first().is_none());
         // Saving a successor to the restored copy removes only its predecessor.

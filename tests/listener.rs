@@ -4,6 +4,8 @@
 //! real processes can show that it works: one listener at a time, stopped
 //! on request, and never confused with a program the listener left behind.
 
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;

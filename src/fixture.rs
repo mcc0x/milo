@@ -14,7 +14,7 @@ impl Fixture {
     /// Creates an empty directory, without a repository.
     pub fn folder() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let temp = crate::sys::canonicalize(&std::env::temp_dir()).unwrap();
         let home = loop {
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
             let path = temp.join(format!("milo-test-{}-{n}", std::process::id()));

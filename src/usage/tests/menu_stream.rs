@@ -44,7 +44,9 @@ fn menu_stream_limit_values_freshness_and_elapsed_state_match_the_pane() {
     });
     let line = snapshot(&mut usage);
     let [codex, claude]: [Value<'_>; 2] = providers(&line).collect::<Vec<_>>().try_into().ok().unwrap();
-    for (provider, (id, label, digits)) in [codex, claude].into_iter().zip([("codex", "week", 77), ("claude", "5h", 39)]) {
+    for (provider, (id, label, digits)) in
+        [codex, claude].into_iter().zip([("codex", "week", 77), ("claude", "5h", 39)])
+    {
         let window = window(provider, 0);
         assert!(field(provider, "id").is(id));
         assert!(field(window, "label").is(label));
@@ -55,11 +57,9 @@ fn menu_stream_limit_values_freshness_and_elapsed_state_match_the_pane() {
     let rail = frame(&mut usage, 76, 2).join("\n");
     assert!(rail.contains("77%") && rail.contains("39%"), "{rail}");
 
-    for (at, expected) in [
-        (NOW + 5 * MINUTE - 1, [true, true]),
-        (NOW + 5 * MINUTE, [false, true]),
-        (NOW + 10 * MINUTE, [false, false]),
-    ] {
+    for (at, expected) in
+        [(NOW + 5 * MINUTE - 1, [true, true]), (NOW + 5 * MINUTE, [false, true]), (NOW + 10 * MINUTE, [false, false])]
+    {
         usage.fixed_now = Some(at);
         let line = snapshot(&mut usage);
         let actual = providers(&line).map(|provider| field(window(provider, 0), "fresh").boolean().unwrap());
@@ -86,10 +86,9 @@ fn missing_historical_and_exhausted_limits_are_distinct_in_both_surfaces() {
     let mut usage = open(&f, NOW + 5 * MINUTE - 1);
     let expected_blank = "Claude no saved limits";
 
-    for (now, shown, fresh) in [
-        (NOW + 5 * MINUTE - 1, "Codex week · 0% left", true),
-        (NOW + 5 * MINUTE, "Codex week · 0% last", false),
-    ] {
+    for (now, shown, fresh) in
+        [(NOW + 5 * MINUTE - 1, "Codex week · 0% left", true), (NOW + 5 * MINUTE, "Codex week · 0% last", false)]
+    {
         usage.fixed_now = Some(now);
         assert_eq!(frame(&mut usage, 22, 2), [shown, expected_blank]);
         let line = snapshot(&mut usage);
@@ -126,11 +125,9 @@ fn enabled_providers_keep_their_specific_reasons_without_more_rows() {
     assert!(!rows.join("\n").contains('%'));
 
     let line = snapshot(&mut usage);
-    for (provider, expected) in providers(&line).zip([
-        "No limits to show",
-        "No usable saved limits",
-        "Database format not checked",
-    ]) {
+    for (provider, expected) in
+        providers(&line).zip(["No limits to show", "No usable saved limits", "Database format not checked"])
+    {
         assert!(field(provider, "windows").elements().unwrap().next().is_none());
         assert!(field(provider, "detail").is(expected));
     }

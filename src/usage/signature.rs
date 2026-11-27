@@ -4,6 +4,7 @@
 
 use std::fs::File;
 use std::io::{self, Read};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
@@ -43,13 +44,16 @@ impl Mark {
                 Err(_) => return None,
             }
         }
-        Some(Self {
-            device: info.dev(),
-            inode: info.ino(),
-            size: info.size(),
-            modified: (info.mtime(), info.mtime_nsec()),
-            head,
-        })
+        #[cfg(unix)]
+        let (device, inode, modified) = (info.dev(), info.ino(), (info.mtime(), info.mtime_nsec()));
+        #[cfg(windows)]
+        let (device, inode) = crate::sys::identity(&file).ok()?;
+        #[cfg(windows)]
+        let modified = {
+            let since = info.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+            (i64::try_from(since.as_secs()).ok()?, i64::from(since.subsec_nanos()))
+        };
+        Some(Self { device, inode, size: info.len(), modified, head })
     }
 }
 

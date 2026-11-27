@@ -1,9 +1,13 @@
-use std::fs::{self, Permissions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::Permissions;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::path::PathBuf;
 
 use super::*;
 use crate::fixture::Fixture;
+#[cfg(unix)]
 use crate::git::CommitId;
 use crate::native::tests::with_fake;
 
@@ -128,6 +132,8 @@ fn leaving_unsaved_edits_asks_and_discarding_leaves_the_file_alone() {
     assert_eq!(drawn(&mut reader, 60, 4)[1], " 1   one");
     let after = fs::metadata(&file).unwrap();
     assert_eq!(fs::read_to_string(&file).unwrap(), "one\n");
+    assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+    #[cfg(unix)]
     assert_eq!((before.mtime(), before.mtime_nsec(), before.ino()), (after.mtime(), after.mtime_nsec(), after.ino()));
     // A draft given up is not kept.
     assert!(!state(&f).exists());
@@ -391,9 +397,11 @@ fn a_save_keeps_every_byte_it_did_not_edit() {
     let before = "\u{feff}first\r\nsecond\n\tthird \u{e9}\rstill third\r\n\r\nlast";
     let file = f.root.join("mixed.txt");
     fs::write(&file, before).unwrap();
+    #[cfg(unix)]
     fs::set_permissions(&file, Permissions::from_mode(0o750)).unwrap();
     let linked = f.root.join("linked.txt");
     fs::hard_link(&file, &linked).unwrap();
+    #[cfg(unix)]
     let inode = fs::metadata(&file).unwrap().ino();
 
     let mut reader = editing(&f, "mixed.txt");
@@ -410,9 +418,12 @@ fn a_save_keeps_every_byte_it_did_not_edit() {
     let after = "\u{feff}first\r\nsecond\r\nnew\n\tthird \u{e9}\rstill third\r\n\r\nlast";
     assert_eq!(fs::read(&file).unwrap(), after.as_bytes());
 
+    #[cfg(unix)]
     let metadata = fs::metadata(&file).unwrap();
+    #[cfg(unix)]
     assert_eq!(metadata.permissions().mode() & 0o7777, 0o750);
     // The same file was written, so its other name still reads the same text.
+    #[cfg(unix)]
     assert_eq!(metadata.ino(), inode);
     assert_eq!(fs::read(&linked).unwrap(), after.as_bytes());
 
@@ -435,6 +446,7 @@ fn a_shorter_draft_does_not_leave_the_old_end_of_the_file() {
     assert_eq!(fs::read_to_string(f.root.join("notes.txt")).unwrap(), "second\n");
 }
 
+#[cfg(unix)]
 #[test]
 fn commits_links_and_files_that_are_not_text_stay_read_only() {
     let f = Fixture::new();
@@ -483,6 +495,7 @@ fn commits_links_and_files_that_are_not_text_stay_read_only() {
     assert!(!f.root.join("page.txt").exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_file_without_write_permission_says_so_when_asked() {
     let f = Fixture::folder();
@@ -498,6 +511,7 @@ fn a_file_without_write_permission_says_so_when_asked() {
     assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o444);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_save_does_not_follow_a_link_put_in_the_way() {
     let f = Fixture::folder();
@@ -923,6 +937,7 @@ fn format(reader: &mut Reader) -> (String, String) {
     (announced, drawn(reader, 60, 5)[4].clone())
 }
 
+#[cfg(unix)]
 #[test]
 fn formatting_changes_the_draft_and_undo_takes_it_back_before_anything_is_saved() {
     use crate::format::tests::stand_in;
@@ -968,6 +983,7 @@ fn formatting_changes_the_draft_and_undo_takes_it_back_before_anything_is_saved(
     assert_eq!(fs::read_to_string(&file).unwrap(), "FN MAIN() {}\nLET X = 1;\n");
 }
 
+#[cfg(unix)]
 #[test]
 fn redoing_a_format_keeps_typing_at_the_formatted_cursor() {
     let f = Fixture::folder();
@@ -984,6 +1000,7 @@ fn redoing_a_format_keeps_typing_at_the_formatted_cursor() {
     assert_eq!(draft(&reader), "package main\né!\nlast\n");
 }
 
+#[cfg(unix)]
 #[test]
 fn formatted_text_can_be_discarded_with_the_draft() {
     use crate::format::tests::stand_in;
@@ -1003,6 +1020,7 @@ fn formatted_text_can_be_discarded_with_the_draft() {
     assert_eq!(drawn(&mut reader, 60, 5)[1], " 1   package main");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_formatter_that_fails_leaves_the_draft_and_the_file_as_they_were() {
     use crate::format::tests::stand_in;
@@ -1030,6 +1048,7 @@ fn a_formatter_that_fails_leaves_the_draft_and_the_file_as_they_were() {
     assert!(!reader.editor.as_ref().unwrap().dirty());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_missing_or_unknown_formatter_is_explained_and_nothing_is_started() {
     use crate::format::tests::stand_in;
@@ -1069,6 +1088,7 @@ fn a_missing_or_unknown_formatter_is_explained_and_nothing_is_started() {
     reader.help().assert_rows_fit(26);
 }
 
+#[cfg(unix)]
 #[test]
 fn formatting_keeps_the_line_endings_and_byte_order_mark_of_the_file() {
     use crate::format::tests::stand_in;
@@ -1086,6 +1106,7 @@ fn formatting_keeps_the_line_endings_and_byte_order_mark_of_the_file() {
     assert_eq!(fs::read_to_string(&file).unwrap(), "\u{feff}package main\r\n\r\nvar x\r\n");
 }
 
+#[cfg(unix)]
 #[test]
 fn keys_typed_after_asking_for_formatting_act_on_the_formatted_text() {
     use crate::format::tests::stand_in;
@@ -1120,6 +1141,7 @@ fn keys_typed_after_asking_for_formatting_act_on_the_formatted_text() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn what_a_slow_formatter_did_stays_on_screen_after_it_ends() {
     use crate::format::tests::stand_in;
@@ -1137,6 +1159,7 @@ fn what_a_slow_formatter_did_stays_on_screen_after_it_ends() {
     assert!(asked.elapsed() + left > Duration::from_millis(4900), "{left:?}");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_file_that_cannot_be_written_does_not_offer_editing() {
     let f = Fixture::folder();
@@ -1459,6 +1482,7 @@ fn rekeeping_an_unconfirmed_draft_preserves_its_source_encoding() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_format_is_undone_in_a_file_with_a_lone_carriage_return() {
     use crate::format::tests::stand_in;

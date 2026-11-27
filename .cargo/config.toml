@@ -1,0 +1,3 @@
+# Windows has no Visual C++ runtime until someone installs it, so Milo carries its own.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

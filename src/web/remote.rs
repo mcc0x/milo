@@ -6,10 +6,10 @@
 //! before it starts and accepts no other, so the page, its origin and its
 //! session key are checked exactly as they are for a local editor.
 
+use crate::sys::AsRawFd;
 use std::ffi::OsStr;
 use std::io::{self, PipeReader, Read, Write as _};
 use std::net::{Ipv4Addr, TcpListener};
-use std::os::fd::AsRawFd;
 use std::process::Child;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -119,7 +119,7 @@ fn local_port(wanted: u16) -> Result<u16, String> {
 
 /// Waits without missing a signal: the wake pipe closes when one arrives.
 fn pause(wake: &PipeReader, wait: Duration) -> bool {
-    let mut fds = [libc::pollfd { fd: wake.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+    let mut fds = [crate::sys::pollfd { fd: wake.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 }];
     crate::term::wait_ready(&mut fds, crate::term::milliseconds(wait));
     !STOP.load(Ordering::Relaxed)
 }
@@ -129,8 +129,8 @@ fn pause(wake: &PipeReader, wait: Duration) -> bool {
 fn wait_forward(output: &mut (impl Read + AsRawFd), wake: &PipeReader, port: u16) -> io::Result<bool> {
     let deadline = Instant::now() + FORWARD_WAIT;
     let mut fds = [
-        libc::pollfd { fd: wake.as_raw_fd(), events: libc::POLLIN, revents: 0 },
-        libc::pollfd { fd: output.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+        crate::sys::pollfd { fd: wake.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 },
+        crate::sys::pollfd { fd: output.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 },
     ];
     let mut line = [0; 128];
     let mut filled = 0;

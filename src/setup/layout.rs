@@ -690,7 +690,8 @@ mod tests {
         let executable = Path::new("/fixture/bin/milo");
         let old = Layout { new_tabs: true, ..Layout::default() };
         let draft = Layout::default();
-        let text = rex_lua(&old, executable, environment()).replace("-- Terminal rows", "-- My comment\n-- Terminal rows");
+        let text =
+            rex_lua(&old, executable, environment()).replace("-- Terminal rows", "-- My comment\n-- Terminal rows");
         let updated = update_actions(&text, &draft, executable, environment()).unwrap().unwrap();
         assert!(Layout::parse(&updated).is_some_and(|layout| layout == draft));
         assert!(updated.contains("-- My comment\n"));

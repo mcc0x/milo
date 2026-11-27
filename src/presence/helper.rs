@@ -6,8 +6,8 @@
 //! before looking for a missing Discord again, and that runs only while a
 //! Rex app has a session open.
 
+use crate::sys::AsRawFd as _;
 use std::ffi::OsStr;
-use std::os::fd::AsRawFd as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -107,8 +107,11 @@ impl Helper<'_> {
                 _ => -1,
             };
             let discord = self.connection.as_ref().map_or(-1, Connection::fd);
-            let mut fds =
-                [stop, observer.fd(), discord].map(|fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
+            let mut fds = [stop, observer.fd(), discord].map(|fd| crate::sys::pollfd {
+                fd,
+                events: crate::sys::POLLIN,
+                revents: 0,
+            });
             if term::wait_ready(&mut fds, wait) <= 0 {
                 // A timeout, or a signal that the loop condition sees.
                 continue;

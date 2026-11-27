@@ -30,13 +30,15 @@ fn recent_chats(answer: &[u8]) -> Option<Vec<(i64, String)>> {
         let [chat, new_member] = event.fields(["chat", "new_chat_member"]);
         let Some(chat) = chat else { continue };
         let Some(id) = chat.fields(["id"])[0].and_then(Value::integer).filter(|&id| id != 0) else { continue };
-        let removed = membership.is_some() && new_member.is_some_and(|member| {
-            let [status, is_member] = member.fields(["status", "is_member"]);
-            status.is_some_and(|status| {
-                status.is("left") || status.is("kicked")
-                    || (status.is("restricted") && is_member.and_then(Value::boolean) == Some(false))
-            })
-        });
+        let removed = membership.is_some()
+            && new_member.is_some_and(|member| {
+                let [status, is_member] = member.fields(["status", "is_member"]);
+                status.is_some_and(|status| {
+                    status.is("left")
+                        || status.is("kicked")
+                        || (status.is("restricted") && is_member.and_then(Value::boolean) == Some(false))
+                })
+            });
         if removed {
             chats.remove(&id);
         } else {
@@ -80,8 +82,14 @@ mod tests {
         ]}"#;
         assert_eq!(
             recent_chats(answer).unwrap(),
-            [(-1001234567890, "Milo \"News\""), (-99, "-99"), (-27, "Team"), (-19, "@milo_group"), (42, "Ada Lovelace")]
-                .map(|(id, title)| (id, title.to_owned()))
+            [
+                (-1001234567890, "Milo \"News\""),
+                (-99, "-99"),
+                (-27, "Team"),
+                (-19, "@milo_group"),
+                (42, "Ada Lovelace")
+            ]
+            .map(|(id, title)| (id, title.to_owned()))
         );
     }
 

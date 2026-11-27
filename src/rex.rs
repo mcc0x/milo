@@ -1,23 +1,45 @@
 //! Calls Rex for floating readers, Markdown previews, setup, and the new-tab listener.
 
 mod attention;
+#[cfg(unix)]
 mod preview;
 mod server;
 pub(crate) mod task;
 
+#[cfg_attr(windows, allow(unused_imports))]
 pub(crate) use attention::{AttentionWatch, jump};
+#[cfg(unix)]
+use preview::anchor_argument;
+#[cfg(unix)]
 pub(crate) use preview::{available as preview_available, launch as preview, preview_anchor};
+
+/// Markdown preview needs a Rex pane, and Milo's Rex integration is not ported to Windows yet.
+#[cfg(windows)]
+pub(crate) fn preview_available(_root: &Path) -> bool {
+    false
+}
+
+#[cfg(windows)]
+pub(crate) fn preview(_root: &Path, _tool: &Path, _file: &Path) -> Result<(), &'static str> {
+    Err("Markdown preview is not supported on Windows yet; it needs a Rex pane")
+}
+
+#[cfg(windows)]
+pub(crate) fn preview_anchor(_anchor: &OsStr) {}
+
+#[cfg(windows)]
+fn anchor_argument() -> Option<&'static str> {
+    None
+}
 
 #[cfg(target_os = "macos")]
 pub(crate) use server::native_app;
+#[cfg_attr(windows, allow(unused_imports))]
 pub(crate) use server::{CommandVersion, RemoteEditor, Server, Viewers, command_version, server, viewers};
 
+use crate::sys::{AsRawFd, RawFd};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal as _, Read as _, Write as _};
-use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::ffi::OsStringExt as _;
-use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc;
@@ -25,6 +47,9 @@ use std::time::{Duration, Instant};
 
 use crate::{fs_ops, term};
 
+/// Milo's Rex integration is not ported to Windows, where a bare `rex` is also looked for beside
+/// milo.exe, so no Rex command is run there.
+const ASKS_REX: bool = cfg!(unix);
 const PROBE_WAIT: Duration = Duration::from_secs(3);
 /// How long a script or a settings command may take before it is ended. Rex allows each
 /// request three seconds; a script makes several.
@@ -34,6 +59,9 @@ const PIPE_GRACE: Duration = Duration::from_millis(200);
 
 /// Inspect the server catalog, not the foreground app. Doctor must not start a server.
 pub(crate) fn layout_available() -> Option<bool> {
+    if !ASKS_REX {
+        return None;
+    }
     let mut command = Command::new("rex");
     command.args(["--autostart=false", "--timeout", "3s", "actions", "--json"]).env_remove("REX_CLIENT");
     let output = probe_output(&mut command, PROBE_WAIT)?;
@@ -103,6 +131,9 @@ pub(crate) fn script(
     lua: &str,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
 ) -> Option<String> {
+    if !ASKS_REX {
+        return None;
+    }
     let mut command = Command::new("rex");
     command.args(["--autostart=false", "--timeout", "3s", "do", "-", "-s"]).arg(session);
     if let Some(target) = target {
@@ -121,6 +152,9 @@ fn scripted(command: &mut Command, lua: &str, wait: Duration) -> Option<String> 
 /// Doctor's read-only script has a local deadline as well as Rex's request
 /// timeout. Passing Lua as an argument keeps stdin from blocking the probe.
 pub(crate) fn diagnostic_script(target: &Target, lua: &str, caller: &str) -> Option<String> {
+    if !ASKS_REX {
+        return None;
+    }
     let mut command = Command::new("rex");
     command
         .args(["--autostart=false", "--timeout", "3s", "do", "-e", lua, "-s"])
@@ -153,7 +187,7 @@ fn output_within(command: &mut Command, input: Option<&str>, wait: Duration) -> 
     });
     let result = (|| {
         let mut stdout = child.stdout.take()?;
-        let mut poll = [libc::pollfd { fd: stdout.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        let mut poll = [crate::sys::pollfd { fd: stdout.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 }];
         let mut output = Vec::new();
         let mut chunk = [0; 8192];
         loop {
@@ -195,6 +229,9 @@ fn output_within(command: &mut Command, input: Option<&str>, wait: Duration) -> 
 
 /// Setup reports its own messages, not process output that can contain paths or settings.
 pub fn run(args: &[&OsStr]) -> bool {
+    if !ASKS_REX {
+        return false;
+    }
     let mut command = Command::new("rex");
     command.stdout(Stdio::null()).stderr(Stdio::null());
     if let [config, check, path] = args
@@ -232,7 +269,10 @@ fn finished(command: &mut Command, wait: Duration) -> bool {
 ///
 /// The Rex server starts the listener with a short system path that leaves
 /// `rex` out, so when it is not found by name, the server's own program is used.
+#[cfg(unix)]
 pub fn exec_listener(script: &Path) -> io::Error {
+    use std::os::unix::process::CommandExt as _;
+
     let listen = |rex: &OsStr| {
         Command::new(rex).arg("do").arg(script).arg("--all").stdin(Stdio::null()).stdout(Stdio::null()).exec()
     };
@@ -245,6 +285,12 @@ pub fn exec_listener(script: &Path) -> io::Error {
     }
 }
 
+/// Windows cannot replace a process, and Rex does not run there.
+#[cfg(windows)]
+pub fn exec_listener(_script: &Path) -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "The Rex listener is not supported on Windows")
+}
+
 /// The local endpoint and host of one alert subscription. A socket replaced
 /// after Rex restarts must not resolve labels for events from the old stream.
 pub(crate) struct AlertServer {
@@ -255,6 +301,9 @@ pub(crate) struct AlertServer {
 
 impl AlertServer {
     fn local(selected: &str) -> Option<Self> {
+        if !ASKS_REX {
+            return None;
+        }
         let socket = if selected == "localhost" { None } else { Some(socket_identity(selected)?) };
         let reply = probe_output(
             alert_command(Some(selected)).args(["--timeout", "400ms", "whoami", "--json"]),
@@ -295,9 +344,17 @@ fn socket_path(endpoint: &str) -> Option<&Path> {
     (path.starts_with('/') && !path.bytes().any(|byte| byte.is_ascii_control())).then(|| Path::new(path))
 }
 
+#[cfg(unix)]
 fn socket_identity(endpoint: &str) -> Option<(u64, u64)> {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+
     let meta = std::fs::metadata(socket_path(endpoint)?).ok()?;
     meta.file_type().is_socket().then(|| (meta.dev(), meta.ino()))
+}
+
+#[cfg(windows)]
+fn socket_identity(_endpoint: &str) -> Option<(u64, u64)> {
+    None
 }
 
 fn alert_command(endpoint: Option<&str>) -> Command {
@@ -385,6 +442,9 @@ impl AlertSource {
     /// Starts the event stream without starting Rex. An explicitly selected
     /// local socket must not fall back to another server when it disappears.
     pub(crate) fn events(&self) -> io::Result<Child> {
+        if !ASKS_REX {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
         if !self.is_current() {
             return Err(io::ErrorKind::NotConnected.into());
         }
@@ -429,11 +489,16 @@ fn parent_program() -> Option<std::path::PathBuf> {
 }
 
 /// The program that started milo, if the system will say.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn parent_program() -> Option<std::path::PathBuf> {
     // SAFETY: Asking for the parent's ID touches no memory.
     let parent = unsafe { libc::getppid() };
     std::fs::read_link(format!("/proc/{parent}/exe")).ok()
+}
+
+#[cfg(windows)]
+fn parent_program() -> Option<std::path::PathBuf> {
+    None
 }
 
 /// A string as a JSON literal.
@@ -495,7 +560,7 @@ pub fn open(root: &Path, file: &Path, commit: Option<&str>, previous: Option<&st
     let target = Target::current().ok_or("Reading a file needs a Rex pane.")?;
     let exe = std::env::current_exe().map_err(|_| "Rex did not open the file.")?;
     let name = file.file_name().unwrap_or_default().to_string_lossy();
-    let origin = preview::anchor_argument().unwrap_or_default();
+    let origin = anchor_argument().unwrap_or_default();
     float(&target, root, &name, &reader_command(&exe, file, commit), previous, Some(origin))
         .ok_or("Rex did not open the file.")
 }
@@ -597,6 +662,9 @@ pub struct ShellNews {
 
 impl ShellObserver {
     pub fn start(anchor: &OsStr) -> Option<Self> {
+        if !ASKS_REX {
+            return None;
+        }
         let target = Target::current()?;
         let anchor = exact_block(anchor)?;
         let pane = exact_block(&target.block)?;
@@ -612,9 +680,8 @@ impl ShellObserver {
             .ok()?;
         let output = child.stdout.take().expect("observer stdout was piped");
         let observer = Self { child, output, frame: Frame::default() };
-        // SAFETY: The file descriptor is an open, privately owned pipe read end.
-        let nonblocking = unsafe { libc::fcntl(observer.fd(), libc::F_SETFL, libc::O_NONBLOCK) };
-        (nonblocking == 0).then_some(observer)
+        crate::sys::set_nonblocking(observer.fd()).ok()?;
+        Some(observer)
     }
 
     pub fn fd(&self) -> RawFd {
@@ -673,6 +740,9 @@ impl AppObserver {
     /// `rex` is the program to run, since the Rex server's own path leaves it out.
     /// With no `parts`, the script asks Rex for nothing but its connected apps.
     pub fn start(rex: &OsStr, parts: FrontParts) -> Option<Self> {
+        if !ASKS_REX {
+            return None;
+        }
         let args = format!(r#"{{"session":{},"directory":{}}}"#, parts.session, parts.directory);
         let mut child = Command::new(rex)
             .args(["--autostart=false", "do", "--all", "--fail-fast", "--args", &args, "-e"])
@@ -688,9 +758,8 @@ impl AppObserver {
             .ok()?;
         let output = child.stdout.take().expect("observer stdout was piped");
         let observer = Self { child, output, frame: Frame::default() };
-        // SAFETY: The file descriptor is an open, privately owned pipe read end.
-        let nonblocking = unsafe { libc::fcntl(observer.fd(), libc::F_SETFL, libc::O_NONBLOCK) };
-        (nonblocking == 0).then_some(observer)
+        crate::sys::set_nonblocking(observer.fd()).ok()?;
+        Some(observer)
     }
 
     pub fn fd(&self) -> RawFd {
@@ -808,7 +877,7 @@ impl Report for AppActivity {
         // A name or folder the script left out, or wrote in a way that cannot be read, is not known.
         let mut field = || words.next().filter(|word| *word != b"-").and_then(unhex);
         let session = field().and_then(|label| String::from_utf8(label).ok());
-        let directory = field().map(|path| PathBuf::from(OsString::from_vec(path))).filter(|path| path.is_absolute());
+        let directory = field().and_then(crate::sys::os_string).map(PathBuf::from).filter(|path| path.is_absolute());
         Some(Self::Active(Front { session, directory }))
     }
 
@@ -884,7 +953,7 @@ fn decode_change(line: &[u8]) -> Option<ShellChange> {
     if !code.starts_with(b"2f") {
         return None;
     }
-    Some(ShellChange::Directory(PathBuf::from(OsString::from_vec(unhex(code)?))))
+    Some(ShellChange::Directory(PathBuf::from(crate::sys::os_string(unhex(code)?)?)))
 }
 
 /// The bytes a script wrote as lowercase hex, which may hold anything but a NUL.
@@ -1094,6 +1163,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_app_report_names_what_is_in_front_only_in_whole_readable_fields() {
         use super::{AppActivity, Front};

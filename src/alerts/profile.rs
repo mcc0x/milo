@@ -1,9 +1,12 @@
 //! Keep alerts for distinct config directories in distinct state and secret stores.
 
+#[cfg(unix)]
 use std::ffi::{CStr, OsStr};
 use std::fs;
 use std::io;
+#[cfg(unix)]
 use std::mem::MaybeUninit;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +22,9 @@ pub(super) struct Profile {
 
 impl Profile {
     pub(super) fn real() -> Option<Self> {
+        if cfg!(windows) {
+            return None;
+        }
         let keychain = secret::test_keychain();
         // A disposable Keychain's own directory acts as that test account's
         // home. Changing HOME while sharing the file must not claim its slot.
@@ -95,7 +101,7 @@ fn canonical_path(path: &Path) -> io::Result<PathBuf> {
 }
 
 fn key_for(path: &Path) -> String {
-    let bytes = path.as_os_str().as_bytes();
+    let bytes = path.as_os_str().as_encoded_bytes();
     let [first, second] = [0xcbf2_9ce4_8422_2325_u64, 0xb6e1_9938_391d_7567]
         .map(|seed| bytes.iter().fold(seed, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)));
     format!("{first:016x}{second:016x}")
@@ -103,6 +109,7 @@ fn key_for(path: &Path) -> String {
 
 /// Use the OS account record, not the caller's HOME override, to decide
 /// which settings directory can read the old unscoped credential slots.
+#[cfg(unix)]
 fn account_home() -> Option<PathBuf> {
     let mut entry = MaybeUninit::<libc::passwd>::uninit();
     let mut result = std::ptr::null_mut();
@@ -124,6 +131,11 @@ fn account_home() -> Option<PathBuf> {
     let directory = unsafe { CStr::from_ptr(entry.pw_dir) };
     let path = PathBuf::from(OsStr::from_bytes(directory.to_bytes()));
     path.is_absolute().then_some(path)
+}
+
+#[cfg(windows)]
+fn account_home() -> Option<PathBuf> {
+    None
 }
 
 #[cfg(test)]

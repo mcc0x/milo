@@ -1,11 +1,12 @@
 //! Runs bounded, read-only SQLite queries against databases other tools keep.
 
+use crate::sys::{AsRawFd, RawFd};
 use std::ffi::OsStr;
 use std::io::{self, PipeReader, Read};
-use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
+#[cfg(unix)]
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -14,6 +15,13 @@ use crate::fs_ops;
 
 use super::files;
 use super::signature::Signature;
+
+#[cfg(windows)]
+mod windows;
+#[cfg(all(test, windows))]
+pub(super) use windows::Writer;
+#[cfg(windows)]
+pub(super) use windows::{in_use, too_large};
 
 const INTERVAL: Duration = Duration::from_secs(20);
 /// A database whose files have not changed is still read again this often,
@@ -113,6 +121,11 @@ impl<T: Send + 'static> Poll<T> {
         self.job.as_ref().map(Job::fd)
     }
 
+    #[cfg(windows)]
+    pub(super) fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
     /// None means there is no completed query; a completed query can also fail.
     /// A failed query settles nothing, so the next look reads again.
     pub(super) fn collect(&mut self) -> Option<Option<T>> {
@@ -209,6 +222,7 @@ pub(super) fn is_database(path: &Path) -> bool {
 }
 
 /// Skip incomplete WAL file sets rather than opening an unusable database.
+#[cfg(unix)]
 fn readable(path: &Path) -> bool {
     let Some(header) = header(path) else { return false };
     match (header[18], header[19]) {
@@ -223,10 +237,11 @@ fn readable(path: &Path) -> bool {
 }
 
 /// Keep SQLite's URI syntax separate from literal path bytes, including non-UTF-8 names.
+#[cfg(unix)]
 fn read_only_uri(path: &Path) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     const OPTIONS: &str = "?mode=ro&readonly_shm=1";
-    let bytes = path.as_os_str().as_bytes();
+    let bytes = path.as_os_str().as_encoded_bytes();
     let mut uri = String::with_capacity(5 + bytes.len() + OPTIONS.len());
     uri.push_str("file:");
     for &b in bytes {
@@ -244,16 +259,27 @@ fn read_only_uri(path: &Path) -> String {
 }
 
 /// Bound both child output and wall time so a busy database cannot keep a worker alive.
-pub(super) fn query(executable: &OsStr, path: &Path, sql: &str, wait: Duration) -> Option<Vec<u8>> {
+/// Windows has no sqlite3 program; a private copy read with its own SQLite library answers there.
+pub(super) fn query(
+    #[cfg_attr(windows, allow(unused_variables))] executable: &OsStr,
+    path: &Path,
+    sql: &str,
+    wait: Duration,
+) -> Option<Vec<u8>> {
     if !path.is_absolute() {
         return None;
     }
     // `-nofollow` also rejects links in ancestors, including /tmp on macOS.
-    let path = path.parent()?.canonicalize().ok()?.join(path.file_name()?);
+    let path = crate::sys::canonicalize(path.parent()?).ok()?.join(path.file_name()?);
+    #[cfg(windows)]
+    return windows::query(&path, sql, Instant::now() + wait, MAX_OUTPUT);
+    #[cfg(unix)]
     if !readable(&path) {
         return None;
     }
+    #[cfg(unix)]
     let deadline = Instant::now() + wait;
+    #[cfg(unix)]
     let child = Command::new(executable)
         // The database operand always starts with "file:". Older SQLite CLIs reject "--".
         .args(["-batch", "-safe", "-bail", "-nofollow", "-readonly", "-json", "-init", "/dev/null"])
@@ -264,6 +290,7 @@ pub(super) fn query(executable: &OsStr, path: &Path, sql: &str, wait: Duration) 
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    #[cfg(unix)]
     capture(child, MAX_OUTPUT, deadline)
 }
 
@@ -292,6 +319,7 @@ mod tests {
         None
     }
 
+    #[cfg(unix)]
     #[test]
     fn sqlite_that_closes_stdout_without_exiting_is_killed_and_reaped() {
         let mut child = Command::new("/bin/sh")
@@ -333,6 +361,7 @@ mod tests {
         finish.send(()).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn closing_usage_waits_for_its_sqlite_worker_to_reap_the_child() {
         let (send, receive) = std::sync::mpsc::channel();

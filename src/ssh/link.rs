@@ -10,7 +10,7 @@
 
 use std::fs::{self, File};
 use std::io::{self, Read as _, Write as _};
-use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};
 
@@ -56,7 +56,10 @@ impl Link {
 
     pub fn write(&self, state: &Path, block: &str) -> io::Result<()> {
         let dir = tabs(state);
+        #[cfg(unix)]
         fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+        #[cfg(windows)]
+        fs::create_dir_all(&dir)?;
         fs_ops::open_dir(&dir)?;
         let (temp, mut file) = fs_ops::Temp::create(dir.join(format!(".{block}.{}", self.token)))?;
         file.write_all(self.encode().as_bytes())?;
@@ -73,7 +76,8 @@ impl Link {
     }
 
     fn encode(&self) -> String {
-        let path = |path: Option<&Path>| path.map_or_else(|| "-".to_owned(), |path| hex(path.as_os_str().as_bytes()));
+        let path =
+            |path: Option<&Path>| path.map_or_else(|| "-".to_owned(), |path| hex(path.as_os_str().as_encoded_bytes()));
         format!(
             "{FORMAT}\nowner {} {}\ntoken {}\nhost {}\ncontrol {}\nconfig {}\nhelper {}\n",
             self.owner.pid,
@@ -89,9 +93,12 @@ impl Link {
     fn read(path: &Path) -> Option<Self> {
         let mut file = fs_ops::open_read(path).ok()?;
         let meta = file.metadata().ok()?;
+        #[cfg(unix)]
         // SAFETY: geteuid has no preconditions.
-        let mine = meta.uid() == unsafe { libc::geteuid() };
-        if !mine || !meta.is_file() || meta.mode() & 0o077 != 0 || meta.len() > SIZE_LIMIT {
+        let mine = meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o077 == 0;
+        #[cfg(windows)]
+        let mine = false;
+        if !mine || !meta.is_file() || meta.len() > SIZE_LIMIT {
             return None;
         }
         let mut text = String::new();
@@ -127,7 +134,7 @@ fn tabs(state: &Path) -> PathBuf {
 
 fn path(code: &str) -> Option<PathBuf> {
     let bytes = unhex(code)?;
-    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes))).filter(|path| path.is_absolute())
+    crate::sys::os_string(bytes).map(PathBuf::from).filter(|path| path.is_absolute())
 }
 
 /// A connection's name: 32 lowercase hex digits.
@@ -167,7 +174,7 @@ fn unhex(code: &str) -> Option<Vec<u8>> {
     bytes
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::fixture::Fixture;

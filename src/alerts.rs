@@ -7,6 +7,8 @@
 //! Mirroring is off until the user turns it on, and sends the kind of alert
 //! and the program's short name only, unless the user opts into text or an origin label.
 
+#![cfg_attr(windows, allow(dead_code))]
+
 mod cli;
 mod consent;
 mod event;
@@ -19,7 +21,7 @@ pub(crate) mod relay;
 mod secret;
 mod send;
 mod telegram;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 use std::fmt::Write as _;
@@ -556,6 +558,10 @@ enum ForwardingChange {
 
 impl Alerts {
     pub(crate) fn real() -> Option<Self> {
+        // Alerts are not supported on Windows yet; Settings shows them as unavailable there.
+        if cfg!(windows) {
+            return None;
+        }
         let profile::Profile { config, state, secrets, isolated } = profile::Profile::real()?;
         let named = cfg!(debug_assertions).then(|| std::env::var(TEST_ENDPOINT).ok()).flatten();
         let stand_in = named.and_then(|named| stand_in(&named).map(str::to_owned));
@@ -630,6 +636,9 @@ impl Alerts {
     /// Always take this before the settings lock; callers already holding the
     /// settings lock may only probe it, never wait.
     fn lock_credential(&self, destination: Destination) -> Result<CredentialLock, String> {
+        #[cfg(windows)]
+        let open = || Err::<std::fs::File, io::Error>(io::ErrorKind::Unsupported.into());
+        #[cfg(unix)]
         let open = || {
             std::fs::create_dir_all(&self.config)?;
             let directory = crate::fs_ops::open_dir(&self.config)?;
@@ -735,6 +744,7 @@ impl Alerts {
         if let Some(path) = crate::rex::path_with_rex() {
             command.env("PATH", path);
         }
+        #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
         let mut process = crate::fs_ops::spawn(&mut command).map_err(|_| FAILED.to_owned())?;
         // Whenever it ends, it is waited for, so that it does not linger in a

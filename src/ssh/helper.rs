@@ -8,9 +8,12 @@
 
 use std::fs;
 use std::io::{self, Write as _};
+#[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt as _;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
 
 use super::link::{is_helper, is_host, is_token};
@@ -86,8 +89,13 @@ pub fn shell(token: &str) -> i32 {
         let _ = note(&state, token, me);
     }
     let shell = login_shell();
-    let name = shell.file_name().map_or_else(|| "sh".into(), |name| name.to_string_lossy().into_owned());
-    let error = Command::new(&shell).arg0(format!("-{name}")).exec();
+    #[cfg(unix)]
+    let error = {
+        let name = shell.file_name().map_or_else(|| "sh".into(), |name| name.to_string_lossy().into_owned());
+        Command::new(&shell).arg0(format!("-{name}")).exec()
+    };
+    #[cfg(windows)]
+    let error = io::Error::from(io::ErrorKind::Unsupported);
     eprintln!("milo: cannot start {}: {error}", shell.display());
     127
 }
@@ -103,7 +111,10 @@ fn shells(state: &Path) -> PathBuf {
 
 fn note(state: &Path, token: &str, me: Process) -> io::Result<()> {
     let dir = shells(state);
+    #[cfg(unix)]
     fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+    #[cfg(windows)]
+    fs::create_dir_all(&dir)?;
     fs_ops::open_dir(&dir)?;
     // Notes of shells that have ended are only clutter.
     for entry in fs::read_dir(&dir)?.flatten() {
@@ -118,12 +129,18 @@ fn note(state: &Path, token: &str, me: Process) -> io::Result<()> {
 
 fn read_note(path: &Path) -> Option<Process> {
     use std::io::Read as _;
-    use std::os::unix::fs::MetadataExt as _;
     let mut file = fs_ops::open_read(path).ok()?;
     let meta = file.metadata().ok()?;
-    // SAFETY: geteuid has no preconditions.
-    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o022 != 0 {
+    if !meta.is_file() {
         return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        // SAFETY: geteuid has no preconditions.
+        if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o022 != 0 {
+            return None;
+        }
     }
     let mut text = String::new();
     (&mut file).take(64).read_to_string(&mut text).ok()?;
@@ -162,7 +179,7 @@ pub fn pane(
     Ok(workflow::remote(repo, shell, host.to_owned(), make))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::fixture::Fixture;

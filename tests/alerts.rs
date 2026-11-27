@@ -9,6 +9,8 @@
 //! Only a development build of Milo accepts these stand-ins. Against a
 //! release build, which would speak to the real destinations, nothing runs.
 
+#![cfg(unix)]
+
 #[cfg(debug_assertions)]
 #[path = "alerts/real_rex.rs"]
 mod real_rex;

@@ -2,13 +2,13 @@
 
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
-use std::os::fd::AsFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::fs_ops::{self, Temp};
 use crate::json::Value;
+use crate::sys::AsRawFd;
 use crate::when::MINUTE;
 use crate::width::char_width;
 
@@ -145,7 +145,7 @@ fn native_reading(cache: Value<'_>, current: Option<AccountId>) -> Option<Readin
 
 /// A stalled stdin must not leave Claude waiting for its status line.
 pub(super) fn run_fd(
-    input: impl AsFd,
+    input: impl AsRawFd + io::Read,
     output: impl Write,
     target: Option<SaveTo<'_>>,
     now: i64,
@@ -220,7 +220,11 @@ fn save(target: SaveTo<'_>, now: i64, windows: BaseWindows) -> io::Result<()> {
     let dir = target.path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     fs::create_dir_all(dir)?;
     // The file is replaced on each save, so take the lock on its directory.
+    #[cfg(unix)]
     let lock = fs_ops::open_dir(dir)?;
+    // Windows cannot lock a folder, so a private file beside the readings is locked instead.
+    #[cfg(windows)]
+    let lock = crate::sys::private_file(&dir.join("claude-limits.lock"), crate::sys::Existing::Open)?;
     let deadline = Instant::now() + LOCK_WAIT;
     // A holder that has stalled must not keep Claude waiting for its status
     // line. Skipping this save loses nothing the next report will not bring.

@@ -169,6 +169,7 @@ fn a_task_on_another_host_needs_folders_written_in_full_before_that_host_is_aske
     assert!(ask(Some("/srv/app"), branch("b", Some("main"), Some(OsStr::new("trees/b")))).contains(partial));
 }
 
+#[cfg(unix)]
 #[test]
 fn the_action_is_told_the_installed_agents_and_the_projects_worktrees_and_branches() {
     let (f, linked) = project();

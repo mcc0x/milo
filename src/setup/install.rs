@@ -164,7 +164,7 @@ fn call<const N: usize>(run: &RunRex<'_>, args: [&str; N]) -> bool {
     run(&args.map(OsStr::new))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::claude::{Claude, OWN_CLAUDE};
     use super::super::files::Change;

@@ -6,7 +6,6 @@
 //! it was asked from: the new branch and its files go in a folder of their own.
 
 use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
 use super::run;
@@ -40,7 +39,8 @@ fn parse(raw: &[u8]) -> Vec<Worktree> {
             }
             (branch, unusable) = (None, false);
         } else if let Some(folder) = field.strip_prefix(b"worktree ") {
-            path = Some(PathBuf::from(OsStr::from_bytes(folder)));
+            path = crate::sys::os_str(folder).map(PathBuf::from);
+            unusable = path.is_none();
         } else if let Some(name) = field.strip_prefix(b"branch refs/heads/") {
             branch = String::from_utf8(name.to_vec()).ok();
         } else if field == b"bare" || field.starts_with(b"prunable") {

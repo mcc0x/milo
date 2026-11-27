@@ -2,7 +2,6 @@
 
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
-use std::os::unix::fs::FileExt as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -171,11 +170,11 @@ fn acquire(
         canceled(stop)?;
         let buf = &mut prefix[used..];
         #[cfg(not(test))]
-        let result = file.read_at(buf, used as u64);
+        let result = crate::sys::read_at(&file, buf, used as u64);
         #[cfg(test)]
         let result = match read.take() {
             Some(read) => read(&file, buf, used as u64),
-            None => file.read_at(buf, used as u64),
+            None => crate::sys::read_at(&file, buf, used as u64),
         };
         match result {
             Ok(0) => break,
@@ -238,7 +237,7 @@ fn read_bytes(
     }
     canceled(stop)?;
     // Don't accept a file that grew after inspection, or read past the limit.
-    if file.read_at(&mut [0], size).map_err(|_| UNREADABLE)? != 0 {
+    if crate::sys::read_at(file, &mut [0], size).map_err(|_| UNREADABLE)? != 0 {
         return Err(if size == picture::FILE_LIMIT { LARGE_PICTURE } else { UNREADABLE });
     }
     Ok(bytes)

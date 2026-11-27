@@ -7,9 +7,9 @@ mod refresh;
 #[cfg(test)]
 mod tests;
 
+use crate::sys::RawFd;
 use std::collections::HashMap;
 use std::ops::Range;
-use std::os::fd::RawFd;
 use std::path::Path;
 #[cfg(test)]
 use std::sync::{
@@ -298,14 +298,13 @@ impl History {
         self.truncated = commits.len() > LIMIT;
         commits.truncate(LIMIT);
         let remap = |i: usize| commits.iter().position(|c| c.hash == self.entries[i].commit.hash);
-        let open = self.open.as_ref().and_then(|open| {
-            Some(OpenCommit { index: remap(open.index)?, all_files: open.all_files, error: None })
-        });
+        let open = self
+            .open
+            .as_ref()
+            .and_then(|open| Some(OpenCommit { index: remap(open.index)?, all_files: open.all_files, error: None }));
         let tip_changed = commits.first().map(|c| &c.hash) != self.entries.first().map(|e| &e.commit.hash);
-        let follow = self.follow_new
-            && tip_changed
-            && selected == Some(TimelineRow::Commit(0))
-            && self.open_index() != Some(0);
+        let follow =
+            self.follow_new && tip_changed && selected == Some(TimelineRow::Commit(0)) && self.open_index() != Some(0);
         let selected = match selected {
             Some(TimelineRow::Commit(0)) if follow => TimelineRow::Commit(0),
             Some(TimelineRow::Commit(i)) => TimelineRow::Commit(remap(i).unwrap_or(0)),

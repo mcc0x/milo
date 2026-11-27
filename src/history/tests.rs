@@ -876,6 +876,7 @@ fn setting_the_remote_default_branch_updates_a_clean_timeline() {
     assert!(rows[2].contains("── on origin") && rows[3].contains("already pushed"), "{rows:?}");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_project_name_can_contain_a_newline() {
     let mut f = Fixture::new();
@@ -1036,13 +1037,14 @@ fn an_oversized_subject_can_be_paged_without_moving_the_commit_cursor() {
 }
 
 /// The descriptor of the read that is running, if one is.
-fn reading(history: &History) -> Option<i32> {
+fn reading(history: &History) -> Option<crate::sys::RawFd> {
     history.listing.as_ref().map(listing::Listing::fd)
 }
 
 /// Lets the read that is running finish. The next frame takes its result.
 fn arrive(history: &History) {
-    let mut ready = [libc::pollfd { fd: reading(history).expect("a read"), events: libc::POLLIN, revents: 0 }];
+    let mut ready =
+        [crate::sys::pollfd { fd: reading(history).expect("a read"), events: crate::sys::POLLIN, revents: 0 }];
     assert_eq!(crate::term::wait_ready(&mut ready, 30_000), 1, "Git did not list the commit's files");
     history.listing_releases.as_ref().unwrap().fetch_add(1, Ordering::Relaxed);
 }

@@ -1,8 +1,6 @@
 //! Turns git's status, diff and log output into the repository's data.
 
 use std::collections::HashSet;
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use super::{Commit, CommitId, CommitVersion, DiffFiles, Kind, PendingFile, UNBORN};
@@ -56,11 +54,11 @@ pub(super) fn parse_status(raw: Vec<u8>) -> Status {
     while let Some(bytes) = entries.next() {
         if let Some(path) = bytes.strip_prefix(b"! ") {
             // Don't accidentally exclude a different path with a replacement character.
-            let decode = |bytes: &[u8]| PathBuf::from(OsStr::from_bytes(bytes));
+            let decode = |bytes: &[u8]| crate::sys::os_str(bytes).map(PathBuf::from);
             if let Some(dir) = path.strip_suffix(b"/") {
-                st.ignored_dirs.push(decode(dir));
+                st.ignored_dirs.extend(decode(dir));
             } else {
-                st.ignored_files.push(decode(path));
+                st.ignored_files.extend(decode(path));
             }
             continue;
         }
@@ -108,11 +106,8 @@ pub(super) fn parse_status(raw: Vec<u8>) -> Status {
             st.upstream = Some(String::from_utf8_lossy(v).into_owned());
         } else if let Some(v) = bytes.strip_prefix(b"# branch.ab +") {
             measured = true;
-            st.ahead = v
-                .split(|&b| b == b' ')
-                .next()
-                .and_then(|n| std::str::from_utf8(n).ok()?.parse().ok())
-                .unwrap_or(0);
+            st.ahead =
+                v.split(|&b| b == b' ').next().and_then(|n| std::str::from_utf8(n).ok()?.parse().ok()).unwrap_or(0);
         }
     }
     if !measured {
@@ -179,22 +174,16 @@ pub(super) fn parse_files(raw: &[u8]) -> DiffFiles {
         }
         let mut f = tok.splitn(3, |&b| b == b'\t');
         let (Some(add), Some(del), Some(path)) = (f.next(), f.next(), f.next()) else { continue };
-        let (old, path) = if path.is_empty() {
-            (tokens.next(), tokens.next().unwrap_or_default())
-        } else {
-            (None, path)
-        };
+        let (old, path) =
+            if path.is_empty() { (tokens.next(), tokens.next().unwrap_or_default()) } else { (None, path) };
         let Some(path) = utf8_path(path) else { continue };
         // Both lists come in the same order, so the match is normally `next`.
         // The old path also matters for a rename whose source cannot be opened.
         let matches = |file: &PendingFile| {
             file.path == path && (file.kind != Kind::Renamed || file.from.as_deref().map(str::as_bytes) == old)
         };
-        let at = if diff.files.get(next).is_some_and(matches) {
-            Some(next)
-        } else {
-            diff.files.iter().position(matches)
-        };
+        let at =
+            if diff.files.get(next).is_some_and(matches) { Some(next) } else { diff.files.iter().position(matches) };
         if let Some(i) = at {
             next = i + 1;
             // Binary files report "-" and keep their counts at zero.
@@ -278,8 +267,19 @@ mod tests {
         assert_eq!(st.untracked, ["a b.txt", "nested"]);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn status_skips_ignored_paths_it_cannot_name_exactly() {
+        let st = parse_status(b"! cache with spaces/\0! raw-\xff/\0! build log\0! raw-\xfe.log\0".to_vec());
+        assert_eq!(st.ignored_dirs, [PathBuf::from("cache with spaces")]);
+        assert_eq!(st.ignored_files, [PathBuf::from("build log")]);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn status_separates_ignored_paths_from_uncommitted_files() {
+        use std::os::unix::ffi::OsStrExt as _;
+
         let st = parse_status(
             b"! cache with spaces/\0! raw-\xff/\0! build log\0! raw-\xfe.log\0? scratch.txt\0\
               1 .M N... 100644 100644 100644 h1 h2 source.rs\0"

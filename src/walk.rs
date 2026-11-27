@@ -66,11 +66,13 @@ pub fn list(root: &Path, open: impl Fn(&str) -> bool) -> Listing {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     use super::*;
     use crate::fixture::Fixture;
 
+    #[cfg(unix)]
     #[test]
     fn an_expanded_tree_does_not_descend_into_directory_links() {
         let f = Fixture::folder();
@@ -79,6 +81,29 @@ mod tests {
         let listing = list(&f.root, |_| true);
         assert!(!listing.unreadable && !listing.truncated);
         assert_eq!(listing.paths, ["link", "real/", "real/file"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_expanded_tree_does_not_descend_into_directory_links_or_junctions() {
+        const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+        let f = Fixture::folder();
+        f.write("real/file", "");
+        let made = std::os::windows::fs::symlink_dir(f.root.join("real"), f.root.join("link"));
+        if made.as_ref().is_err_and(|error| error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD)) {
+            return;
+        }
+        made.unwrap();
+        let junction = std::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(f.root.join("junction"))
+            .arg(f.root.join("real"))
+            .output()
+            .unwrap();
+        assert!(junction.status.success(), "{}", String::from_utf8_lossy(&junction.stderr));
+        let listing = list(&f.root, |_| true);
+        assert!(!listing.unreadable && !listing.truncated);
+        assert_eq!(listing.paths, ["junction", "link", "real/", "real/file"]);
     }
 
     #[cfg(target_os = "linux")]

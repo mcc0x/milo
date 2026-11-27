@@ -1,11 +1,11 @@
 //! Plans edits to Rex's init file and checks layouts before any settings change.
 
+use crate::sys::AsRawFd;
 use std::borrow::Cow;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use super::files::{Change, Image, staged};
@@ -283,10 +283,10 @@ fn insert_loader(bytes: &[u8], start: usize, load: &str, created: bool) -> Resul
     Ok([&bytes[..start], comment, newline, load.as_bytes(), newline, &bytes[start..]].concat())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
-    use super::*;
     use super::super::files;
+    use super::*;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     #[test]

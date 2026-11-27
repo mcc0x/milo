@@ -6,6 +6,10 @@ mod draw;
 mod files;
 mod install;
 mod layout;
+#[cfg(unix)]
+pub(crate) mod lock;
+#[cfg(windows)]
+#[path = "setup/lock_windows.rs"]
 pub(crate) mod lock;
 mod preview;
 mod profiles;
@@ -19,11 +23,11 @@ pub(crate) use draw::wrap;
 pub use profiles::{layout_profile, return_from_peek};
 pub use welcome::{Welcome, needs_welcome, skip_welcome};
 
+use crate::sys::RawFd;
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io;
 use std::ops::Range;
-use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 
 use crate::alerts::{self, Alerts};
@@ -1574,6 +1578,10 @@ impl<R> Drop for Setup<R> {
 
 /// Rex calls this separately so listener lifetime does not depend on a pane.
 pub fn listen(stop: bool) -> i32 {
+    if cfg!(windows) {
+        eprintln!("milo: the Rex listener is not supported on Windows yet.");
+        return 1;
+    }
     fn run(stop: bool) -> io::Result<()> {
         let state = paths::state_dir().ok_or(io::ErrorKind::NotFound)?;
         if stop {
@@ -1596,5 +1604,5 @@ pub fn listen(stop: bool) -> i32 {
     1
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

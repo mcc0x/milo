@@ -121,8 +121,16 @@ fn status_command(text: &str) -> Option<json::Value<'_>> {
 
 /// Recognize a shell-quoted absolute launcher, not arbitrary shell code.
 pub(super) fn is_launcher(command: &str) -> bool {
+    fn absolute(rest: &str) -> Option<&str> {
+        if !cfg!(windows) {
+            return rest.strip_prefix('/');
+        }
+        let drive = rest.chars().next().filter(char::is_ascii_alphabetic)?;
+        rest[drive.len_utf8()..].strip_prefix(":/")
+    }
     command
-        .strip_prefix("'/")
+        .strip_prefix('\'')
+        .and_then(absolute)
         .and_then(|path| path.strip_suffix("' claude-status"))
         .is_some_and(|path| !path.is_empty() && path.split("'\\''").all(|part| !part.contains('\'')))
 }
@@ -139,7 +147,11 @@ mod tests {
             "{\r\n\t\"a\" : 18,\r\n\t\"b\":null\r\n}\r\n",
             r#"{"first":{"nested":[1,-2.1e5,{"statusLine":null}]}, "text":"} {, \"quoted\" \\ \u1234"}"#,
         ] {
-            let command = "'/a b/quote'\\''back\\slash/milo' claude-status";
+            let command = if cfg!(windows) {
+                "'C:/a b/quote'\\''back\\slash/milo.exe' claude-status"
+            } else {
+                "'/a b/quote'\\''back\\slash/milo' claude-status"
+            };
             let added = Settings::parse(original).unwrap().add(command).unwrap();
             let edited = Settings::parse(&added).unwrap();
             assert_eq!(edited.status(Some(command)), Status::Milo);

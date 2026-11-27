@@ -3,8 +3,8 @@
 //! The credential travels on curl's standard input, never in its arguments or
 //! environment, so other processes cannot read it from the process table.
 
-use std::ffi::OsStr;
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -13,8 +13,34 @@ use super::sqlite;
 /// A reply larger than this is not one of the small reports Milo asks for.
 const MAX_REPLY: usize = 256 * 1024;
 
-pub(super) fn executable() -> &'static OsStr {
-    OsStr::new("/usr/bin/curl")
+#[cfg(unix)]
+pub(super) fn executable() -> PathBuf {
+    PathBuf::from("/usr/bin/curl")
+}
+
+/// The curl that Windows itself ships, never one a project, `PATH` or the environment supplies.
+/// If Windows does not name its system folder, an empty path that cannot be run.
+#[cfg(windows)]
+pub(super) fn executable() -> PathBuf {
+    system_directory().map(|system| system.join("curl.exe")).unwrap_or_default()
+}
+
+/// The system folder as Windows reports it, whatever `SystemRoot` was inherited.
+#[cfg(windows)]
+fn system_directory() -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt as _;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    }
+
+    let mut buffer = [0_u16; 260];
+    // SAFETY: buffer is writable for exactly the advertised number of UTF-16 code units.
+    let len = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), 260) };
+    let len = usize::try_from(len).ok().filter(|&len| len > 0 && len < buffer.len())?;
+    Some(PathBuf::from(OsString::from_wide(&buffer[..len]))).filter(|system| system.is_absolute())
 }
 
 /// One GET. `url` and `headers` are built by Milo; only `bearer` comes from the user.
@@ -89,7 +115,14 @@ pub(super) fn get(request: &Request<'_>, wait: Duration) -> Option<Reply> {
 
     // Allow curl its own limit, then a moment to exit, before it is killed.
     let deadline = Instant::now() + wait + Duration::from_secs(1);
-    let mut child = Command::new(executable())
+    let program = executable();
+    let mut command = Command::new(&program);
+    // On Windows curl runs from its own folder, so nothing in the project's folder is looked up.
+    #[cfg(windows)]
+    if let Some(folder) = program.parent() {
+        command.current_dir(folder);
+    }
+    let mut child = command
         // `-q` must come first: it keeps the user's curlrc from adding options.
         .args(["-q", "--config", "-"])
         .stdin(Stdio::piped())
@@ -150,25 +183,10 @@ pub(crate) fn post_anonymous_counts(
 
 #[cfg(windows)]
 fn counts_curl() -> Option<Command> {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt as _;
     use std::os::windows::process::CommandExt as _;
-    use std::path::PathBuf;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
-    }
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut buffer = [0_u16; 260];
-    // SAFETY: buffer is writable for exactly the advertised number of UTF-16 code units.
-    let len = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), 260) };
-    let len = usize::try_from(len).ok().filter(|&len| len > 0 && len < buffer.len())?;
-    let system = PathBuf::from(OsString::from_wide(&buffer[..len]));
-    if !system.is_absolute() {
-        return None;
-    }
+    let system = system_directory()?;
     let mut command = Command::new(system.join("curl.exe"));
     // The system directory also supplies the working directory for DLL searches.
     // Do not inherit SystemRoot, proxy settings, or certificate overrides.
@@ -264,6 +282,7 @@ mod tests {
                 let (name, root) = command.get_envs().next().unwrap();
                 assert_eq!(name, "SystemRoot");
                 assert_eq!(root.map(Path::new), system.parent());
+                assert_eq!(executable(), program);
                 return;
             }
             let f = crate::fixture::Fixture::folder();

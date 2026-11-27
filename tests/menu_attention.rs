@@ -8,6 +8,8 @@
 //! jump's questions from files. The ignored test needs Rex installed: it
 //! starts a server on a socket in its own folder and pins every call to it.
 
+#![cfg(unix)]
+
 use std::fs;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::PermissionsExt as _;

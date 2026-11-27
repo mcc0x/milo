@@ -2,8 +2,8 @@
 
 mod mascot;
 
+use crate::sys::RawFd;
 use std::ops::Range;
-use std::os::fd::RawFd;
 use std::path::Path;
 
 use crate::help::{self, HintHits, Page};
@@ -353,7 +353,11 @@ impl Pane for Home {
         match &mut self.view {
             View::Menu if back => After::Leave,
             View::Menu if key == Key::Focus(true) => {
-                if self.update_menu_app(menubar::installed()) { self.show(View::Menu) } else { After::Ignored }
+                if self.update_menu_app(menubar::installed()) {
+                    self.show(View::Menu)
+                } else {
+                    After::Ignored
+                }
             }
             View::Menu if choose => match self.selected + if self.standalone { 0 } else { LOCAL_ROWS } {
                 0 => After::Open(Destination::Outline),
@@ -491,14 +495,17 @@ fn move_selection(selected: &mut usize, count: usize, shown: usize, key: Key) ->
 fn draw_confirm(s: &mut Screen, body: usize, removal: Removal, selected: usize) -> Picker {
     let labels = removal.choices();
     let (question, note) = match removal {
+        Removal::Milo if cfg!(windows) => (
+            "Uninstall Milo?",
+            "Windows cannot remove a running program, so Milo shows how its installer removes it once Milo is closed. Saved preferences will stay.",
+        ),
         Removal::Milo => (
             "Uninstall Milo?",
             "Removes Milo and its managed Rex and Claude Code integrations. Saved preferences and open panes will stay.",
         ),
-        Removal::MenuApp => (
-            "Remove menu app?",
-            "Removes only the menu bar app. The Milo CLI and saved settings will stay.",
-        ),
+        Removal::MenuApp => {
+            ("Remove menu app?", "Removes only the menu bar app. The Milo CLI and saved settings will stay.")
+        }
     };
     let width = (if s.w >= 3 { s.w - 2 } else { s.w }).min(54);
     let x = (s.w - width) / 2;

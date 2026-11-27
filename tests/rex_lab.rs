@@ -26,6 +26,8 @@
 //! place of one that did not. Besides the tabs it opens one at a time, the
 //! test opens several back to back, with no pause between them, more than once.
 
+#![cfg(unix)]
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -704,10 +706,9 @@ impl Scene {
         let reported = || lab.rex(&["block", "call", "-s", session, "-b", shell, "pwd"]);
         let pwd = reported();
         assert!(!pwd.contains("\"pwd\""), "{pwd}");
-        for (dir, own, other) in [
-            (second, "only-in-second.txt", "only-in-first.txt"),
-            (first, "only-in-first.txt", "only-in-second.txt"),
-        ] {
+        for (dir, own, other) in
+            [(second, "only-in-second.txt", "only-in-first.txt"), (first, "only-in-first.txt", "only-in-second.txt")]
+        {
             let cwd = format!("cd -- '{}'", dir.display());
             lab.rex(&["send", "-s", session, "-b", shell, &cwd]);
             lab.rex(&["send-key", "-s", session, "-b", shell, "enter"]);

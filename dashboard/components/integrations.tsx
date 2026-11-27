@@ -87,7 +87,7 @@ export default function Integrations() {
   const returnTo = useRef<Detail | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const { presence, alerts, telemetry } = state;
-  const available = { automation: true, presence: presence !== null, alerts: alerts !== null, telemetry: telemetry !== null };
+  const available = { automation: !state.unsupported?.automation, presence: presence !== null, alerts: alerts !== null, telemetry: telemetry !== null };
 
   useLayoutEffect(() => {
     if (detail) {
@@ -112,9 +112,9 @@ export default function Integrations() {
   const forwarding = activeAlerts.length > 0;
   const listedAlerts = forwarding ? activeAlerts : alertDestinations.filter(([key]) => alerts?.[key].saved);
   const summaries = {
-    automation: rules ? `${rules} ${rules === 1 ? 'rule' : 'rules'} on` : 'Off',
-    presence: presence ? (presence.enabled ? 'On' : 'Off') : unavailable,
-    alerts: alerts?.health ?? unavailable,
+    automation: state.unsupported?.automation ?? (rules ? `${rules} ${rules === 1 ? 'rule' : 'rules'} on` : 'Off'),
+    presence: presence ? (presence.enabled ? 'On' : 'Off') : state.unsupported?.presence ?? unavailable,
+    alerts: alerts?.health ?? state.unsupported?.alerts ?? unavailable,
     telemetry: telemetry ? telemetry.status === 'on' ? 'On' : telemetry.status === 'off' ? 'Off' : 'Not sending' : unavailable,
   };
   const descriptions = {
@@ -167,7 +167,7 @@ export default function Integrations() {
           ))}
         </ul>
       ) : !available[detail] ? (
-        <p className="setting-detail">{unavailable}</p>
+        <p className="setting-detail">{summaries[detail]}</p>
       ) : detail === 'automation' ? (
         <RexAutomation />
       ) : detail === 'presence' ? <Presence /> : detail === 'alerts' ? <Alerts /> : <AnonymousCounts />}

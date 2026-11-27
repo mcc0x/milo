@@ -1,12 +1,13 @@
 //! Runs read-only git commands without letting a repository run its own programs,
 //! and the one command that adds a worktree for a task.
 
+use crate::sys::{AsRawFd, BorrowedFd, RawFd};
 use std::cell::Cell;
 use std::ffi::OsStr;
 use std::io::{self, Read as _};
-use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
@@ -28,12 +29,23 @@ thread_local! {
 }
 
 /// The socket signals completion to the pane and cancellation to the worker.
+#[cfg(unix)]
 pub(crate) struct RefreshTask {
     ready: UnixStream,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Windows pipes carry one direction each: the worker closes one end to signal completion,
+/// and the pane closes another to signal cancellation.
+#[cfg(windows)]
+pub(crate) struct RefreshTask {
+    ready: io::PipeReader,
+    cancel: Option<io::PipeWriter>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
 impl RefreshTask {
+    #[cfg(unix)]
     pub(crate) fn spawn(work: impl FnOnce() + Send + 'static) -> io::Result<Self> {
         let (ready, worker) = UnixStream::pair()?;
         let thread = std::thread::Builder::new().spawn(move || {
@@ -45,6 +57,19 @@ impl RefreshTask {
         Ok(Self { ready, thread: Some(thread) })
     }
 
+    #[cfg(windows)]
+    pub(crate) fn spawn(work: impl FnOnce() + Send + 'static) -> io::Result<Self> {
+        let (ready, done) = io::pipe()?;
+        let (cancelled, cancel) = io::pipe()?;
+        let thread = std::thread::Builder::new().spawn(move || {
+            REFRESH_CANCEL.set(cancelled.as_raw_fd());
+            work();
+            REFRESH_CANCEL.set(-1);
+            drop((done, cancelled));
+        })?;
+        Ok(Self { ready, cancel: Some(cancel), thread: Some(thread) })
+    }
+
     pub(crate) fn fd(&self) -> RawFd {
         self.ready.as_raw_fd()
     }
@@ -53,20 +78,28 @@ impl RefreshTask {
 impl Drop for RefreshTask {
     fn drop(&mut self) {
         // Even on immediate process exit, reap Git before the worker disappears.
+        #[cfg(unix)]
         let _ = self.ready.shutdown(std::net::Shutdown::Write);
+        #[cfg(windows)]
+        drop(self.cancel.take());
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
 }
 
+#[cfg(unix)]
+const GIT_NAME: &str = "git";
+#[cfg(windows)]
+const GIT_NAME: &str = "git.exe";
+
 /// Cache the executable so frequent commands can bypass the macOS git launcher.
 pub(crate) static GIT: LazyLock<PathBuf> = LazyLock::new(|| {
     let mut launcher = isolated(Command::new("git"));
     launcher.arg("--exec-path");
-    let real = checked_output(launcher, 4096, None)
-        .ok()
-        .and_then(|raw| raw.strip_suffix(b"\n").map(|path| Path::new(OsStr::from_bytes(path)).join("git")));
+    let real = checked_output(launcher, 4096, None).ok().and_then(|raw| {
+        raw.strip_suffix(b"\n").and_then(crate::sys::os_str).map(|path| Path::new(path).join(GIT_NAME))
+    });
     real.filter(|path| path.is_absolute() && path.is_file()).unwrap_or_else(|| PathBuf::from("git"))
 });
 
@@ -148,11 +181,29 @@ fn exact_pathspec(path: &str) -> String {
     const MAGIC: &str = ":(glob)";
     let mut spec = String::with_capacity(MAGIC.len() + path.len() + 1);
     spec.push_str(MAGIC);
+    #[cfg(unix)]
     for (i, ch) in path.char_indices() {
         if matches!(ch, '*' | '?' | '[' | '\\') || i + ch.len_utf8() == path.len() {
             spec.push('\\');
         }
         spec.push(ch);
+    }
+    // Git for Windows reads a backslash in a pathspec as a folder separator, so a
+    // bracket escapes each character instead. A bracket holds one byte and never
+    // matches a separator, so the last ASCII character other than a slash stands in
+    // for the final one.
+    #[cfg(windows)]
+    {
+        let Some(last) = path.rfind(|ch: char| ch.is_ascii() && ch != '/') else {
+            return format!(":(literal){path}");
+        };
+        for (i, ch) in path.char_indices() {
+            if matches!(ch, '*' | '?' | '[') || i == last {
+                spec.extend(['[', ch, ']']);
+            } else {
+                spec.push(ch);
+            }
+        }
     }
     spec
 }
@@ -409,17 +460,35 @@ fn capture(
 ) -> Result<(ExitStatus, Vec<u8>), OutputError> {
     let started = Instant::now();
     let cancel = cancel.map_or_else(|| REFRESH_CANCEL.get(), |fd| fd.as_raw_fd());
-    let mut stop = libc::pollfd { fd: cancel, events: libc::POLLIN, revents: 0 };
+    let mut stop = crate::sys::pollfd { fd: cancel, events: crate::sys::POLLIN, revents: 0 };
     if cancel >= 0 {
         if term::wait_ready(std::slice::from_mut(&mut stop), 0) > 0 {
             return Err(OutputError::Failed);
         }
         // On cancellation, stop any helpers that may be holding stdout open.
+        #[cfg(unix)]
         command.process_group(0);
     }
     let mut child = command.stdout(Stdio::piped()).spawn().map_err(|_| OutputError::Unavailable)?;
+    // Windows has no process groups. A job ends Git and the helpers it starts together, and
+    // closing it when this returns ends any helper that outlived Git.
+    #[cfg(windows)]
+    let job = match crate::sys::Job::contain(&child) {
+        Ok(job) => job,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(OutputError::Unavailable);
+        }
+    };
     let pipe = child.stdout.take().expect("git stdout was piped");
     let result = collect(pipe, limit, started, stop).and_then(|out| wait(&mut child, started, stop).map(|s| (s, out)));
+    #[cfg(windows)]
+    if result.is_err() {
+        job.kill();
+        let _ = child.wait();
+    }
+    #[cfg(unix)]
     if result.is_err() {
         if cancel >= 0
             && let Ok(group) = libc::pid_t::try_from(child.id())
@@ -436,10 +505,15 @@ fn capture(
     result
 }
 
-fn collect(mut pipe: ChildStdout, limit: u64, started: Instant, stop: libc::pollfd) -> Result<Vec<u8>, OutputError> {
+fn collect(
+    mut pipe: ChildStdout,
+    limit: u64,
+    started: Instant,
+    stop: crate::sys::pollfd,
+) -> Result<Vec<u8>, OutputError> {
     let mut out = Vec::new();
     let mut chunk = [0u8; 1 << 16];
-    let mut fds = [libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 }, stop];
+    let mut fds = [crate::sys::pollfd { fd: pipe.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 }, stop];
     while running(started) {
         if term::wait_ready(&mut fds, 200) <= 0 {
             continue;
@@ -458,7 +532,7 @@ fn collect(mut pipe: ChildStdout, limit: u64, started: Instant, stop: libc::poll
     Err(OutputError::Failed)
 }
 
-fn wait(child: &mut Child, started: Instant, mut stop: libc::pollfd) -> Result<ExitStatus, OutputError> {
+fn wait(child: &mut Child, started: Instant, mut stop: crate::sys::pollfd) -> Result<ExitStatus, OutputError> {
     // Closing stdout is not proof that the child has exited.
     let stop = std::slice::from_mut(&mut stop);
     if stop[0].fd >= 0 && term::wait_ready(stop, 0) > 0 {

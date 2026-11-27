@@ -1,6 +1,7 @@
 //! Checks which mentions in terminal output are offered, in what order and with what beside them.
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::symlink;
 
 use super::*;
@@ -82,6 +83,7 @@ fn the_ways_tools_print_a_place_are_read() {
     assert_eq!(titles(&report), ["src/main.rs:5:1"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn what_is_not_a_file_of_the_worktree_is_never_offered() {
     let (f, tree) = project();
@@ -102,7 +104,7 @@ fn what_is_not_a_file_of_the_worktree_is_never_offered() {
 fn relative_paths_start_from_the_working_folder_and_stop_at_the_worktree() {
     let (f, _) = project();
     let tree = Worktree::of(&f.root.join("src")).unwrap();
-    assert_eq!(tree.root, f.root.canonicalize().unwrap());
+    assert_eq!(tree.root, crate::sys::canonicalize(&f.root).unwrap());
     let report = scan("main.rs:1 ../docs/migration.md ../../secret.txt src/main.rs\n", &tree);
     assert_eq!((titles(&report), report.outside), (vec!["src/main.rs:1".to_owned(), "docs/migration.md".into()], 1));
 
@@ -137,7 +139,7 @@ fn only_the_end_of_long_output_is_looked_at_and_its_text_is_made_plain() {
 #[test]
 fn a_place_goes_to_the_first_reader_that_takes_it_or_to_a_new_one() {
     let (f, tree) = project();
-    let root = f.root.canonicalize().unwrap();
+    let root = crate::sys::canonicalize(&f.root).unwrap();
     let blocks: Vec<OsString> =
         ["block:11111111-1111-1111-1111-111111111111", "reader", "block:22222222-2222-2222-2222-222222222222"]
             .into_iter()

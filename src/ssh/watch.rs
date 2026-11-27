@@ -1,14 +1,14 @@
 //! Watches the folder of a shell on this computer through the system, for a
 //! pane that follows a shell `milo ssh` started here.
 
-use std::io::{self, PipeReader, PipeWriter, Read as _, Write as _};
-use std::os::fd::{AsRawFd as _, RawFd};
+use std::io::{self, PipeReader, PipeWriter, Write as _};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
 use super::process::Process;
 use crate::rex::{ShellChange, ShellNews};
+use crate::sys::{AsRawFd as _, RawFd};
 
 /// How often the shell's folder is read. The system offers no notice of it.
 const LOOK: Duration = Duration::from_millis(300);
@@ -21,10 +21,7 @@ pub struct ShellWatch {
 impl ShellWatch {
     pub fn start(shell: Process) -> io::Result<Self> {
         let (wake, mut ring) = io::pipe()?;
-        // SAFETY: The descriptor is this pipe's open read end.
-        if unsafe { libc::fcntl(wake.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        crate::sys::set_nonblocking(wake.as_raw_fd())?;
         let (send, folders) = mpsc::channel();
         std::thread::spawn(move || look(shell, &send, &mut ring));
         Ok(Self { wake, folders })
@@ -36,7 +33,7 @@ impl ShellWatch {
 
     pub fn read(&mut self) -> ShellNews {
         let mut bytes = [0; 64];
-        while self.wake.read(&mut bytes).is_ok_and(|n| n > 0) {}
+        while crate::sys::read_nonblocking(&self.wake, &mut bytes).is_ok_and(|n| n > 0) {}
         let mut change = ShellChange::Unchanged;
         loop {
             match self.folders.try_recv() {
@@ -69,7 +66,7 @@ fn look(shell: Process, send: &mpsc::Sender<PathBuf>, ring: &mut PipeWriter) {
     let _ = ring.write_all(b"x");
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::fixture::Fixture;

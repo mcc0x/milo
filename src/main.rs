@@ -1,5 +1,9 @@
 //! Parses the command line and dispatches commands.
 
+// Features not yet ported to Windows stay compiled there but cannot be reached, so their
+// helpers count as unused. Unix builds still report dead code as usual.
+#![cfg_attr(windows, allow(dead_code))]
+
 mod actions;
 mod alerts;
 mod diff;
@@ -34,6 +38,7 @@ mod screen;
 mod setup;
 mod ssh;
 mod syntax;
+mod sys;
 mod task;
 mod telemetry;
 mod term;
@@ -807,6 +812,10 @@ fn main() {
     }
     if first.as_deref() == Some(OsStr::new(presence::HELPER_COMMAND)) {
         exit(presence::helper(&args.collect::<Vec<_>>()));
+    }
+    #[cfg(windows)]
+    if first.as_deref() == Some(OsStr::new(picture::DECODER_COMMAND)) {
+        exit(picture::decoder(&args.collect::<Vec<_>>()));
     }
     let second = args.next();
     let rest: Vec<_> = args.collect();

@@ -1,19 +1,76 @@
 //! Uninstall the running, explicitly confirmed copy of Milo, not the first Milo on PATH.
 
+/// Windows cannot remove a program while it runs, so the installer's own uninstaller, kept beside
+/// an installed milo.exe, does it once Milo is closed. Milo only says how.
+#[cfg(windows)]
+pub(crate) fn run() -> Result<String, String> {
+    let launched = std::env::current_exe().map_err(|e| format!("Could not locate the running Milo: {e}"))?;
+    Err(windows_instructions(&launched))
+}
+
+#[cfg(windows)]
+fn windows_instructions(exe: &std::path::Path) -> String {
+    let exe = crate::sys::plain_path(exe.to_path_buf());
+    let dir = exe.parent().unwrap_or(&exe);
+    let uninstaller = dir.join("uninstall-milo.ps1");
+    if dir.join(".milo-install-receipt").is_file() && uninstaller.is_file() {
+        return format!(
+            "Windows cannot remove a program while it runs. Close every Milo window, then run:\n  powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"\nYour settings are left in place.",
+            uninstaller.display()
+        );
+    }
+    format!(
+        "Milo will not remove {}: it was not installed by the Windows installer. Delete it by hand; your settings are left in place.",
+        exe.display()
+    )
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::windows_instructions;
+    use crate::fixture::Fixture;
+
+    #[test]
+    fn an_installed_copy_is_pointed_at_its_uninstaller_and_any_other_copy_is_left_alone() {
+        let f = Fixture::folder();
+        let exe = f.root.join("milo.exe");
+        std::fs::write(&exe, "").unwrap();
+        let said = windows_instructions(&exe);
+        assert!(said.contains("not installed by the Windows installer"), "{said}");
+        std::fs::write(f.root.join(".milo-install-receipt"), "").unwrap();
+        std::fs::write(f.root.join("uninstall-milo.ps1"), "").unwrap();
+        let said = windows_instructions(&exe);
+        let uninstaller = crate::sys::plain_path(f.root.join("uninstall-milo.ps1"));
+        assert!(said.contains(&format!("-File \"{}\"", uninstaller.display())), "{said}");
+    }
+}
+
+#[cfg(unix)]
 use std::env;
+#[cfg(unix)]
 use std::ffi::{OsStr, OsString};
+#[cfg(unix)]
 use std::fs::{self, Metadata};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStringExt as _;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Output};
 
+#[cfg(unix)]
 use crate::json::Value;
+#[cfg(unix)]
 use crate::read::{self, Content};
 
+#[cfg(unix)]
 const TAP: &str = "mcc0x/milo";
+#[cfg(unix)]
 const FORMULA: &str = "mcc0x/milo/milo";
 
+#[cfg(unix)]
 pub(crate) fn run() -> Result<String, String> {
     let launched = env::current_exe().map_err(|e| format!("Could not locate the running Milo: {e}"))?;
     let path = launched.canonicalize().map_err(|_| unsupported(&launched, "could not locate the installed file"))?;
@@ -29,9 +86,11 @@ pub(crate) fn run() -> Result<String, String> {
     Ok(format!("{removed}\n{settings}"))
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileId(u64, u64);
 
+#[cfg(unix)]
 impl FileId {
     fn of(meta: &Metadata) -> Self {
         let device = meta.dev();
@@ -45,6 +104,7 @@ impl FileId {
     }
 }
 
+#[cfg(unix)]
 #[cfg(target_os = "macos")]
 fn running_id() -> Option<FileId> {
     // Darwin's current_exe() gives a path, which may now name a different file.
@@ -74,16 +134,19 @@ fn running_id() -> Option<FileId> {
     (stat.vst_ino != 0).then_some(FileId(u64::from(stat.vst_dev), stat.vst_ino))
 }
 
+#[cfg(unix)]
 #[cfg(target_os = "linux")]
 fn running_id() -> Option<FileId> {
     fs::metadata("/proc/self/exe").ok().map(|meta| FileId::of(&meta))
 }
 
+#[cfg(unix)]
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn running_id() -> Option<FileId> {
     None
 }
 
+#[cfg(unix)]
 fn unsupported(path: &Path, reason: &str) -> String {
     format!(
         "Milo will not remove {}: {reason}. Relaunch the installed copy (set MILO_BIN_DIR to the install directory for a custom install), or use `milo setup --remove` and the original installer or package manager.",
@@ -91,6 +154,7 @@ fn unsupported(path: &Path, reason: &str) -> String {
     )
 }
 
+#[cfg(unix)]
 fn checkout_product(path: &Path) -> bool {
     path.ancestors().skip(1).any(|dir| {
         dir.file_name().is_some_and(|name| name == "target")
@@ -102,15 +166,18 @@ fn checkout_product(path: &Path) -> bool {
 }
 
 // The script installers support an absolute or working-directory-relative MILO_BIN_DIR.
+#[cfg(unix)]
 fn in_directory(path: &Path, dir: &Path) -> bool {
     dir.canonicalize().is_ok_and(|dir| path.parent() == Some(dir.as_path()))
 }
 
+#[cfg(unix)]
 enum Installation {
     Standalone,
     Homebrew(Brew),
 }
 
+#[cfg(unix)]
 impl Installation {
     fn find(
         path: &Path,
@@ -158,11 +225,13 @@ impl Installation {
     }
 }
 
+#[cfg(unix)]
 struct Brew {
     executable: PathBuf,
     opt: PathBuf,
 }
 
+#[cfg(unix)]
 impl Brew {
     fn keg_for(path: &Path) -> Option<&Path> {
         let bin = path.parent()?;
@@ -240,17 +309,20 @@ impl Brew {
     }
 }
 
+#[cfg(unix)]
 fn brew_command(executable: &Path) -> Command {
     let mut command = Command::new(executable);
     command.env("HOMEBREW_NO_AUTO_UPDATE", "1").env("HOMEBREW_NO_AUTOREMOVE", "1");
     command
 }
 
+#[cfg(unix)]
 fn brew_error(output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     stderr.lines().find(|line| !line.trim().is_empty()).map_or_else(|| output.status.to_string(), str::to_owned)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -358,7 +430,9 @@ esac
         let (f, prefix) = brew_fixture();
         let path = prefix.join("Cellar/milo/1/bin/milo");
         let running = id(&path);
-        assert!(matches!(standalone(&path, running, &f.root, None), Err(e) if e.contains("configured Homebrew Cellar")));
+        assert!(
+            matches!(standalone(&path, running, &f.root, None), Err(e) if e.contains("configured Homebrew Cellar"))
+        );
         let install = Installation::find(&path, running, Some(&f.root), None, &prefix.join("bin")).unwrap();
         assert!(matches!(install, Installation::Homebrew(_)));
         install.remove(&path, running).unwrap();
@@ -371,7 +445,9 @@ esac
         let (f, prefix) = brew_fixture();
         let path = prefix.join("Cellar/milo/1/bin/milo");
         let running = id(&path);
-        let classify = || Installation::find(&path, running, Some(&f.root), path.parent().map(Path::as_os_str), &prefix.join("bin"));
+        let classify = || {
+            Installation::find(&path, running, Some(&f.root), path.parent().map(Path::as_os_str), &prefix.join("bin"))
+        };
         let install = classify().unwrap();
         fs::remove_file(prefix.join("opt/milo")).unwrap();
         symlink("../Cellar/milo/2", prefix.join("opt/milo")).unwrap();

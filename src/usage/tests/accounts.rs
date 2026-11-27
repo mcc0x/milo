@@ -599,7 +599,7 @@ fn an_open_pane_drops_old_readings_and_in_flight_results_when_the_settings_key_c
 
     // Let an old-key reload finish without allowing the pane to collect it yet.
     usage.accounts.start(NOW + MINUTE, elapsed(Instant::now(), MINUTE), true);
-    let mut fd = libc::pollfd { fd: usage.external_fd().unwrap(), events: libc::POLLIN, revents: 0 };
+    let mut fd = crate::sys::pollfd { fd: usage.external_fd().unwrap(), events: crate::sys::POLLIN, revents: 0 };
     // SAFETY: `fd` is writable and the pane keeps its job descriptor open.
     assert_eq!(unsafe { libc::poll(&raw mut fd, 1, 5000) }, 1);
     use_key("sk-test-replacement-key");
@@ -974,7 +974,7 @@ fn schedule_look(accounts: &mut Accounts, now: i64, clock: Instant, manual: bool
 #[test]
 #[ignore = "a benchmark; run it alone on a release build"]
 fn usage_profile_account_schedule() {
-    if !Path::new(super::super::http::executable()).is_file() {
+    if !super::super::http::executable().is_file() {
         eprintln!("skipping account fixture: curl is not installed");
         return;
     }

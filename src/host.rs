@@ -13,6 +13,7 @@ use crate::rex::{self, CommandVersion, Server, Viewers};
 pub(crate) const CHECKED_API: u64 = 19;
 
 const OLDER: &str = "This Rex server is older than the Rex Milo was checked with. Update Rex on this host.";
+const REX_UNSUPPORTED: &str = "Rex integration is not supported on Windows yet. The panes work without it.";
 const COMMAND_DIFFERS: &str =
     "The rex command and the Rex server are different versions. Restart or update Rex before saving a layout.";
 
@@ -93,7 +94,12 @@ impl Rex {
 impl Host {
     /// Asks this computer and the Rex server of this terminal. It starts no server.
     /// A caller that already checked where the apps are can reuse that answer.
+    /// Windows asks nothing: the bare `rex` command is searched in the working directory there, and
+    /// Milo's Rex integration is not ported to Windows yet.
     pub(crate) fn probe(forwarded: bool, viewers: impl FnOnce() -> Option<Viewers>) -> Option<Self> {
+        if cfg!(windows) {
+            return Some(Self { name: computer_name(), rex: None, forwarded });
+        }
         if cfg!(test) {
             return None;
         }
@@ -109,7 +115,11 @@ impl Host {
     pub(crate) fn report(&self, out: &mut String) {
         let Some(rex) = &self.rex else {
             writeln!(out, "Host: {}", self.name).unwrap();
-            out.push_str("Rex server: none answered; the panes work without it\n");
+            out.push_str(if cfg!(windows) {
+                "Rex server: not supported on Windows yet; the panes work without it\n"
+            } else {
+                "Rex server: none answered; the panes work without it\n"
+            });
             return;
         };
         writeln!(out, "Host: {} (Rex host {})", self.name, rex.short_id()).unwrap();
@@ -138,7 +148,11 @@ impl Host {
     pub(crate) fn json(&self, out: &mut String) {
         write!(out, "{{\"name\":{},\"forwarded\":{},\"rex\":", rex::json(&self.name), self.forwarded).unwrap();
         let Some(rex) = &self.rex else {
-            out.push_str("null}");
+            if cfg!(windows) {
+                write!(out, "null,\"rex_unsupported\":{}}}", rex::json(REX_UNSUPPORTED)).unwrap();
+            } else {
+                out.push_str("null}");
+            }
             return;
         };
         let compatibility = rex.compatibility();
@@ -179,12 +193,19 @@ fn computer_name() -> String {
     if let Some(name) = std::env::var_os("MILO_TEST_HOST_NAME").and_then(|name| name.into_string().ok()) {
         return short_name(name.as_bytes());
     }
-    let mut buffer = [0u8; 256];
-    // SAFETY: The buffer is writable for the length given, and one byte is
-    // kept back so that the name always ends in a NUL.
-    let failed = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len() - 1) } != 0;
-    let len = buffer.iter().position(|&byte| byte == 0).unwrap_or(0);
-    short_name(if failed { &[] } else { &buffer[..len] })
+    #[cfg(windows)]
+    {
+        short_name(std::env::var("COMPUTERNAME").unwrap_or_default().as_bytes())
+    }
+    #[cfg(unix)]
+    {
+        let mut buffer = [0u8; 256];
+        // SAFETY: The buffer is writable for the length given, and one byte is
+        // kept back so that the name always ends in a NUL.
+        let failed = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len() - 1) } != 0;
+        let len = buffer.iter().position(|&byte| byte == 0).unwrap_or(0);
+        short_name(if failed { &[] } else { &buffer[..len] })
+    }
 }
 
 fn short_name(full: &[u8]) -> String {
@@ -238,9 +259,36 @@ mod tests {
                  Rex apps: connected from another device only; on that computer, milo web --host LABEL opens these settings\n"
             )
         );
-        let mut without = String::new();
-        Host { name: "studio".into(), rex: None, forwarded: false }.report(&mut without);
-        assert_eq!(without, "Host: studio\nRex server: none answered; the panes work without it\n");
+        #[cfg(unix)]
+        {
+            let mut without = String::new();
+            Host { name: "studio".into(), rex: None, forwarded: false }.report(&mut without);
+            assert_eq!(without, "Host: studio\nRex server: none answered; the panes work without it\n");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_never_asks_rex_and_says_its_integration_is_not_supported() {
+        let host = Host::probe(true, || panic!("Windows must not ask which Rex apps are open")).unwrap();
+        assert!(host.rex.is_none() && host.forwarded);
+        let mut out = String::new();
+        host.report(&mut out);
+        assert!(out.ends_with("Rex server: not supported on Windows yet; the panes work without it\n"), "{out}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_page_is_told_when_windows_has_no_rex_integration() {
+        let mut out = String::new();
+        Host::probe(false, || None).unwrap().json(&mut out);
+        assert!(crate::json::Value::parse(out.as_bytes()).is_some(), "{out}");
+        assert!(
+            out.ends_with(
+                r#""rex":null,"rex_unsupported":"Rex integration is not supported on Windows yet. The panes work without it."}"#
+            ),
+            "{out}"
+        );
     }
 
     #[test]

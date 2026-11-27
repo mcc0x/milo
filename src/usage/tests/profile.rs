@@ -11,7 +11,7 @@ use super::unchanged::Writer;
 use super::*;
 
 pub(super) fn ready(fd: RawFd) {
-    let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    let mut poll = crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 };
     loop {
         // SAFETY: `poll` is writable and the caller's job owns the descriptor.
         match unsafe { libc::poll(&raw mut poll, 1, 30_000) } {

@@ -1,7 +1,10 @@
 //! Caches the line counts of the tracked changes in a status snapshot.
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use super::{FileStamp, Kind, PATHS_LIMIT, PendingFile, Repo, parse_files};
@@ -18,18 +21,33 @@ impl DiffStamp {
     pub(super) fn at(path: &Path) -> Self {
         match path.symlink_metadata() {
             Ok(meta) => match FileStamp::of(&meta) {
-                Some(stamp) if meta.is_file() || meta.is_symlink() => Self::File {
-                    stamp,
-                    device: meta.dev(),
-                    inode: meta.ino(),
-                    changed: (meta.ctime(), meta.ctime_nsec()),
-                },
+                Some(stamp) if meta.is_file() || meta.is_symlink() => {
+                    let (device, inode, changed) = Self::identity(&meta);
+                    Self::File { stamp, device, inode, changed }
+                }
                 // A submodule can change commits without changing the directory stamp.
                 stamp => Self::Uncertain(stamp),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Missing,
             Err(_) => Self::Uncertain(None),
         }
+    }
+
+    #[cfg(unix)]
+    fn identity(meta: &std::fs::Metadata) -> (u64, u64, (i64, i64)) {
+        (meta.dev(), meta.ino(), (meta.ctime(), meta.ctime_nsec()))
+    }
+
+    /// Windows keeps no inode in the metadata: the creation time tells a replaced file, and
+    /// the attributes and write time tell an altered one, at the clock's finest step.
+    #[cfg(windows)]
+    fn identity(meta: &std::fs::Metadata) -> (u64, u64, (i64, i64)) {
+        let written = i64::try_from(meta.last_write_time()).unwrap_or(i64::MAX);
+        (
+            u64::from(meta.file_attributes()),
+            meta.creation_time(),
+            (written, i64::try_from(meta.file_size()).unwrap_or(i64::MAX)),
+        )
     }
 
     fn file(self) -> Option<FileStamp> {
@@ -336,6 +354,7 @@ mod tests {
         assert_eq!(tracked_page(&mut repo).add, 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn large_refresh_recounts_only_the_saved_path() {
         let f = Fixture::new();
@@ -410,6 +429,7 @@ mod tests {
         assert_eq!(warm.moved_from("new.txt"), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn single_path_counts_include_former_children_but_not_matching_siblings() {
         check_folder_to_file_count(":(top)page");
@@ -440,6 +460,7 @@ mod tests {
         assert!(local.next().is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_single_path_recount_does_not_report_an_unpushed_backslash_twin_as_dirty() {
         let f = Fixture::new();

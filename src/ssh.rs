@@ -29,6 +29,7 @@ pub mod watch;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read as _};
+#[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -218,6 +219,9 @@ impl Helper {
 
 /// Runs `milo ssh` and returns the exit status of the shell's session.
 pub fn connect(request: &Request<'_>) -> Result<i32, String> {
+    if cfg!(windows) {
+        return Err("milo ssh is not supported on Windows yet".into());
+    }
     let target = rex::Target::current().ok_or(OUTSIDE_REX)?;
     let block = rex::exact_id(&target.block, "block:").ok_or(OUTSIDE_REX)?.to_owned();
     let state = paths::state_dir().ok_or("Milo's state folder is unavailable")?;
@@ -277,8 +281,13 @@ pub fn pane_command(link: &Link, role: &str) -> Option<Command> {
 }
 
 fn code(status: ExitStatus) -> i32 {
-    use std::os::unix::process::ExitStatusExt as _;
-    status.code().or_else(|| status.signal().map(|signal| 128 + signal)).unwrap_or(1)
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        status.code().or_else(|| status.signal().map(|signal| 128 + signal)).unwrap_or(1)
+    }
+    #[cfg(windows)]
+    status.code().unwrap_or(1)
 }
 
 fn token() -> io::Result<String> {
@@ -298,7 +307,10 @@ impl Control {
     fn create(token: &str) -> io::Result<Self> {
         let dir = std::env::temp_dir().join(format!("milo-ssh-{}", &token[..16]));
         // A folder already there is someone else's: never reuse it.
+        #[cfg(unix)]
         fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        #[cfg(windows)]
+        fs::create_dir(&dir)?;
         let socket = dir.join("c");
         Ok(Self { dir, socket })
     }
@@ -311,7 +323,7 @@ impl Drop for Control {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

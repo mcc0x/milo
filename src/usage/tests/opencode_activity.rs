@@ -410,7 +410,7 @@ fn the_database_path_follows_opencodes_own_overrides() {
 /// Waits for background reads the way the pane does, through its external descriptor.
 pub(super) fn settle(usage: &mut Usage) {
     while let Some(fd) = usage.external_fd() {
-        let mut ready = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        let mut ready = crate::sys::pollfd { fd, events: crate::sys::POLLIN, revents: 0 };
         let timeout = i32::try_from(TEST_WAIT.as_millis()).unwrap();
         // SAFETY: The single pollfd is live, and usage still owns its descriptor.
         let result = unsafe { libc::poll(&raw mut ready, 1, timeout) };

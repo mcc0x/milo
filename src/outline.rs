@@ -7,9 +7,9 @@ mod refresh;
 mod search;
 mod untracked;
 
+use crate::sys::RawFd;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::os::fd::RawFd;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -758,6 +758,7 @@ mod tests {
         assert!(o.reading.is_some());
     }
 
+    #[cfg(unix)]
     #[test]
     fn tree_actions_never_retarget_a_missing_selection_after_refresh() {
         use crate::native::tests::with_fake;
@@ -801,6 +802,7 @@ mod tests {
         assert!(draw(&mut o, 80, 12).text()[11].contains("The project folder changed"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn tree_actions_filter_folders_and_recheck_native_open_on_selection() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -835,6 +837,7 @@ mod tests {
         assert!(o.reading.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn find_actions_require_a_painted_result_and_preserve_the_query() {
         use crate::native::{Action, tests::with_fake};
@@ -886,6 +889,7 @@ mod tests {
         assert!(o.reading.is_some());
     }
 
+    #[cfg(unix)]
     #[test]
     fn find_offers_preview_only_for_eligible_working_markdown() {
         use std::os::unix::fs::symlink;
@@ -950,6 +954,7 @@ mod tests {
         assert!(!matches.iter().any(|row| row.contains("ignored.rs")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn native_tree_actions_use_the_cursor_and_only_reveal_folders() {
         use crate::native::{Action, tests::with_fake};
@@ -982,6 +987,7 @@ mod tests {
         assert_eq!(o.selected_path().as_deref(), Some("second/"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn native_tree_actions_wait_for_a_replacement_row_to_be_shown_or_chosen() {
         use crate::native::{Action, tests::with_fake};
@@ -1022,6 +1028,7 @@ mod tests {
         assert_eq!(calls, [(Action::Reveal, f.root.join("c.txt"))]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn native_find_actions_filter_first_and_leave_the_query_and_result_alone() {
         use crate::native::{Action, tests::with_fake};
@@ -1074,6 +1081,7 @@ mod tests {
         assert!(o.reading.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_find_viewport_must_have_room_for_the_match_before_native_actions_run() {
         use crate::native::{Action, tests::with_fake};
@@ -1098,6 +1106,7 @@ mod tests {
         assert_eq!(calls, [(Action::Reveal, f.root.join("selected.txt"))]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn changing_between_tree_find_and_inline_reader_needs_a_new_visible_target() {
         use crate::native::{Action, tests::with_fake};
@@ -1179,6 +1188,7 @@ mod tests {
         assert!(menu[0].contains("notes.txt") && menu[0].contains("Actions"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_refresh_does_not_reauthorize_a_replaced_project_root() {
         use crate::native::tests::with_fake;
@@ -1430,6 +1440,7 @@ mod tests {
         assert_eq!(o.next_frame(), None, "no further frames once sweep and marks have finished");
     }
 
+    #[cfg(unix)]
     #[test]
     fn binary_and_large_files_are_not_retried_and_links_are_not_followed() {
         let f = Fixture::new();

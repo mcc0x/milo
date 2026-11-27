@@ -692,6 +692,7 @@ diff --git a/staged.txt b/staged.txt
         review.help().assert_rows_fit(26);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_patch_cannot_show_a_file_outside_the_project_or_through_a_link() {
         let f = Fixture::folder();

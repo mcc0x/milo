@@ -38,7 +38,7 @@ export function HostSummary({host, headingId}: {host: HostState; headingId: stri
       <div className="setting-info">
         <span className="setting-label" id="host-name">{host.name}</span>
         <span className="setting-detail" id="host-rex">
-          {rex ? `Rex ${rex.version} · API ${rex.api} · host ${rex.host_id}` : 'No Rex server answered. The panes work without it.'}
+          {rex ? `Rex ${rex.version} · API ${rex.api} · host ${rex.host_id}` : host.rex_unsupported ?? 'No Rex server answered. The panes work without it.'}
         </span>
         {rex ? <span className="setting-detail" id="host-note">{rex.note}</span> : null}
         {rex?.command && (rex.command.version !== rex.version || rex.command.api !== rex.api)

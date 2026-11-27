@@ -60,6 +60,8 @@ export interface HostState {
     note: string;
     viewers: 'here' | 'elsewhere' | 'nobody' | null;
   } | null;
+  /** Why this computer has no Rex integration, when its platform cannot have one. */
+  rex_unsupported?: string;
 }
 
 export type TransferGroup = 'appearance' | 'workflow' | 'usage' | 'layout';
@@ -129,6 +131,8 @@ export interface SessionState {
   alerts: AlertsState | null;
   presence: PresenceState | null;
   telemetry: {enabled: boolean; status: TelemetryStatus} | null;
+  /** Why alerts or presence cannot be offered on this platform, when that is the reason. */
+  unsupported?: {alerts: string; presence: string; automation: string};
 }
 
 export const groupLabels: Record<GroupKey, string> = {

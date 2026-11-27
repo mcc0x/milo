@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read as _, Write as _};
-use std::os::unix::ffi::OsStrExt as _;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -558,12 +558,12 @@ pub(crate) fn valid_choice(key: &str, value: &str) -> bool {
 
 fn remove_layer(path: &Path, check: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
     let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    let lock = match fs_ops::open_dir(dir) {
+    let lock = match fs_ops::dir_lock(dir) {
         Ok(dir) => dir,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return check(),
         Err(e) => return Err(e),
     };
-    lock.lock()?;
+    fs_ops::lock_dir(&lock)?;
     check()?;
     if writable_mode(path)?.is_none() {
         return Ok(());
@@ -581,7 +581,10 @@ fn writable_mode(path: &Path) -> io::Result<Option<u32>> {
         Ok(info) if info.permissions().readonly() => {
             Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} is read-only", path.display())))
         }
+        #[cfg(unix)]
         Ok(info) => Ok(Some(info.permissions().mode() & 0o7777)),
+        #[cfg(windows)]
+        Ok(_) => Ok(Some(0)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
@@ -606,10 +609,27 @@ pub(crate) fn layers(dir: &Path, worktree: &Path) -> [PathBuf; 2] {
 
 /// A stable identifier for the checkout path, not the common git directory.
 fn worktree_key(root: &Path) -> u64 {
-    root.as_os_str()
-        .as_bytes()
+    worktree_bytes(root)
         .iter()
         .fold(0xcbf2_9ce4_8422_2325, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// The checkout path as settings files name it. Git writes a Windows path with forward slashes and
+/// an upper-case drive, while a typed path may use backslashes, a lower-case drive or the \\?\
+/// prefix, so every spelling of one folder is named the way Git writes it.
+pub(crate) fn worktree_bytes(root: &Path) -> std::borrow::Cow<'_, [u8]> {
+    #[cfg(windows)]
+    {
+        let plain = crate::sys::plain_path(root.to_path_buf());
+        let mut bytes: Vec<u8> =
+            plain.as_os_str().as_encoded_bytes().iter().map(|&byte| if byte == b'\\' { b'/' } else { byte }).collect();
+        if bytes.get(1) == Some(&b':') {
+            bytes[0].make_ascii_uppercase();
+        }
+        bytes.into()
+    }
+    #[cfg(not(windows))]
+    root.as_os_str().as_encoded_bytes().into()
 }
 
 pub(crate) fn read(path: &Path, limit: u64) -> io::Result<Option<String>> {
@@ -638,20 +658,26 @@ pub(crate) fn locked<T>(path: &Path, save: impl FnOnce(&Path) -> io::Result<T>) 
 fn lock_directory(dir: &Path) -> io::Result<fs::File> {
     fs::create_dir_all(dir)?;
     // Lock the directory because the files themselves are atomically replaced.
-    let lock = fs_ops::open_dir(dir)?;
-    lock.lock()?;
+    let lock = fs_ops::dir_lock(dir)?;
+    fs_ops::lock_dir(&lock)?;
     Ok(lock)
 }
 
 pub(crate) fn replace(dir: &Path, path: &Path, text: &str) -> io::Result<()> {
     static SERIAL: AtomicU32 = AtomicU32::new(0);
+    #[cfg(unix)]
     let mode = writable_mode(path)?;
+    #[cfg(windows)]
+    writable_mode(path)?;
     let (temp, mut file) = fs_ops::Temp::create(dir.join(format!(
         ".milo-prefs-{}-{}",
         std::process::id(),
         SERIAL.fetch_add(1, Ordering::Relaxed),
     )))?;
     file.write_all(text.as_bytes())?;
+    // Windows keeps no mode bits here: the file lives in the per-user profile directory, whose
+    // inherited access list is already private.
+    #[cfg(unix)]
     if let Some(mode) = mode {
         file.set_permissions(fs::Permissions::from_mode(mode))?;
     }
@@ -730,6 +756,21 @@ fn decode_folds(text: &str) -> BTreeMap<String, bool> {
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
+
+    #[cfg(windows)]
+    #[test]
+    fn every_spelling_of_one_windows_checkout_names_the_same_settings() {
+        let config = Path::new(r"C:\Users\me\AppData\Roaming\milo");
+        let git = Path::new("C:/Users/me/src/milo");
+        for typed in
+            [r"C:\Users\me\src\milo", r"c:\Users\me\src\milo", r"\\?\C:\Users\me\src\milo", "c:/Users/me/src/milo"]
+        {
+            assert_eq!(worktree_bytes(Path::new(typed)), worktree_bytes(git), "{typed}");
+            assert_eq!(config_file(config, Some(Path::new(typed))), config_file(config, Some(git)), "{typed}");
+        }
+        assert_eq!(&*worktree_bytes(git), b"C:/Users/me/src/milo");
+        assert_ne!(worktree_bytes(Path::new(r"C:\Users\me\src\other")), worktree_bytes(git));
+    }
 
     #[test]
     fn usage_tool_choices_save_only_what_changed_and_files_without_them_stay_automatic() {
@@ -868,6 +909,7 @@ mod tests {
         assert_eq!(Preferences::resolve_in(&f.root, Some(&root)).unwrap(), expected);
     }
 
+    #[cfg(unix)]
     #[test]
     fn read_only_preference_layers_can_be_inherited_but_not_replaced_or_removed() {
         let f = Fixture::folder();
@@ -897,6 +939,7 @@ mod tests {
         assert!(fs::metadata(&local).unwrap().permissions().readonly());
     }
 
+    #[cfg(unix)]
     #[test]
     fn updating_preferences_preserves_existing_permissions() {
         let f = Fixture::folder();

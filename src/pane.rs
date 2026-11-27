@@ -1,9 +1,9 @@
 //! Runs terminal panes with shared input, help, redraws and file watching.
 
+use crate::sys::{AsRawFd, RawFd};
 use std::collections::VecDeque;
 use std::io;
 use std::ops::Range;
-use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -482,7 +482,7 @@ fn draw_loading(screen: &mut Screen, dir: Option<&Path>, w: usize, h: usize) {
         screen.put_fit(0, 0, w, "Reading…", ui::FAINT);
         return;
     };
-    let absolute = dir.canonicalize().ok();
+    let absolute = crate::sys::canonicalize(dir).ok();
     let dir = absolute.as_deref().unwrap_or(dir);
     let project = dir.ancestors().find(|dir| dir.join(".git").exists()).unwrap_or(dir);
     let name = project.file_name().unwrap_or(project.as_os_str()).to_string_lossy();
@@ -762,7 +762,9 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                     }
                     // Skip stale controls and the repeated click that opened another pane.
                     if let Key::Click(x, y) = key
-                        && (overlay_changed || !pane_row_available(screen, &help, &pace, y) || handoff_click.is_repeat(x, y))
+                        && (overlay_changed
+                            || !pane_row_available(screen, &help, &pace, y)
+                            || handoff_click.is_repeat(x, y))
                     {
                         continue;
                     }
@@ -893,7 +895,9 @@ fn pane_row_available(screen: &Screen, help: &Option<Page>, pace: &Option<Pace>,
 mod tests {
     use super::*;
     use std::fs::File;
-    use std::io::{Read, Write};
+    use std::io::Read;
+    #[cfg(unix)]
+    use std::io::Write;
 
     use crate::{fixture, git::Repo, outline::Outline};
 
@@ -904,7 +908,7 @@ mod tests {
         let mut output = Vec::new();
         while !String::from_utf8_lossy(&output).contains(text) {
             let left = until.saturating_duration_since(Instant::now());
-            let mut fds = [libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+            let mut fds = [crate::sys::pollfd { fd: master.as_raw_fd(), events: crate::sys::POLLIN, revents: 0 }];
             if left.is_zero() {
                 break;
             }
@@ -928,6 +932,7 @@ mod tests {
         String::from_utf8_lossy(&output).into_owned()
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_fast_open_does_not_draw_a_loading_frame() {
         let mut screen = Screen::new();
@@ -938,6 +943,7 @@ mod tests {
         assert!(screen.emitted().is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_loading_screen_preserves_the_most_recent_focus_report() {
         let mut screen = Screen::new();
@@ -950,6 +956,7 @@ mod tests {
         assert_eq!(focused, Some(true));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_queued_cancel_does_not_launch_browser_settings() {
         let open = || Ok(Box::new(crate::home::Home::new()) as Box<dyn Pane>);
@@ -969,6 +976,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn native_shortcuts_wait_for_the_pane_and_do_not_outrun_quit() {
         use crate::native::Action;
@@ -1020,6 +1028,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_hover_report_repaints_the_link_with_an_underline() {
         struct Link;
@@ -1064,6 +1073,7 @@ mod tests {
         assert_eq!(screen.text(), ["Reading…"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_slow_first_check_has_a_loading_frame() {
         struct Checked(File);
@@ -1089,6 +1099,7 @@ mod tests {
         run_entered(Start::Check, &|| Ok(Box::new(Checked(master.try_clone().unwrap()))), &mut terminal).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_ignored_key_leaves_a_frame_alone_but_a_terminal_reply_redraws_it() {
         struct Quiet {

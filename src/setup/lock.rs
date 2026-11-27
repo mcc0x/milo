@@ -2,10 +2,10 @@
 //! lasts through a save; the listener lock stays open when milo becomes Rex;
 //! the alerts and presence locks last for the lifetimes of their independent helpers.
 
+use crate::sys::AsRawFd;
 use std::ffi::CStr;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind};
-use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::Command;

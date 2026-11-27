@@ -13,6 +13,7 @@ use crate::telemetry;
 
 const BAD_ACTION: &str = "Unknown or invalid Settings action.";
 const UNAVAILABLE: &str = "That choice is unavailable in this Settings session.";
+const NOT_ON_WINDOWS: &str = "Not supported on Windows yet";
 const LOST_TAB: &str = "The original Rex tab is no longer available. Reopen Settings in the tab you want to change.";
 
 impl Display for doctor::Health {
@@ -369,6 +370,14 @@ impl Editor {
                 out.push_str("}}");
             }
             None => out.push_str("null"),
+        }
+        if cfg!(windows) {
+            write!(
+                out,
+                ",\"unsupported\":{{\"alerts\":{0},\"presence\":{0},\"automation\":{0}}}",
+                Quoted(NOT_ON_WINDOWS)
+            )
+            .expect("writing to a string");
         }
         // Whether an import is kept that the page can offer to take back.
         let undo = setup.store.as_ref().is_some_and(|store| transfer::undo_available(&store.state));
@@ -1177,7 +1186,7 @@ impl Display for Quoted<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
@@ -1888,6 +1897,7 @@ mod tests {
         assert_eq!(field(field(alerts, "telegram"), "active").boolean(), Some(false));
     }
 
+    #[cfg(unix)]
     #[test]
     fn browser_telegram_reconnect_reports_an_incompatible_binding_and_accepts_local_forget() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -2235,5 +2245,188 @@ mod tests {
         // Turning off never waits for a review.
         fs::write(&file, "presence = true\ndetails = both\n").unwrap();
         assert!(!presence(&action(&mut editor, r#""action":"presence","value":"off""#).unwrap()).0);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::layout::Side;
+    use super::*;
+    use crate::fixture::Fixture;
+    use std::fs;
+
+    fn fixture_store(folder: &Fixture) -> Store {
+        Store {
+            init: folder.root.join("init.lua"),
+            config: folder.root.join("config"),
+            state: folder.root.join("state"),
+            claude: folder.root.join("claude.json"),
+            claude_state: None,
+        }
+    }
+
+    fn outside(store: Store, root: Option<&Path>) -> Editor {
+        Editor::new(Some(store), false, None, root.map(Path::to_path_buf), None, |_| {
+            panic!("outside Rex must never run an integration command")
+        })
+    }
+
+    impl Editor {
+        pub(crate) fn test_outside(folder: &Fixture) -> Self {
+            outside(fixture_store(folder), None)
+        }
+    }
+
+    fn action(editor: &mut Editor, fields: &str) -> Result<String, String> {
+        editor.action(format!("{{\"version\":{}, {fields}}}", editor.version).as_bytes())
+    }
+
+    #[test]
+    fn preferences_saved_in_the_browser_are_read_after_a_restart() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut first = outside(store.clone(), Some(&f.root));
+        action(&mut first, r#""action":"set","field":"appearance.icons","value":"off""#).unwrap();
+        action(&mut first, r#""action":"set","field":"workflow.project_mode","value":"pin""#).unwrap();
+        assert!(!store.config.exists(), "a draft writes nothing");
+        action(&mut first, r#""action":"save","group":"preferences","scope":"global""#).unwrap();
+        drop(first);
+
+        let second = outside(store.clone(), Some(&f.root));
+        assert!(!second.setup.prefs_dirty());
+        assert_eq!(second.setup.prefs.icons, IconMode::Off);
+        assert_eq!(second.setup.prefs.project_mode, ProjectMode::Pin);
+        let saved = std::fs::File::open(crate::preferences::layer_file(&store.config, None)).unwrap();
+        assert_eq!(crate::sys::file_security(&saved).unwrap(), crate::sys::private_security().unwrap());
+    }
+
+    #[test]
+    fn a_worktree_layout_saved_in_the_browser_is_read_after_a_restart() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut first = outside(store.clone(), Some(&f.root));
+        action(&mut first, r#""action":"set","field":"layout.side","value":"left""#).unwrap();
+        action(&mut first, r#""action":"set","field":"layout.width","value":0.41"#).unwrap();
+        let saved = action(&mut first, r#""action":"save","group":"layout","scope":"worktree""#).unwrap();
+        assert!(saved.contains("Rex integration unchanged."), "{saved}");
+        drop(first);
+
+        let second = outside(store.clone(), Some(&f.root));
+        assert!(!second.setup.dirty());
+        assert_eq!(second.setup.layout.geometry.side, Side::Left);
+        assert_eq!(second.setup.layout.width, "0.41");
+        assert!(!store.init.exists(), "a layout saved outside Rex leaves Rex's settings alone");
+    }
+
+    #[test]
+    fn settings_move_between_hosts_and_the_import_can_be_taken_back() {
+        let (first, second) = (Fixture::folder(), Fixture::folder());
+        let (from, to) = (fixture_store(&first), fixture_store(&second));
+        for (store, icons) in [(&from, "plain"), (&to, "off")] {
+            fs::create_dir(&store.config).unwrap();
+            fs::write(crate::preferences::layer_file(&store.config, None), format!("icons = {icons}\n")).unwrap();
+        }
+        let mut editor = outside(from, None);
+        let TransferReply::Data(json) =
+            editor.transfer(br#"{"action":"export","groups":["appearance"],"scope":"global"}"#)
+        else {
+            panic!("the export was refused")
+        };
+        let bundle = Value::parse(json.as_bytes()).unwrap().fields(["bundle"])[0].unwrap().string(4096).unwrap();
+        assert!(bundle.contains("icons = plain"), "{bundle}");
+
+        let global = crate::preferences::layer_file(&to.config, None);
+        let mut editor = outside(to, None);
+        let bundle = Quoted(&bundle);
+        let TransferReply::Data(json) =
+            editor.transfer(format!(r#"{{"action":"preview","bundle":{bundle}}}"#).as_bytes())
+        else {
+            panic!("the preview was refused")
+        };
+        let basis = Value::parse(json.as_bytes()).unwrap().fields(["basis"])[0].unwrap().string(16).unwrap();
+        assert_eq!(fs::read_to_string(&global).unwrap(), "icons = off\n", "a preview changed a file");
+        let apply = format!(r#"{{"action":"apply","bundle":{bundle},"basis":"{basis}","version":{}}}"#, editor.version);
+        assert!(matches!(editor.transfer(apply.as_bytes()), TransferReply::Changed(_)));
+        assert_eq!(fs::read_to_string(&global).unwrap(), "icons = plain\n");
+
+        let undo = format!(r#"{{"action":"undo","version":{}}}"#, editor.version);
+        assert!(matches!(editor.transfer(undo.as_bytes()), TransferReply::Changed(_)));
+        assert_eq!(fs::read_to_string(&global).unwrap(), "icons = off\n");
+        assert!(crate::alerts::Alerts::real().is_none());
+        assert!(editor.state().contains(r#""alerts":null"#));
+    }
+
+    #[test]
+    fn the_page_is_told_why_alerts_presence_and_rex_are_missing() {
+        let f = Fixture::folder();
+        let mut editor = outside(fixture_store(&f), Some(&f.root));
+        editor.host = Host::probe(false, || None);
+        let state = editor.state();
+        let page = Value::parse(state.as_bytes()).unwrap_or_else(|| panic!("{state}"));
+        let [alerts, presence, unsupported, host] = page.fields(["alerts", "presence", "unsupported", "host"]);
+        assert!(alerts.unwrap().null() && presence.unwrap().null(), "{state}");
+        let [alerts, presence, automation] = unsupported.unwrap().fields(["alerts", "presence", "automation"]);
+        for reason in [alerts, presence, automation] {
+            assert_eq!(reason.unwrap().string(64).as_deref(), Some("Not supported on Windows yet"), "{state}");
+        }
+        let [rex, reason] = host.unwrap().fields(["rex", "rex_unsupported"]);
+        assert!(rex.unwrap().null(), "{state}");
+        let expected = "Rex integration is not supported on Windows yet. The panes work without it.";
+        assert_eq!(reason.unwrap().string(128).as_deref(), Some(expected), "{state}");
+    }
+
+    #[test]
+    fn doctor_reads_the_layout_saved_in_the_browser_and_says_the_rest_is_not_supported() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut editor = outside(store.clone(), Some(&f.root));
+        action(&mut editor, r#""action":"set","field":"layout.side","value":"left""#).unwrap();
+        action(&mut editor, r#""action":"set","field":"layout.width","value":0.41"#).unwrap();
+        action(&mut editor, r#""action":"save","group":"layout","scope":"worktree""#).unwrap();
+        let report = doctor::report_for(&store, Some(&f.root)).unwrap();
+        assert!(report.contains("\nSaved sidebar: 41.0% wide, left (worktree override)\n"), "{report}");
+        assert!(
+            report.contains("\nLive sidebar: not observed (Rex integration is not supported on Windows yet)\n"),
+            "{report}"
+        );
+        assert!(report.ends_with("\nClaude status line: not installed"), "{report}");
+        assert!(!store.init.exists(), "doctor wrote Rex's settings");
+    }
+
+    #[test]
+    fn the_claude_status_line_is_written_for_git_bash_and_taken_out_again() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut editor = outside(store.clone(), Some(&f.root));
+        assert!(editor.state().contains(r#""claude_status":"Not enabled""#), "{}", editor.state());
+        action(&mut editor, r#""action":"set","field":"account.claude_limits","value":true"#).unwrap();
+        action(&mut editor, r#""action":"save","group":"account","scope":"account""#).unwrap();
+        let settings = fs::read_to_string(&store.claude).unwrap();
+        let exe = rex_files::executable().unwrap();
+        let exe = crate::sys::plain_path(exe).to_str().unwrap().replace('\\', "/");
+        assert!(settings.contains(&format!(r#""command": "'{exe}' claude-status""#)), "{settings}");
+        assert!(exe.as_bytes()[1..].starts_with(b":/"), "{exe}");
+        assert!(editor.state().contains(r#""claude_status":"Managed by Milo""#), "{}", editor.state());
+        let report = doctor::report_for(&store, Some(&f.root)).unwrap();
+        assert!(report.ends_with("\nClaude status line: managed by Milo"), "{report}");
+
+        action(&mut editor, r#""action":"set","field":"account.claude_limits","value":false"#).unwrap();
+        action(&mut editor, r#""action":"save","group":"account","scope":"account""#).unwrap();
+        assert!(!store.claude.exists() && !store.claude_note().exists(), "Milo left its status line behind");
+    }
+
+    #[test]
+    fn a_layout_save_refuses_while_another_save_holds_the_lock() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut editor = outside(store.clone(), Some(&f.root));
+        action(&mut editor, r#""action":"set","field":"layout.side","value":"right""#).unwrap();
+        let profiles = store.config.join("layouts");
+        std::fs::create_dir_all(&profiles).unwrap();
+        let busy = lock::setup(&profiles).unwrap();
+        let refused = action(&mut editor, r#""action":"save","group":"layout","scope":"worktree""#).unwrap_err();
+        assert!(refused.contains("Another setup is saving"), "{refused}");
+        drop(busy);
+        action(&mut editor, r#""action":"save","group":"layout","scope":"worktree""#).unwrap();
     }
 }

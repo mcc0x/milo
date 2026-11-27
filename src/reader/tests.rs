@@ -1,4 +1,7 @@
-use std::fs::{self, Permissions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::Permissions;
+#[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
@@ -109,6 +112,7 @@ fn reader_footer_clicks_only_work_where_the_hint_is_drawn() {
     assert_eq!(reader.key(Key::Click(column(&notice[5], "? help"), 5)), After::Help);
 }
 
+#[cfg(unix)]
 #[test]
 fn only_rendered_working_markdown_offers_tkmp_and_the_draft_keeps_its_keys() {
     let f = Fixture::new();
@@ -154,6 +158,7 @@ fn only_rendered_working_markdown_offers_tkmp_and_the_draft_keeps_its_keys() {
     assert_eq!(drawn(&mut reader, 80, 10), source);
 }
 
+#[cfg(unix)]
 #[test]
 fn stale_rendered_markdown_does_not_offer_a_preview_after_the_path_becomes_a_link() {
     let f = Fixture::folder();
@@ -173,6 +178,7 @@ fn stale_rendered_markdown_does_not_offer_a_preview_after_the_path_becomes_a_lin
     assert!(opened.is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn native_menu_actions_revalidate_the_path_after_the_menu_opens() {
     let f = Fixture::folder();
@@ -231,6 +237,7 @@ fn native_actions_refuse_commit_and_handed_over_views_of_a_working_file() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_native_action_keeps_the_original_root_even_when_its_path_is_reused() {
     let f = Fixture::folder();
@@ -294,15 +301,17 @@ fn text_with_a_picture_extension_still_shows_its_edits() {
     assert_eq!(&drawn(&mut working, 60, 6)[1..3], ["   - initial notes", " 1 + new notes"]);
 
     // Status-only updates and draw ticks use the already classified source.
-    use std::os::unix::fs::FileExt as _;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc;
     static SLOTS: AtomicUsize = AtomicUsize::new(0);
     let (entered, at_read) = mpsc::channel();
-    media_load::intercept_next_read(&SLOTS, Box::new(move |file, bytes, offset| {
-        entered.send(()).unwrap();
-        file.read_at(bytes, offset)
-    }));
+    media_load::intercept_next_read(
+        &SLOTS,
+        Box::new(move |file, bytes, offset| {
+            entered.send(()).unwrap();
+            crate::sys::read_at(file, bytes, offset)
+        }),
+    );
     f.git(&["add", "--", "notes.png"]);
     working.filesystem_changed();
     assert!(working.check());
@@ -564,16 +573,8 @@ fn changes_only_keeps_context_and_jump_position_in_working_and_committed_diffs()
         assert_eq!(reader.key(Key::Char('c')), After::Stay);
         let compact = drawn(&mut reader, 60, 24);
         for label in [
-            "… 7 unchanged lines",
-            "… 23 unchanged lines",
-            "… 16 unchanged lines",
-            "line 8",
-            "line 14",
-            "line 38",
-            "line 44",
-            "+ edited 11",
-            "+ edited 41",
-            "c full file",
+            "… 7 unchanged lines", "… 23 unchanged lines", "… 16 unchanged lines", "line 8", "line 14", "line 38",
+            "line 44", "+ edited 11", "+ edited 41", "c full file",
         ] {
             assert!(compact.iter().any(|row| row.contains(label)), "{label}: {compact:?}");
         }
@@ -831,7 +832,7 @@ fn a_file_replaced_with_the_same_length_and_mtime_refreshes_then_can_disappear()
     f.write("replacement", "edited");
     let replacement = f.root.join("replacement");
     let modified = path.metadata().unwrap().modified().unwrap();
-    fs::File::open(&replacement).unwrap().set_modified(modified).unwrap();
+    fs::OpenOptions::new().write(true).open(&replacement).unwrap().set_modified(modified).unwrap();
     fs::rename(replacement, &path).unwrap();
     assert!(reader.check());
     assert!(drawn(&mut reader, 60, 6)[1].ends_with("edited"));
@@ -841,6 +842,7 @@ fn a_file_replaced_with_the_same_length_and_mtime_refreshes_then_can_disappear()
     assert_eq!(drawn(&mut reader, 60, 6)[2].trim_start(), "This file is gone.");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_directory_replaced_by_a_link_while_open_does_not_show_its_target() {
     let f = Fixture::folder();
@@ -903,6 +905,7 @@ fn moved_project_readers_keep_reading_the_original_text_and_picture() {
     assert_eq!(watcher.scope().roots.as_slice(), std::slice::from_ref(&f.root));
 }
 
+#[cfg(unix)]
 #[test]
 fn reader_follows_internal_directory_links_without_following_the_final_link() {
     let f = Fixture::new();
@@ -932,6 +935,7 @@ fn reader_follows_internal_directory_links_without_following_the_final_link() {
     assert_eq!(drawn(&mut link, 60, 6)[1], " 1   ../other/file.txt");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_reader_follows_retargets_of_the_original_directory_alias() {
     let f = Fixture::new();
@@ -965,6 +969,7 @@ fn a_reader_follows_retargets_of_the_original_directory_alias() {
     assert_eq!(drawn(&mut reader, 60, 6)[1], " 1   first report");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_pipe_replacing_a_tracked_file_is_never_read_as_one() {
     let f = Fixture::new();
@@ -984,6 +989,7 @@ fn a_pipe_replacing_a_tracked_file_is_never_read_as_one() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn an_unreadable_tracked_file_explains_why_it_cannot_be_read() {
     let f = Fixture::new();
@@ -1063,10 +1069,8 @@ fn jumping_wraps_even_when_two_changes_share_the_last_page_top() {
     kinds[96] = LineKind::Del;
     let source = Source::Committed { project: PathBuf::new(), hash: "123abcd".into(), time: 0 };
     let mut reader = Reader::new("page.txt".into(), source, Preferences::default().icons, None);
-    reader.body = Body::Text(Text::new(
-        (1..).zip(kinds).map(|(number, kind)| Line::new(kind, number, "")).collect(),
-        None,
-    ));
+    reader.body =
+        Body::Text(Text::new((1..).zip(kinds).map(|(number, kind)| Line::new(kind, number, "")).collect(), None));
     drawn(&mut reader, 40, 20);
     assert_eq!(reader.top, 6);
     for (key, top, notice) in [
@@ -1215,6 +1219,7 @@ fn panning_left_after_batched_right_repeats_moves_from_the_right_edge() {
     assert!(drawn(&mut reader, 20, 3)[1].ends_with("efghijklmnopqr"));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_link_shows_its_path_even_when_the_target_is_gone() {
     let f = Fixture::new();
@@ -1367,7 +1372,7 @@ fn a_picture_is_shown_in_the_middle_at_its_own_size_where_the_terminal_can() {
     plain.answered();
     reader.draw(&mut plain);
     assert!(plain.picture_at().is_none());
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", windows)) {
         assert_eq!(plain.text()[4], format!("{}{}", " ".repeat(4), "▀".repeat(32)));
         assert_eq!(plain.text()[5], plain.text()[4]);
     } else {
@@ -1401,7 +1406,6 @@ fn a_parked_image_releases_loading_and_decoded_media_until_reopened() {
 
 #[test]
 fn canceled_source_reads_keep_their_slots_until_they_return() {
-    use std::os::unix::fs::FileExt as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
 
@@ -1412,13 +1416,16 @@ fn canceled_source_reads_keep_their_slots_until_they_return() {
         fs::write(&file, Picture::sample_png(width, 16)).unwrap();
         let (entered, at_read) = mpsc::channel();
         let (release, ready) = mpsc::channel();
-        media_load::intercept_next_read(&SLOTS, Box::new(move |file, bytes, offset| {
-            entered.send(()).unwrap();
-            // Simulate an in-progress read that cannot observe cancellation
-            // until I/O returns. Time out only to keep a broken test from hanging.
-            ready.recv_timeout(Duration::from_secs(5)).unwrap();
-            file.read_at(bytes, offset)
-        }));
+        media_load::intercept_next_read(
+            &SLOTS,
+            Box::new(move |file, bytes, offset| {
+                entered.send(()).unwrap();
+                // Simulate an in-progress read that cannot observe cancellation
+                // until I/O returns. Time out only to keep a broken test from hanging.
+                ready.recv_timeout(Duration::from_secs(5)).unwrap();
+                crate::sys::read_at(file, bytes, offset)
+            }),
+        );
         (Reader::open(&file).unwrap(), at_read, release)
     };
 
@@ -1550,6 +1557,7 @@ fn watched_binary_status_changes_do_not_rebuild_the_preview() {
     assert_eq!(picture_id(&reader), id);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_movie_gets_worktree_status_without_starting_playback() {
     let f = Fixture::new();
@@ -1584,6 +1592,7 @@ fn a_replaced_image_cannot_publish_its_old_preview() {
     assert!(matches!(&reader.body, Body::Picture(picture) if picture.width == 32));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_link_named_like_a_picture_is_shown_as_where_it_points() {
     let dir = Fixture::folder();
@@ -1598,6 +1607,7 @@ fn a_link_named_like_a_picture_is_shown_as_where_it_points() {
     fs::remove_file(dir.root.join("../outside.png")).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn the_deleted_path_of_a_link_named_like_a_picture_is_still_visible() {
     let f = Fixture::new();
@@ -1610,6 +1620,7 @@ fn the_deleted_path_of_a_link_named_like_a_picture_is_still_visible() {
     assert_eq!(rows[1], "   - ../previous.png");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_directory_link_cannot_take_the_reader_out_of_the_project() {
     let project = Fixture::new();
@@ -1621,6 +1632,7 @@ fn a_directory_link_cannot_take_the_reader_out_of_the_project() {
     assert!(Reader::open(&outside.root.join("page.txt")).is_some());
 }
 
+#[cfg(unix)]
 #[test]
 fn an_unreadable_file_is_not_reported_as_gone() {
     let dir = Fixture::folder();
@@ -1638,6 +1650,7 @@ fn an_unreadable_file_is_not_reported_as_gone() {
     assert_eq!(drawn(&mut gone, 60, 6)[2].trim_start(), "This file is gone.");
 }
 
+#[cfg(unix)]
 #[test]
 fn an_unreadable_picture_explains_why_it_cannot_be_shown() {
     let f = Fixture::folder();
@@ -1681,6 +1694,7 @@ fn single_file_commit_reads_distinguish_rename_destinations_deletions_and_unchan
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_non_utf8_working_path_never_uses_its_lossy_sibling() {
     use std::ffi::OsStr;
@@ -1708,6 +1722,7 @@ fn a_non_utf8_working_path_never_uses_its_lossy_sibling() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_non_utf8_commit_path_cannot_select_a_different_file() {
     use std::ffi::OsStr;
@@ -1924,7 +1939,8 @@ fn text_with_mp4_suffix_keeps_its_working_diff() {
 #[test]
 fn editing_rendered_markdown_keeps_the_inactive_source_viewport() {
     let f = Fixture::new();
-    let notes: String = (0..48).map(|i| format!("## Marker {i:02} with enough text to require horizontal panning\n")).collect();
+    let notes: String =
+        (0..48).map(|i| format!("## Marker {i:02} with enough text to require horizontal panning\n")).collect();
     f.write("notes.md", &notes);
     let mut reader = Reader::open(&f.root.join("notes.md")).unwrap();
     reader.key(Key::Char('m'));
@@ -1945,7 +1961,6 @@ fn editing_rendered_markdown_keeps_the_inactive_source_viewport() {
 
 #[test]
 fn returning_to_suffix_text_keeps_the_draft_top_after_the_diff_loads() {
-    use std::os::unix::fs::FileExt as _;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc;
 
@@ -1968,10 +1983,13 @@ fn returning_to_suffix_text_keeps_the_draft_top_after_the_diff_loads() {
     let pause_reload = || {
         static SLOTS: AtomicUsize = AtomicUsize::new(0);
         let (resume, blocked) = mpsc::channel::<()>();
-        media_load::intercept_next_read(&SLOTS, Box::new(move |file, bytes, offset| {
-            let _ = blocked.recv();
-            file.read_at(bytes, offset)
-        }));
+        media_load::intercept_next_read(
+            &SLOTS,
+            Box::new(move |file, bytes, offset| {
+                let _ = blocked.recv();
+                crate::sys::read_at(file, bytes, offset)
+            }),
+        );
         resume
     };
     let pending = |reader: &mut Reader, resume: mpsc::Sender<()>| {
@@ -2136,6 +2154,7 @@ fn a_truncated_working_markdown_keeps_the_anchor_of_the_last_nonempty_preview() 
     assert!(drawn(&mut reader, 40, 5)[1].starts_with("Entry 09"));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_missing_or_linked_working_markdown_never_draws_its_cached_preview() {
     let f = Fixture::folder();
