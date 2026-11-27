@@ -14,6 +14,8 @@ ALL = APP | PUBLIC | DASHBOARD
 def path_jobs(path):
     if path == b"hosted/milo-alert-texts.json" or path.startswith(b"dashboard/"):
         return APP | DASHBOARD
+    if path == b"README.md":
+        return PUBLIC | {"portable"}
     if path == b"site/public/install.sh":
         return PUBLIC | {"portable", "macos"}
     if path in (b"docs/img/milo-icon.png", b"site/src/images/milo-lockup.webp"):
@@ -43,7 +45,7 @@ def path_jobs(path):
     ):
         return APP
     if path.startswith((b"docs/", b"site/", b"skills/")) or path in (
-        b"README.md", b"CONTRIBUTING.md", b"AGENTS.md", b"llms.txt", b"CODE_OF_CONDUCT.md", b"SECURITY.md",
+        b"CONTRIBUTING.md", b"AGENTS.md", b"llms.txt", b"CODE_OF_CONDUCT.md", b"SECURITY.md",
     ):
         return PUBLIC
     return ALL

@@ -10,7 +10,7 @@ from pr_impact import ALL, APP, DASHBOARD, PUBLIC, path_jobs, pr_jobs
 class PathJobs(unittest.TestCase):
     def test_repository_inputs(self):
         cases = {
-            b"README.md": PUBLIC,
+            b"README.md": PUBLIC | {"portable"},
             b"docs/usage.md": PUBLIC,
             b"skills/milo/SKILL.md": PUBLIC,
             b"site/bun.lock": PUBLIC,
@@ -119,6 +119,11 @@ class MergeJobs(unittest.TestCase):
         self.write("site/next.config.ts")
         (self.root / "Cargo.lock").unlink()
         self.assertEqual(pr_jobs(*self.merged(), cwd=self.root), APP | PUBLIC)
+
+    def test_readme_and_its_published_bundle_keep_portable_tests(self):
+        self.write("README.md", "Updated readme\n")
+        self.write("site/public/llms-full.txt")
+        self.assertEqual(pr_jobs(*self.merged(), cwd=self.root), PUBLIC | {"portable"})
 
     def test_rename_keeps_the_old_path(self):
         (self.root / "docs").mkdir()
