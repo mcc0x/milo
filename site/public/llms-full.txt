@@ -8,7 +8,7 @@ Source: https://github.com/mcc0x/milo/blob/main/README.md
 
 <p align="center">
   <a href="https://usemilo.net">
-    <img src="https://github.com/mcc0x/milo/blob/main/docs/img/milo-readme-banner.webp" width="960" alt="Milo — Your Git workspace, inside Rex. Browse files, commits and diffs, edit code, track agent usage, save pane layouts, and get alerts in Discord or Telegram.">
+    <img src="https://github.com/mcc0x/milo/blob/main/docs/img/milo-readme-banner.webp" width="960" alt="Milo: review agent edits in your terminal. A live Git file tree, diffs, commit history and usage limits on macOS, Linux and Windows, with or without Rex.">
   </a>
 </p>
 
@@ -18,6 +18,8 @@ Source: https://github.com/mcc0x/milo/blob/main/README.md
   <a href="https://github.com/mcc0x/milo/blob/main/Cargo.toml"><img alt="Core CLI: 1 direct dependency" src="https://img.shields.io/badge/core%20CLI-1%20dependency-4178a6"></a>
   <a href="https://github.com/mcc0x/milo/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4178a6"></a>
 </p>
+
+Review agent edits in your terminal: a live Git file tree, diffs, commit history and usage limits. Milo runs on Apple Silicon macOS, Linux x86-64 and native Windows x64, on its own or inside [Rex](https://www.superlogical.com/rex). Saved pane layouts, alert forwarding and Discord presence need a supported Rex session.
 
 ## Install
 
@@ -29,7 +31,7 @@ The [v0.1.9 release](https://github.com/mcc0x/milo/releases/tag/v0.1.9) has stan
 | Linux x86-64, glibc 2.35 or later | [Linux binary and shell installer](https://github.com/mcc0x/milo/blob/main/docs/setup.md#linux) |
 | Native Windows x64 | [Windows executable and PowerShell installer](https://github.com/mcc0x/milo/blob/main/docs/setup.md#windows) |
 
-The installers verify the binary against a pinned SHA-256 checksum. See [setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md#install) for verification, upgrades, uninstalling and source builds, or [Homebrew troubleshooting](https://github.com/mcc0x/milo/blob/main/docs/setup.md#when-homebrew-and-milo-disagree) if your shell still runs an old copy.
+The installers verify the binary against a pinned SHA-256 checksum. The same steps are on the [install page](https://usemilo.net/install/). See [setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md#install) for verification, upgrades, uninstalling and source builds, or [Homebrew troubleshooting](https://github.com/mcc0x/milo/blob/main/docs/setup.md#when-homebrew-and-milo-disagree) if your shell still runs an old copy.
 
 Linux and Windows are released for standalone use. The Rex column below describes what Milo adds in a supported Rex session, not new Rex support on Linux or Windows. The menu bar app and Finder actions are macOS-only. See [Reader media support](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reading-pictures-video-and-markdown) and the [local browser fallback](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor) for platform differences.
 
