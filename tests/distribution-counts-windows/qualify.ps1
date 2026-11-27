@@ -114,23 +114,27 @@ try {
 
     $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore)
     if ($profiles.Count -ne 3 -or @($profiles | Where-Object { $_.Enabled -ne $true }).Count) { throw 'Expected all three Windows Firewall profiles enabled' }
+    $loopback = @(Get-NetIPAddress -IPAddress '127.0.0.1' | Select-Object -ExpandProperty InterfaceIndex -Unique)
+    if ($loopback.Count -ne 1) { throw 'Expected a single IPv4 loopback interface.' }
+    $nonLoopback = @(Get-NetIPInterface | Where-Object InterfaceIndex -ne $loopback[0])
+    $aliases = @($nonLoopback | Select-Object -ExpandProperty InterfaceAlias -Unique)
+    if (!$aliases.Count -or @($aliases | Where-Object { !$_ -or $_ -match '[*?]' }).Count) { throw 'Could not enumerate concrete non-loopback interfaces.' }
+    foreach ($route in Get-NetRoute -PolicyStore ActiveStore | Where-Object DestinationPrefix -in @('0.0.0.0/0','::/0')) {
+        if ($route.InterfaceIndex -notin $nonLoopback.InterfaceIndex) { throw 'A default route is outside the isolated interfaces.' }
+    }
     foreach ($program in @($curl, (Join-Path $work 'installed\milo.exe'))) {
-        foreach ($rule in @(@{ label='nonloop-v4'; addresses=@('0.0.0.0-126.255.255.255','128.0.0.0/1') },
-                           @{ label='all-v6'; addresses=@('::/0') })) {
-            $ruleName = "$name-$([IO.Path]::GetFileNameWithoutExtension($program))-$($rule.label)"
-            $firewall.Add($ruleName)
-            $ruleParams = @{
-                Name = $ruleName; DisplayName = $ruleName; Profile = 'Any'; Enabled = 'True'
-                Direction = 'Outbound'; Action = 'Block'; Program = $program; RemoteAddress = $rule.addresses
-            }
-            New-NetFirewallRule @ruleParams | Out-Null
-            $active = Get-NetFirewallRule -Name $ruleName -PolicyStore ActiveStore
-            if ($active.Enabled -ne 'True' -or $active.Action -ne 'Block' -or $active.Direction -ne 'Outbound') { throw "Inactive denial: $ruleName" }
-            if (($active | Get-NetFirewallApplicationFilter).Program -ine $program) { throw "Wrong egress path: $ruleName" }
-            $denied = @($active | Get-NetFirewallAddressFilter | Select-Object -ExpandProperty RemoteAddress |
-                ForEach-Object { $_ -replace '^128\.0\.0\.0/128\.0\.0\.0$', '128.0.0.0/1' })
-            if (Compare-Object @($rule.addresses) $denied) { throw "Wrong egress range: $ruleName" }
+        $ruleName = "$name-$([IO.Path]::GetFileNameWithoutExtension($program))-nonloopback"
+        $firewall.Add($ruleName)
+        $ruleParams = @{
+            Name = $ruleName; DisplayName = $ruleName; Profile = 'Any'; Enabled = 'True'
+            Direction = 'Outbound'; Action = 'Block'; Program = $program; InterfaceAlias = $aliases
         }
+        New-NetFirewallRule @ruleParams | Out-Null
+        $active = Get-NetFirewallRule -Name $ruleName -PolicyStore ActiveStore
+        if ($active.Enabled -ne 'True' -or $active.Action -ne 'Block' -or $active.Direction -ne 'Outbound') { throw "Inactive denial: $ruleName" }
+        if (($active | Get-NetFirewallApplicationFilter).Program -ine $program) { throw "Wrong egress path: $ruleName" }
+        $denied = @($active | Get-NetFirewallInterfaceFilter | Select-Object -ExpandProperty InterfaceAlias)
+        if (Compare-Object $aliases $denied) { throw "Wrong denied interfaces: $ruleName" }
     }
 
     $hostsChanged = $true
