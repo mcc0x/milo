@@ -20,9 +20,44 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: >-
+    ${{ format('{0}-{1}', github.workflow,
+        github.event_name == 'pull_request' && github.run_attempt == 1 && github.base_ref == 'main'
+        && !startsWith(github.head_ref, 'release/') && !startsWith(github.head_ref, 'qa/') && !startsWith(github.head_ref, 'qualify/')
+        && format('pr-{0}', github.event.pull_request.number) || github.run_id) }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' && github.run_attempt == 1 && github.base_ref == 'main'
+        && !startsWith(github.head_ref, 'release/') && !startsWith(github.head_ref, 'qa/') && !startsWith(github.head_ref, 'qualify/') }}
+
 jobs:
+  impact:
+    name: Select Windows PR checks
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      windows: ${{ steps.pr.outputs.windows }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          filter: blob:none
+      - id: pr
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 .github/ci/pr_impact.py "$BASE_REF" "$HEAD_REF" "$BASE" "$HEAD" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
   native:
     name: Native Windows x86-64 tests
+    needs: impact
+    if: ${{ !cancelled() && (needs.impact.result != 'success' || needs.impact.outputs.windows != 'false') }}
     runs-on: windows-2025
     timeout-minutes: 60
     env:

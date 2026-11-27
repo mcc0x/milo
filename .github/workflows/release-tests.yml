@@ -18,35 +18,68 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: >-
+    ${{ format('{0}-{1}', github.workflow,
+        github.event_name == 'pull_request' && github.run_attempt == 1 && github.base_ref == 'main'
+        && !startsWith(github.head_ref, 'release/') && !startsWith(github.head_ref, 'qa/') && !startsWith(github.head_ref, 'qualify/')
+        && format('pr-{0}', github.event.pull_request.number) || github.run_id) }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' && github.run_attempt == 1 && github.base_ref == 'main'
+        && !startsWith(github.head_ref, 'release/') && !startsWith(github.head_ref, 'qa/') && !startsWith(github.head_ref, 'qualify/') }}
+
 env:
   MILO_COUNTS_ENDPOINT: ''
   MILO_TELEMETRY: '0'
 
 jobs:
-  macos-changes:
-    name: Decide whether macOS tests are needed
+  impact:
+    name: Select CI checks
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
-      needed: ${{ steps.changes.outputs.needed }}
+      portable: ${{ steps.pr.outputs.portable }}
+      linux: ${{ steps.pr.outputs.linux }}
+      macos: ${{ steps.pr.outputs.macos || steps.main.outputs.macos }}
+      counts: ${{ steps.pr.outputs.counts }}
+      dashboard: ${{ steps.pr.outputs.dashboard }}
+      website: ${{ steps.pr.outputs.website }}
+      rex: ${{ steps.pr.outputs.rex }}
     steps:
       - name: Require sealed release prep for distribution counts
         if: inputs.distribution_counts && (!startsWith(github.ref, 'refs/heads/release/prepare-') || inputs.recipient == '')
         run: exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name != 'workflow_dispatch'
         with:
           persist-credentials: false
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'push' && '0' || '2' }}
           filter: blob:none
-      - id: changes
+      - name: Test the PR routing policy
+        if: github.event_name == 'pull_request'
+        run: python3 -B -m unittest discover -s .github/ci -p test_pr_impact.py
+      - id: pr
+        if: github.event_name == 'pull_request'
         env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          needed=$(python3 .github/ci/macos-needed.py "$GITHUB_EVENT_NAME" "$BASE" "$HEAD")
-          echo "needed=$needed" >> "$GITHUB_OUTPUT"
+          python3 .github/ci/pr_impact.py "$BASE_REF" "$HEAD_REF" "$BASE" "$HEAD" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+      - id: main
+        if: github.event_name == 'push'
+        env:
+          BASE: ${{ github.event.before }}
+        run: |
+          needed=$(python3 .github/ci/macos-needed.py "$GITHUB_EVENT_NAME" "$BASE" "$GITHUB_SHA")
+          echo "macos=$needed" >> "$GITHUB_OUTPUT"
 
   portable:
     name: Linux tests on minimum Rust
+    needs: impact
+    if: ${{ !cancelled() && (needs.impact.result != 'success' || needs.impact.outputs.portable != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -68,7 +101,10 @@ jobs:
 
   linux-candidate:
     name: Standalone Linux x86-64 release candidate
-    needs: macos-changes
+    needs: impact
+    if: >-
+      ${{ !cancelled() && (!inputs.distribution_counts || needs.impact.result == 'success')
+          && (needs.impact.result != 'success' || needs.impact.outputs.linux != 'false') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -108,6 +144,8 @@ jobs:
 
   anonymous-counts:
     name: Anonymous counts with disposable Postgres
+    needs: impact
+    if: ${{ !cancelled() && (needs.impact.result != 'success' || needs.impact.outputs.counts != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -148,6 +186,8 @@ jobs:
 
   dashboard:
     name: Dashboard production export
+    needs: impact
+    if: ${{ !cancelled() && (needs.impact.result != 'success' || needs.impact.outputs.dashboard != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -183,6 +223,8 @@ jobs:
 
   website:
     name: Website production build
+    needs: impact
+    if: ${{ !cancelled() && (needs.impact.result != 'success' || needs.impact.outputs.website != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -204,6 +246,8 @@ jobs:
 
   rex-fixtures:
     name: Rex Lua 5.1 fixtures
+    needs: impact
+    if: ${{ !cancelled() && (needs.impact.result != 'success' || needs.impact.outputs.rex != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -213,10 +257,16 @@ jobs:
       - run: cargo test --locked --bin milo setup::layout::tests::rex_lua_fixtures -- --ignored --exact
 
   test:
-    needs: macos-changes
+    needs: impact
     # Never satisfy the tag ruleset's check name with a skipped job.
-    name: ${{ needs.macos-changes.outputs.needed == 'false' && 'macOS not needed for these paths' || 'Apple Silicon release tests' }}
-    if: ${{ !cancelled() && (!inputs.distribution_counts || needs.macos-changes.result == 'success') && (needs.macos-changes.result != 'success' || needs.macos-changes.outputs.needed != 'false') }}
+    name: >-
+      ${{ github.event_name == 'pull_request' && 'Apple Silicon PR tests'
+          || needs.impact.result == 'success' && needs.impact.outputs.macos == 'false' && 'macOS not needed for these paths'
+          || inputs.distribution_counts && needs.impact.result != 'success' && 'Release preparation rejected'
+          || 'Apple Silicon release tests' }}
+    if: >-
+      ${{ !cancelled() && (!inputs.distribution_counts || needs.impact.result == 'success')
+          && (needs.impact.result != 'success' || needs.impact.outputs.macos != 'false') }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
