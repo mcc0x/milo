@@ -6,7 +6,7 @@ Keep changes small and make milo simpler, faster or more correct.
 
 You need Rust 1.91 or later, git, and a terminal.
 
-CI checks every target and runs the portable test suite on Linux with Rust 1.91.0 and SQLite installed. Keep the Apple Silicon job too: filesystem notifications, terminal images and the packaged browser editor have platform-specific behavior.
+CI runs portable tests on Linux with Rust 1.91.0 and SQLite, Apple Silicon tests for platform-specific behavior, and a native x64 Windows workflow. Test platform-sensitive changes on the affected target; a cross-build or a passing Linux suite does not exercise the Windows console, installer or file APIs.
 
 Set `fork_url` to the URL of a fork you can access, then run:
 
@@ -20,6 +20,8 @@ cargo build --release
 ./target/release/milo view src/main.rs
 ```
 
+On native Windows, use an MSVC Rust toolchain and run `.\target\release\milo.exe outline` in Windows Terminal after the Cargo build. Rex and menu bar features require a supported environment.
+
 ## Before you open a pull request
 
 Run these checks:
@@ -31,7 +33,7 @@ cargo fmt -- --check               # no diff; the settings are in rustfmt.toml
 cargo test                         # everything passes
 ```
 
-After changing `install.sh`, also run `sh tests/install.sh`; `cargo test` does not run it.
+After changing the source or macOS installer, also run `sh tests/install.sh`; for Linux run `sh tests/linux-install.sh`. On Windows, use the installer fixture in the [Windows workflow](.github/workflows/windows.yml) in a disposable user profile. `cargo test` alone does not exercise the installers.
 
 Then run the program and look at what you changed. Text checks cannot tell you whether a pane looks right.
 
@@ -57,7 +59,9 @@ Nothing adds these for you, except that Dependabot labels its own pull requests.
 
 Push the release commit to `main`, then wait for **Apple Silicon release tests** to pass on that exact commit before creating its tag. On an arm64 macOS runner, GitHub Actions runs `sh tests/install.sh` and `cargo test --release --locked`, then drives the browser editor of a release build in Chromium with `tests/web-smoke.cjs`. GitHub requires that check for tag creation and updates, including when a release creates its tag through the web UI. If releasing from another branch, run **Release tests** on that branch from the Actions tab first.
 
-On pushes and pull requests, website-, docs-, relay- and Railway-only changes skip the macOS runner. Shared inputs such as the menu icon, lockup, release installer and relay text fixture still trigger it. Unknown paths and incomplete diffs default to a full run. If the commit you want to tag skipped macOS, dispatch **Release tests** on its branch and verify the run SHA before tagging. A skipped job does not use the tag ruleset’s required check name.
+The tag check is a minimum, not release qualification. For each published target, follow [release packaging](docs/release-packaging.md) for the exact versioned commit and bytes. Qualify reporting-enabled packages separately if the release is approved to report.
+
+CI selects checks based on changed paths. Shared inputs such as the menu icon, lockup, release installer and relay text fixture still trigger Mac coverage; unknown paths and incomplete diffs default to a full run. If the commit you want to tag skipped macOS, dispatch **Release tests** on its branch and verify the run SHA before tagging. A skipped job does not use the tag ruleset’s required check name.
 
 ## What a good change looks like
 

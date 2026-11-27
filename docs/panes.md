@@ -1,6 +1,6 @@
 # Using the panes
 
-Use a UTF-8, xterm-compatible terminal that supports cursor positioning and an alternate screen. Both input and output must be terminals. Hardware VTs and the Linux text console are not supported; a non-`dumb` `TERM` alone does not establish compatibility. With redirected output, `TERM=dumb` or `TERM=linux`, use `milo doctor`, `milo COMMAND --help` or another text command instead. You do not need Rex or a particular shell.
+Use a UTF-8, xterm-compatible terminal that supports cursor positioning and an alternate screen, or Windows Terminal on native Windows. Both input and output must be terminals. Hardware VTs and the Linux text console are not supported; a non-`dumb` `TERM` alone does not establish compatibility. With redirected output, `TERM=dumb` or `TERM=linux`, use `milo doctor`, `milo COMMAND --help` or another text command instead. Standalone panes do not need Rex or a particular shell.
 
 Outline and History start in the current directory unless you give them a path. Inside a Git repository they use its root, even when you start in a subfolder. In a plain folder, Outline shows just the files and History says it is not a Git project. To outline a directory named like a command, give its path explicitly: `milo ./history`.
 
@@ -26,7 +26,7 @@ If shell tracking itself stops, the notice changes to **Shell tracking unavailab
 
 In narrow History, the wrapped subject uses only the room below a clicked row, so the row stays under the pointer. In a two-row pane, expanding a commit uses the second row for its first file or an empty-commit note. Collapse it to see the subject again.
 
-The outline and history update on their own. While Git checks the project, the panes keep showing the last result and responding to keys. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](keys.md) for colours and symbols.
+The outline and history update on their own. While Git checks the project, the panes keep showing the last result and responding to keys. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux and Windows, Milo checks about every two seconds. See [keys and marks](keys.md) for colours and symbols.
 
 In a plain folder, Outline lists the top level and the folders you expand. A partial-listing warning means Milo reached the 50,000-entry limit or couldn't read every entry. In both plain folders and Git worktrees, Outline warns and omits names that aren't valid UTF-8 rather than showing a name that could open a different file.
 
@@ -432,18 +432,19 @@ The pane shows `Formatting with NAME…` and does not redraw until the formatter
 
 Open a working file from Outline with `Enter` or a double-click. The preview is the file's Reader tab, not a browser, dev server or external player. `milo view FILE` uses the same path. History, `--commit` and handed-over patches still show the source/diff or a binary-file note; they never substitute today's file for the requested revision.
 
-| Working file | macOS | Linux |
-| --- | --- | --- |
-| PNG | Kitty bitmap where available; terminal cells otherwise | Kitty bitmap only; PNG must fit the 1,600-pixel side limit without resizing |
-| JPEG, static WebP | Same as PNG, using the system image decoder | No conversion |
-| MP4 | FFmpeg and FFprobe 8.0+ with `fd:` and `scale=…:reset_sar=1`, installed together in `/opt/homebrew/bin` or `/usr/local/bin` | Same tool capabilities, installed together in `/usr/bin` |
-| `.md`, `.markdown` | Rendered terminal text; `m` for source or diff, `e` to edit | Same |
+| Working file | macOS | Linux | Native Windows |
+| --- | --- | --- | --- |
+| PNG | Kitty bitmap where available; terminal cells otherwise | Kitty bitmap only; PNG must fit the 1,600-pixel side limit without resizing | Kitty bitmap for PNGs within the size limit; terminal cells otherwise |
+| JPEG | Same as PNG, using the system image decoder | No conversion | Terminal cells using Windows Imaging Component |
+| Static WebP | Same as PNG | No conversion | Not supported |
+| MP4 | FFmpeg and FFprobe 8.0+ with `fd:` and `scale=…:reset_sar=1`, installed together in `/opt/homebrew/bin` or `/usr/local/bin` | Same tool capabilities, installed together in `/usr/bin` | No playback |
+| `.md`, `.markdown` | Rendered terminal text; `m` for source or diff, `e` to edit | Same | Same; no external Rex Markdown preview |
 
 Milo asks recognized graphics terminals whether they support Kitty images. It sends a bitmap only after a positive reply. For an unrecognized terminal that supports the protocol, try `MILO_GRAPHICS=kitty milo view FILE`; `MILO_GRAPHICS=off` disables the query. Neither setting enables passthrough in a detected tmux or screen session. With a decoded image but fewer than 256 colours, Milo uses monochrome cells instead. A shell name or a `TERM` value alone is not proof that an emulator displayed an image.
 
 **Pictures.** The image keeps its proportions and fits between the filename and the key hints. Input is limited to 64 MiB. The macOS decoder checks the format and dimensions, caps source images at 40 million pixels and 16,384 pixels per side, and has a five-second deadline. The Kitty bitmap is at most 1,600 pixels per side and 16 MiB; the cell raster is at most 512 pixels per side. Text named like a picture can still be read as text. Active documents such as SVG and PDF aren't rasterized.
 
-Single-image GIF, BMP without linked profiles, and single-page TIFF without nested image directories are also recognized on macOS. Animated GIF/WebP, multi-page TIFF, HEIC/HEIF, PSD, ICO/ICNS, SVG and PDF aren't passed to a general-purpose converter.
+Single-image GIF, BMP without linked profiles, and single-page TIFF without nested image directories are also recognized on macOS and Windows. Windows displays these as terminal cells. Animated GIF/WebP, multi-page TIFF, HEIC/HEIF, PSD, ICO/ICNS, SVG and PDF aren't passed to a general-purpose converter.
 
 **Video.** Opens paused. `Space` plays or pauses; `←` / `→` seek five seconds in either direction. Leaving the tab or opening help pauses playback. The Reader never opens an audio device. It streams scaled frames (up to 320 × 240 at 12 fps) as colored terminal cells. Only standalone MP4 with a local H.264, HEVC or MPEG-4 Part 2 video track is accepted, up to 128 MiB and one hour. The track header must fit 8,192 pixels per side; decoding is limited to 9.5 million pixels per frame. External tracks aren't followed. Milo looks for an already-installed decoder, never installs one, and gives a reason when it can't play a file.
 

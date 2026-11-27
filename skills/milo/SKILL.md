@@ -8,13 +8,17 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 ## Check first
 
 - Run `command -v milo` and `milo --version` in the environment where the pane
-  will run. A version confirms the binary is available, not that Rex is set up.
+  will run. In PowerShell use `Get-Command milo` to find it. A version confirms
+  the binary is available, not that Rex is set up.
 - Run `milo doctor` to see effective preferences, integration health and
-  usage sources without changing anything. `rex actions` (without `-C` or
-  `REX_CLIENT`) lists server actions such as `milo_layout`.
-- Standalone Home and the rich previews below require v0.1.7 or later. On an
-  older install, use a direct pane command and check its `--help`. Reader tab
-  sets, review notes, file lookup from Rex output and agent tasks require v0.1.8 or later.
+  usage sources without changing anything. In a supported Rex session,
+  `rex actions` (without `-C` or `REX_CLIENT`) lists server actions such as
+  `milo_layout`.
+- See [installation and platform limits](../../docs/setup.md#install) for v0.1.9.
+  The Linux and native Windows releases are for standalone use; use local pane
+  commands, not Rex actions, on these targets. Check the installed binary’s
+  `--help` on an older release. For the reporting default and opt-out, see
+  [anonymous usage counts](../../docs/setup.md#anonymous-usage-counts).
 - Open `milo setup` for interactive configuration. Trying a layout is not
   permission to save it. Distinguish the global default from the override for
   this Git worktree. `milo_remember_layout` captures an explicitly chosen rail;
@@ -53,7 +57,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo setup --skip-onboarding` | Dismisses the first-run guide and exits without a TUI or installation changes. |
 | `milo outline [PATH]` | Shows a live file tree with changes to commit or push. |
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
-| `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
+| `milo usage` | Shows available local usage figures from Codex, Claude Code, oh-my-pi and OpenCode. See [Usage](../../docs/usage.md) for local and opt-in online sources. |
 | `milo view FILE [--commit ID \| --edit \| --line LINE[:COLUMN]]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. `--line` opens a working file at that line. |
 | `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. |
 | `milo tabs [--last]` | Lists the reader tabs remembered for this worktree: the last tabs and the user's named sets. The user previews a list and chooses what reopens; in a reader, `Ctrl-T` shows the same lists and saves a set. It needs a terminal, and has no option that reopens or saves anything unattended. |
@@ -89,11 +93,12 @@ The user can press `n` or `N` to move between changed blocks and `q` or `Esc`
 to close the reader. In Rex, opening a file from the outline or history also
 opens a floating reader.
 
-Working images, supported MP4s and Markdown open in the Reader. `m` switches
-Markdown between preview and source/diff. Videos start paused; `Space` plays
-or pauses without audio, and Left/Right seek five seconds. Decoder and terminal
-support vary. Committed versions still show source/diffs or a binary-file
-note, never today's working file.
+Working images and Markdown open in Reader; see the [platform media
+matrix](../../docs/panes.md#reading-pictures-video-and-markdown) for supported
+formats and terminals. `m` switches Markdown between preview and source/diff.
+Supported MP4s on macOS and Linux start paused; `Space` plays or pauses without
+audio, and Left/Right seek five seconds. Committed versions still show
+source/diffs or a binary-file note, never today’s working file.
 
 The reader does not change a file unless the user edits and saves it. `e`
 starts an edit of a working text file, `Ctrl-S` saves, `Ctrl-F` formats the
